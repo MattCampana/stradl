@@ -85,13 +85,26 @@ func (s *Syncer) roots() []*syncRoot {
 		dir:   s.claudeDir,
 		paths: s.syncPaths(),
 		include: func(rel string) bool {
-			return !strings.Contains(rel, ".conflict.") && !s.isExcluded(rel)
+			return !strings.Contains(rel, ".conflict.") && !isDeviceLocalMarker(rel) && !s.isExcluded(rel)
 		},
 	}}
 	if dir := s.cfg.EffectiveDesktopDir(); dir != "" && dirExists(dir) {
 		roots = append(roots, &syncRoot{dir: dir, prefix: DesktopPrefix, paths: []string{"."}, include: isDesktopRecord})
 	}
 	return roots
+}
+
+// desktopReleasedSuffix marks a transcript the desktop app released after the
+// user deleted or archived its session there. Claude Code's retention sweep
+// treats it as "this device may now delete the transcript", so it must stay
+// on the device that wrote it: synced, a delete on one Mac would expire the
+// session on every Mac.
+const desktopReleasedSuffix = ".desktop-released.json"
+
+// isDeviceLocalMarker reports files under ~/.claude that describe this
+// device's own decisions and must never be synced.
+func isDeviceLocalMarker(rel string) bool {
+	return strings.HasSuffix(rel, desktopReleasedSuffix)
 }
 
 func (s *Syncer) rootFor(roots []*syncRoot, npath string) (*syncRoot, string) {

@@ -18,7 +18,7 @@ title: How It Works
 | `~/.claude/plans`, `~/.claude/tasks` | same | Plan files and task lists sessions refer to |
 | `~/Library/Application Support/Claude/claude-code-sessions/<account>/<org>/local_*.json` | `_desktop/sessions/…` | The Claude desktop app's Code-tab sidebar entries |
 
-Everything else stays on the Mac: credentials, `~/.claude.json`, settings, plugins, running-process records, and the desktop app's private state (tombstones, indexes, scheduled tasks). Every file is gzip-compressed and age-encrypted before upload, and stored as `<path>.age`.
+Everything else stays on the Mac: credentials, `~/.claude.json`, settings, plugins, running-process records, the desktop app's private state (tombstones, indexes, scheduled tasks), and `*.desktop-released.json` markers. The desktop app writes one of those next to a transcript when you delete or archive the session, and it tells that Mac's Claude Code it may expire the transcript; synced, it would expire the session on every Mac. Every file is gzip-compressed and age-encrypted before upload, and stored as `<path>.age`.
 
 ## The sync pass
 

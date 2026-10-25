@@ -558,6 +558,23 @@ func TestSyncDesktopRecords(t *testing.T) {
 	}
 }
 
+func TestSyncKeepsDesktopReleaseMarkersLocal(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	a.writeSession("proj", "s1", a.line("proj", "u1", "", time.Now(), "x"))
+	marker := filepath.Join(a.projectDir("proj"), "s1.desktop-released.json")
+	if err := os.WriteFile(marker, []byte(`{"reason":"delete"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.sync()
+	for _, k := range store.keys() {
+		if strings.Contains(k, "desktop-released") {
+			t.Fatalf("release marker uploaded: %s", k)
+		}
+	}
+}
+
 func TestMergeJSONL(t *testing.T) {
 	l := func(uuid string, min int) string {
 		return fmt.Sprintf(`{"uuid":%q,"timestamp":"2026-10-25T10:%02d:00Z"}`, uuid, min)

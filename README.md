@@ -110,7 +110,7 @@ Remote changes are detected by version tags, not timestamps, so a Mac with a wro
 
 - **macOS only** for the menu bar app. Linux builds run the same sync engine headless (`stradl agent run --headless`).
 - **A project you haven't cloned on a Mac** can't be opened there; the session still syncs, and the Claude app tells you the folder is missing. Clone the repo anywhere under your home folder and Stradl will find it.
-- **Claude Code deletes transcripts older than 30 days** by default (`cleanupPeriodDays`). Raise it in `~/.claude/settings.json` on every Mac to keep old sessions everywhere.
+- **Terminal sessions expire after 30 days of inactivity** under Claude Code's default `cleanupPeriodDays`, on every Mac. Sessions started in the Claude desktop app are exempt by default, and the exemption travels with the transcript. To keep terminal sessions longer, raise `cleanupPeriodDays` in `~/.claude/settings.json` on each Mac.
 - The binaries aren't notarized by Apple. The curl installer doesn't trigger Gatekeeper; a browser download would.
 
 ## Building from source
