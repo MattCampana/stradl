@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -14,7 +15,15 @@ const (
 	ProviderS3     Provider = "s3"
 	ProviderGCS    Provider = "gcs"
 	ProviderWebDAV Provider = "webdav"
+	ProviderAzure  Provider = "azure"
 )
+
+// ErrNotFound is returned (wrapped) when an object does not exist.
+var ErrNotFound = errors.New("object not found")
+
+// ErrPreconditionFailed is returned (wrapped) by Conditional.UploadIf when the
+// remote object changed since the caller last saw it.
+var ErrPreconditionFailed = errors.New("remote object changed (precondition failed)")
 
 // MaxDownloadSize is the maximum allowed size for a single downloaded object (100MB).
 // This prevents memory exhaustion from oversized or malicious remote files.
@@ -52,6 +61,22 @@ type Storage interface {
 	BucketExists(ctx context.Context) (bool, error)
 }
 
+// Conditional is implemented by backends that support compare-and-swap
+// writes. Several devices sync into one bucket, so an unconditional write can
+// silently replace a version another device uploaded a moment earlier; with
+// UploadIf the loser of that race gets ErrPreconditionFailed, merges, and
+// retries instead.
+type Conditional interface {
+	// UploadIf stores data only if the object's current ETag equals ifMatch.
+	// An empty ifMatch means the object must not exist yet. It returns the
+	// new ETag, or an error wrapping ErrPreconditionFailed.
+	UploadIf(ctx context.Context, key string, data []byte, ifMatch string) (string, error)
+
+	// DownloadWithETag retrieves data together with the ETag of exactly the
+	// version that was read, or an error wrapping ErrNotFound.
+	DownloadWithETag(ctx context.Context, key string) ([]byte, string, error)
+}
+
 // New creates a new Storage instance based on the provided configuration
 func New(cfg *StorageConfig) (Storage, error) {
 	if err := cfg.Validate(); err != nil {
@@ -67,6 +92,8 @@ func New(cfg *StorageConfig) (Storage, error) {
 		return NewGCS(cfg)
 	case ProviderWebDAV:
 		return NewWebDAV(cfg)
+	case ProviderAzure:
+		return NewAzure(cfg)
 	default:
 		return nil, fmt.Errorf("unsupported storage provider: %s", cfg.Provider)
 	}
@@ -83,3 +110,6 @@ var NewGCS func(cfg *StorageConfig) (Storage, error)
 
 // NewWebDAV creates a new WebDAV storage adapter (implemented in webdav/webdav.go)
 var NewWebDAV func(cfg *StorageConfig) (Storage, error)
+
+// NewAzure creates a new Azure Blob Storage adapter (implemented in azure/azure.go)
+var NewAzure func(cfg *StorageConfig) (Storage, error)

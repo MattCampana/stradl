@@ -82,6 +82,13 @@ type StorageConfig struct {
 	WebDAVUsername string `yaml:"webdav_username,omitempty"`
 	WebDAVPassword string `yaml:"webdav_password,omitempty"`
 	PathPrefix     string `yaml:"path_prefix,omitempty"`
+
+	// Azure-specific. Bucket holds the container name. Authenticate with a
+	// container SAS token (preferred: scoped to one container and revocable
+	// through its stored access policy) or the account key.
+	AzureAccount    string `yaml:"azure_account,omitempty"`
+	AzureSASToken   string `yaml:"azure_sas_token,omitempty"`
+	AzureAccountKey string `yaml:"azure_account_key,omitempty"`
 }
 
 // Validate checks if the configuration is valid for the selected provider
@@ -99,6 +106,8 @@ func (c *StorageConfig) Validate() error {
 		return c.validateGCS()
 	case ProviderWebDAV:
 		return c.validateWebDAV()
+	case ProviderAzure:
+		return c.validateAzure()
 	case "":
 		return fmt.Errorf("provider is required")
 	default:
@@ -154,6 +163,34 @@ func (c *StorageConfig) validateWebDAV() error {
 	return nil
 }
 
+// azureAccountPattern matches Azure storage account names: 3-24 lowercase
+// letters and digits.
+var azureAccountPattern = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
+
+// azureContainerPattern matches Azure container names: 3-63 characters of
+// lowercase letters, digits and single hyphens, starting and ending with a
+// letter or digit.
+var azureContainerPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9]|-[a-z0-9]){2,62}$`)
+
+func (c *StorageConfig) validateAzure() error {
+	if c.AzureAccount == "" && c.Endpoint == "" {
+		return fmt.Errorf("azure_account is required for Azure")
+	}
+	if c.AzureAccount != "" && !azureAccountPattern.MatchString(c.AzureAccount) {
+		return fmt.Errorf("azure_account must be 3-24 lowercase letters and digits")
+	}
+	if !azureContainerPattern.MatchString(c.Bucket) || len(c.Bucket) > 63 {
+		return fmt.Errorf("container name must be 3-63 lowercase letters, digits and single hyphens")
+	}
+	if c.AzureSASToken == "" && c.AzureAccountKey == "" {
+		return fmt.Errorf("azure_sas_token or azure_account_key is required for Azure")
+	}
+	if c.AzureSASToken != "" && c.AzureAccountKey != "" {
+		return fmt.Errorf("set only one of azure_sas_token and azure_account_key")
+	}
+	return nil
+}
+
 // GetEndpoint returns the endpoint URL for the storage provider
 func (c *StorageConfig) GetEndpoint() string {
 	if c.Endpoint != "" {
@@ -168,6 +205,10 @@ func (c *StorageConfig) GetEndpoint() string {
 	case ProviderS3:
 		if c.Region != "" {
 			return fmt.Sprintf("https://s3.%s.amazonaws.com", c.Region)
+		}
+	case ProviderAzure:
+		if c.AzureAccount != "" {
+			return fmt.Sprintf("https://%s.blob.core.windows.net", c.AzureAccount)
 		}
 	}
 
