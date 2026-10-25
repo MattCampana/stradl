@@ -2,13 +2,14 @@ package main
 
 import (
 	"testing"
+	"unicode/utf8"
 
 	"github.com/tawanorg/claude-sync/internal/config"
 )
 
-// TestResolveScope covers the non-interactive branches of resolveScope: explicit
-// valid values pass through, and an unrecognized value is rejected. The empty
-// (interactive prompt) case requires a TTY and is exercised manually.
+// TestResolveScope covers resolveScope: explicit valid values pass through,
+// an empty value defaults to sessions (Stradl syncs sessions, not plugins or
+// settings), and an unrecognized value is rejected.
 func TestResolveScope(t *testing.T) {
 	t.Run("valid values pass through unchanged", func(t *testing.T) {
 		for _, in := range []string{config.ScopeFull, config.ScopeSessions} {
@@ -22,9 +23,33 @@ func TestResolveScope(t *testing.T) {
 		}
 	})
 
+	t.Run("empty defaults to sessions without prompting", func(t *testing.T) {
+		got, err := resolveScope("")
+		if err != nil || got != config.ScopeSessions {
+			t.Errorf("resolveScope(\"\") = %q, %v; want %q", got, err, config.ScopeSessions)
+		}
+	})
+
 	t.Run("unrecognized value is rejected", func(t *testing.T) {
 		if _, err := resolveScope("bogus"); err == nil {
 			t.Error("resolveScope(\"bogus\") expected an error, got nil")
 		}
 	})
+}
+
+// TestStradlLogoRowsAligned guards the banner wordmark against a stray
+// character knocking one row out of line with the others.
+func TestStradlLogoRowsAligned(t *testing.T) {
+	if len(stradlLogo) == 0 {
+		t.Fatal("empty logo")
+	}
+	width := utf8.RuneCountInString(stradlLogo[0])
+	for i, row := range stradlLogo {
+		if n := utf8.RuneCountInString(row); n != width {
+			t.Errorf("logo row %d is %d columns wide, want %d", i, n, width)
+		}
+	}
+	if len(logoGradient) < len(stradlLogo) {
+		t.Errorf("gradient has %d colors for %d rows", len(logoGradient), len(stradlLogo))
+	}
 }

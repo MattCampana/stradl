@@ -3,16 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -55,12 +50,37 @@ const (
 	colorYellow = "\033[33m"
 )
 
+// tagline is Stradl's one-line pitch, shown under the banner.
+const tagline = "Musical chairs for your sessions."
+
+// upstreamAttribution credits the project Stradl is built on.
+const upstreamAttribution = "Built on tawanorg/claude-sync (MIT)"
+
 func main() {
 	rootCmd := &cobra.Command{
-		Use:     "claude-sync",
-		Short:   "Sync Claude Code sessions across devices",
-		Long:    `A CLI tool to sync your ~/.claude directory across devices using cloud storage with encryption.`,
+		Use:   "stradl",
+		Short: "Musical chairs for your Claude Code sessions",
+		Long: `Stradl keeps your Claude Code sessions in sync across all of your Macs, even
+when each one has a different username. Get up from one Mac, sit down at
+another, and pick up the same conversation.
+
+Sessions are compressed and encrypted on your Mac with age before they are
+uploaded to cloud storage you own (Azure Blob Storage, Cloudflare R2, Amazon
+S3, Google Cloud Storage, any S3-compatible service, or WebDAV), so your
+storage provider only ever sees ciphertext.
+
+Get started:
+  stradl init             connect your storage and set up encryption
+  stradl sync             two-way sync with your other Macs
+  stradl agent install    keep this Mac in sync in the background
+
+` + upstreamAttribution + `.`,
 		Version: version,
+		// Flags parsed fine by the time this runs, so a later error is a
+		// runtime failure: print it without the usage text.
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			cmd.SilenceUsage = true
+		},
 	}
 
 	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "Suppress output")
@@ -90,23 +110,41 @@ func main() {
 	}
 }
 
+// stradlLogo is the STRADL wordmark in block letters. Every row is the same
+// width so the per-row gradient lines up.
+var stradlLogo = []string{
+	"███████╗████████╗██████╗  █████╗ ██████╗ ██╗     ",
+	"██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔══██╗██║     ",
+	"███████╗   ██║   ██████╔╝███████║██║  ██║██║     ",
+	"╚════██║   ██║   ██╔══██╗██╔══██║██║  ██║██║     ",
+	"███████║   ██║   ██║  ██║██║  ██║██████╔╝███████╗",
+	"╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝",
+}
+
+// logoGradient colors the logo rows top to bottom, cyan into blue (xterm-256
+// palette indexes).
+var logoGradient = []int{51, 45, 39, 33, 27, 26}
+
 func printBanner() {
 	fmt.Println()
-	fmt.Printf("  %sWelcome to Claude Sync!%s %sv%s%s\n", colorBold, colorReset, colorDim, version, colorReset)
+	shownVersion := "v" + strings.TrimPrefix(version, "v")
+	if version == "dev" {
+		shownVersion = "dev build"
+	}
+	fmt.Printf("  %sWelcome to Stradl%s %s%s%s\n", colorBold, colorReset, colorDim, shownVersion, colorReset)
 	fmt.Println()
 
-	// Block-style ASCII art - CLAUDE SYNC on one line
-	fmt.Printf("%s", colorCyan)
-	fmt.Println("  ██████╗██╗      █████╗ ██╗   ██╗██████╗ ███████╗  ███████╗██╗   ██╗███╗   ██╗ ██████╗")
-	fmt.Println("  ██╔════╝██║     ██╔══██╗██║   ██║██╔══██╗██╔════╝  ██╔════╝╚██╗ ██╔╝████╗  ██║██╔════╝")
-	fmt.Println("  ██║     ██║     ███████║██║   ██║██║  ██║█████╗    ███████╗ ╚████╔╝ ██╔██╗ ██║██║     ")
-	fmt.Println("  ██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝    ╚════██║  ╚██╔╝  ██║╚██╗██║██║     ")
-	fmt.Println("  ╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗  ███████║   ██║   ██║ ╚████║╚██████╗")
-	fmt.Println("   ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝  ╚══════╝   ╚═╝   ╚═╝  ╚═══╝ ╚═════╝")
-	fmt.Printf("%s\n", colorReset)
+	for i, row := range stradlLogo {
+		fmt.Printf("  \033[38;5;%dm%s%s\n", logoGradient[i%len(logoGradient)], row, colorReset)
+	}
+	fmt.Println()
 
-	fmt.Printf("  %sSync your Claude Code sessions across all your devices.%s\n", colorDim, colorReset)
-	fmt.Printf("  %sIssues & PRs welcome: %shttps://github.com/tawanorg/claude-sync%s\n", colorDim, colorCyan, colorReset)
+	fmt.Printf("  %s%s%s\n", colorBold, tagline, colorReset)
+	fmt.Printf("  %sKeep Claude Code sessions in sync across all your Macs, encrypted, in storage you own.%s\n", colorDim, colorReset)
+	if url := projectURL(); url != "" {
+		fmt.Printf("  %sIssues & PRs welcome: %s%s%s\n", colorDim, colorCyan, url, colorReset)
+	}
+	fmt.Printf("  %s%s%s\n", colorDim, upstreamAttribution, colorReset)
 	fmt.Println()
 }
 
@@ -126,44 +164,67 @@ func printWarning(text string) {
 	fmt.Printf("  %s%s%s\n", colorYellow, text, colorReset)
 }
 
+// initOptions collects the init flags.
+type initOptions struct {
+	provider, bucket, scope string
+	usePassphrase, force    bool
+
+	// R2 / S3 / S3-compatible
+	accountID, accessKey, secretKey string
+	s3Region, s3Endpoint            string
+	s3UsePathStyle                  bool
+
+	// GCS
+	gcsProjectID, gcsCredentialsFile string
+
+	// WebDAV
+	webdavURL, webdavUsername, webdavPassword, webdavPathPrefix string
+
+	// Azure (the container comes from --bucket)
+	azure azureOptions
+}
+
+// providerChoice is one entry of the init provider menu.
+type providerChoice struct {
+	id    string
+	label string
+}
+
+// providerChoices is the init provider menu, default first.
+var providerChoices = []providerChoice{
+	{"azure", "Azure Blob Storage (your own Azure subscription)"},
+	{"r2", "Cloudflare R2 (free tier: 10GB)"},
+	{"s3", "Amazon S3"},
+	{"gcs", "Google Cloud Storage"},
+	{"s3-compatible", "S3-compatible (custom endpoint) — Backblaze B2, MinIO, Wasabi, ..."},
+	{"webdav", "WebDAV (Nextcloud, ownCloud, etc. - self-hosted)"},
+}
+
 func initCmd() *cobra.Command {
-	var provider, bucket string
-	var scope string
-	var usePassphrase, force bool
-
-	// R2 flags
-	var accountID, accessKey, secretKey string
-
-	// S3 flags
-	var s3Region string
-
-	// S3-compatible (custom endpoint) flags
-	var s3Endpoint string
-	var s3UsePathStyle bool
-
-	// GCS flags
-	var gcsProjectID, gcsCredentialsFile string
-
-	// WebDAV flags
-	var webdavURL, webdavUsername, webdavPassword, webdavPathPrefix string
+	var opts initOptions
 
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Initialize claude-sync configuration",
+		Short: "Connect your cloud storage and set up encryption",
 		Long: `Set up cloud storage credentials and generate encryption keys.
 
 Supported providers:
+  - azure:         Azure Blob Storage in your own subscription (default)
   - r2:            Cloudflare R2 (S3-compatible, free tier: 10GB)
   - s3:            Amazon S3
   - gcs:           Google Cloud Storage
   - s3-compatible: Any S3-compatible provider via custom endpoint (Backblaze B2, MinIO, Wasabi, ...)
   - webdav:        WebDAV (Nextcloud, ownCloud, etc. - self-hosted)
 
+New setups sync sessions only (conversation history, plans and tasks); pass
+--scope full to also sync settings, plugins, skills and agents.
+
 Examples:
-  claude-sync init                # Full setup wizard
-  claude-sync init --passphrase   # Re-enter passphrase only (keeps storage config)
-  claude-sync init --force        # Reset everything, start fresh
-  claude-sync init --provider s3-compatible --endpoint https://s3.us-west-004.backblazeb2.com   # Backblaze B2`,
+  stradl init                # Full setup wizard
+  stradl init --passphrase   # Re-enter passphrase only (keeps storage config)
+  stradl init --force        # Reset everything, start fresh
+  stradl init --azure-account mystradl   # Azure; prompts for the SAS token (hidden)
+  stradl init --provider s3-compatible --endpoint https://s3.us-west-004.backblazeb2.com   # Backblaze B2`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Show banner
 			printBanner()
@@ -172,45 +233,80 @@ Examples:
 			keyPath := config.AgeKeyFilePath()
 
 			// Special case: --passphrase with existing config = just regenerate key
-			if usePassphrase && config.Exists() && !force {
+			if opts.usePassphrase && config.Exists() && !opts.force {
 				return initPassphraseOnly(ctx, keyPath)
 			}
 
 			// Normal flow: full setup
-			return initFullSetup(ctx, keyPath, provider, bucket, accountID, accessKey, secretKey, s3Region, s3Endpoint, s3UsePathStyle, gcsProjectID, gcsCredentialsFile, webdavURL, webdavUsername, webdavPassword, webdavPathPrefix, scope, usePassphrase, force)
+			return initFullSetup(ctx, keyPath, opts)
 		},
 	}
 
 	// Provider selection
-	cmd.Flags().StringVar(&provider, "provider", "", "Storage provider: r2, s3, gcs, s3-compatible, or webdav")
-	cmd.Flags().StringVar(&scope, "scope", "", "Sync scope: 'full' (default, everything) or 'sessions' (conversation history only)")
-	cmd.Flags().StringVar(&bucket, "bucket", "", "Bucket name")
-	cmd.Flags().BoolVar(&usePassphrase, "passphrase", false, "Derive encryption key from passphrase")
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "Overwrite existing config/key without prompting")
+	cmd.Flags().StringVar(&opts.provider, "provider", "", "Storage provider: azure, r2, s3, gcs, s3-compatible, or webdav")
+	cmd.Flags().StringVar(&opts.scope, "scope", "", "Sync scope: 'sessions' (default, conversation history only) or 'full' (also settings, plugins, skills, agents)")
+	cmd.Flags().StringVar(&opts.bucket, "bucket", "", "Bucket name (the container for Azure, default \""+defaultAzureContainer+"\")")
+	cmd.Flags().BoolVar(&opts.usePassphrase, "passphrase", false, "Derive encryption key from passphrase")
+	cmd.Flags().BoolVarP(&opts.force, "force", "f", false, "Overwrite existing config/key without prompting")
+
+	// Azure flags
+	cmd.Flags().StringVar(&opts.azure.Account, "azure-account", "", "Azure storage account name")
+	cmd.Flags().StringVar(&opts.azure.SASToken, "azure-sas-token", "", "Azure container SAS token (prompted for, hidden, when omitted)")
+	cmd.Flags().StringVar(&opts.azure.AccountKey, "azure-account-key", "", "Azure storage account key (instead of a SAS token)")
 
 	// R2 flags
-	cmd.Flags().StringVar(&accountID, "account-id", "", "Cloudflare Account ID (R2)")
-	cmd.Flags().StringVar(&accessKey, "access-key", "", "Access Key ID (R2/S3)")
-	cmd.Flags().StringVar(&secretKey, "secret-key", "", "Secret Access Key (R2/S3)")
+	cmd.Flags().StringVar(&opts.accountID, "account-id", "", "Cloudflare Account ID (R2)")
+	cmd.Flags().StringVar(&opts.accessKey, "access-key", "", "Access Key ID (R2/S3)")
+	cmd.Flags().StringVar(&opts.secretKey, "secret-key", "", "Secret Access Key (R2/S3)")
 
 	// S3 flags
-	cmd.Flags().StringVar(&s3Region, "region", "", "Region (S3 / S3-compatible)")
+	cmd.Flags().StringVar(&opts.s3Region, "region", "", "Region (S3 / S3-compatible)")
 
 	// S3-compatible flags
-	cmd.Flags().StringVar(&s3Endpoint, "endpoint", "", "Custom S3-compatible endpoint URL (e.g. https://s3.us-west-004.backblazeb2.com)")
-	cmd.Flags().BoolVar(&s3UsePathStyle, "use-path-style", false, "Use path-style URLs (endpoint/bucket/key) for S3-compatible endpoints that don't resolve buckets as subdomains (e.g. Ceph, MinIO)")
+	cmd.Flags().StringVar(&opts.s3Endpoint, "endpoint", "", "Custom S3-compatible endpoint URL (e.g. https://s3.us-west-004.backblazeb2.com)")
+	cmd.Flags().BoolVar(&opts.s3UsePathStyle, "use-path-style", false, "Use path-style URLs (endpoint/bucket/key) for S3-compatible endpoints that don't resolve buckets as subdomains (e.g. Ceph, MinIO)")
 
 	// GCS flags
-	cmd.Flags().StringVar(&gcsProjectID, "project-id", "", "GCP Project ID (GCS)")
-	cmd.Flags().StringVar(&gcsCredentialsFile, "credentials-file", "", "Path to GCS credentials JSON file")
+	cmd.Flags().StringVar(&opts.gcsProjectID, "project-id", "", "GCP Project ID (GCS)")
+	cmd.Flags().StringVar(&opts.gcsCredentialsFile, "credentials-file", "", "Path to GCS credentials JSON file")
 
 	// WebDAV flags
-	cmd.Flags().StringVar(&webdavURL, "webdav-url", "", "WebDAV URL (e.g. https://cloud.example.com/remote.php/dav/files/user/)")
-	cmd.Flags().StringVar(&webdavUsername, "webdav-username", "", "WebDAV username")
-	cmd.Flags().StringVar(&webdavPassword, "webdav-password", "", "WebDAV app password")
-	cmd.Flags().StringVar(&webdavPathPrefix, "webdav-path-prefix", "claude-sync", "WebDAV path prefix (subdirectory)")
+	cmd.Flags().StringVar(&opts.webdavURL, "webdav-url", "", "WebDAV URL (e.g. https://cloud.example.com/remote.php/dav/files/user/)")
+	cmd.Flags().StringVar(&opts.webdavUsername, "webdav-username", "", "WebDAV username")
+	cmd.Flags().StringVar(&opts.webdavPassword, "webdav-password", "", "WebDAV app password")
+	cmd.Flags().StringVar(&opts.webdavPathPrefix, "webdav-path-prefix", "stradl", "WebDAV path prefix (subdirectory)")
 
 	return cmd
+}
+
+// resolveProvider returns the provider to configure: the --provider flag, or
+// "azure" when only Azure flags were given, or the user's pick from the menu
+// (Azure first and default). Without a terminal it can't ask, so it errors.
+func resolveProvider(opts initOptions, interactive bool) (string, error) {
+	if opts.provider != "" {
+		return opts.provider, nil
+	}
+	if opts.azure.hasAny() {
+		return "azure", nil
+	}
+	if !interactive {
+		return "", fmt.Errorf("--provider is required when stdin is not a terminal")
+	}
+
+	labels := make([]string, len(providerChoices))
+	for i, c := range providerChoices {
+		labels[i] = c.label
+	}
+	prompt := &survey.Select{
+		Message: "Choose your cloud storage provider:",
+		Options: labels,
+		Default: labels[0],
+	}
+	var choice int
+	if err := survey.AskOne(prompt, &choice); err != nil {
+		return "", err
+	}
+	return providerChoices[choice].id, nil
 }
 
 // initPassphraseOnly handles the case where user just wants to re-enter passphrase
@@ -254,36 +350,30 @@ func initPassphraseOnly(ctx context.Context, keyPath string) error {
 	return nil
 }
 
-// resolveScope validates a --scope value, prompting interactively when empty.
-// Returns "full" or "sessions". "sessions" syncs only portable conversation
-// data; "full" syncs everything (the historical default).
+// resolveScope validates a --scope value. Returns "full" or "sessions". An
+// empty value means "sessions": Stradl syncs portable conversation data, not
+// machine-specific settings and plugins, unless asked to with --scope full.
 func resolveScope(scope string) (string, error) {
 	switch scope {
 	case config.ScopeFull, config.ScopeSessions:
 		return scope, nil
 	case "":
-		prompt := &survey.Select{
-			Message: "What should be synced?",
-			Options: []string{
-				"Sessions only — conversation history (recommended for syncing across machines)",
-				"Everything — settings, plugins, skills, agents, and sessions",
-			},
-		}
-		var c int
-		if err := survey.AskOne(prompt, &c); err != nil {
-			return "", err
-		}
-		if c == 0 {
-			return config.ScopeSessions, nil
-		}
-		return config.ScopeFull, nil
+		return config.ScopeSessions, nil
 	default:
-		return "", fmt.Errorf("invalid --scope %q (use \"full\" or \"sessions\")", scope)
+		return "", fmt.Errorf("invalid --scope %q (use \"sessions\" or \"full\")", scope)
 	}
 }
 
 // initFullSetup handles the full init wizard
-func initFullSetup(ctx context.Context, keyPath, provider, bucket, accountID, accessKey, secretKey, s3Region, s3Endpoint string, s3UsePathStyle bool, gcsProjectID, gcsCredentialsFile, webdavURL, webdavUsername, webdavPassword, webdavPathPrefix, scope string, usePassphrase, force bool) error {
+func initFullSetup(ctx context.Context, keyPath string, opts initOptions) error {
+	usePassphrase, force := opts.usePassphrase, opts.force
+
+	// Reject a bad --scope before asking for anything.
+	scope, err := resolveScope(opts.scope)
+	if err != nil {
+		return err
+	}
+
 	if config.Exists() && !force {
 		var overwrite bool
 		prompt := &survey.Confirm{
@@ -301,50 +391,30 @@ func initFullSetup(ctx context.Context, keyPath, provider, bucket, accountID, ac
 	printStep(1, 3, "Select Storage Provider")
 	fmt.Println()
 
-	if provider == "" {
-		prompt := &survey.Select{
-			Message: "Choose your cloud storage provider:",
-			Options: []string{
-				"Cloudflare R2 (recommended - free tier: 10GB)",
-				"Amazon S3",
-				"Google Cloud Storage",
-				"S3-compatible (custom endpoint) — Backblaze B2, MinIO, Wasabi, ...",
-				"WebDAV (Nextcloud, ownCloud, etc. - self-hosted)",
-			},
-		}
-		var choice int
-		if err := survey.AskOne(prompt, &choice); err != nil {
-			return err
-		}
-		switch choice {
-		case 0:
-			provider = "r2"
-		case 1:
-			provider = "s3"
-		case 2:
-			provider = "gcs"
-		case 3:
-			provider = "s3-compatible"
-		case 4:
-			provider = "webdav"
-		}
+	interactive := stdinIsTerminal()
+	provider, err := resolveProvider(opts, interactive)
+	if err != nil {
+		return err
 	}
 
 	var storageCfg *storage.StorageConfig
-	var err error
 	fmt.Println()
 
 	switch provider {
+	case "azure":
+		azureOpts := opts.azure
+		azureOpts.Container = opts.bucket
+		storageCfg, err = runAzureWizard(azureOpts, interactive)
 	case "r2":
-		storageCfg, err = runR2Wizard(accountID, accessKey, secretKey, bucket)
+		storageCfg, err = runR2Wizard(opts.accountID, opts.accessKey, opts.secretKey, opts.bucket)
 	case "s3":
-		storageCfg, err = runS3Wizard(accessKey, secretKey, s3Region, bucket)
+		storageCfg, err = runS3Wizard(opts.accessKey, opts.secretKey, opts.s3Region, opts.bucket)
 	case "gcs":
-		storageCfg, err = runGCSWizard(gcsProjectID, gcsCredentialsFile, bucket)
+		storageCfg, err = runGCSWizard(opts.gcsProjectID, opts.gcsCredentialsFile, opts.bucket)
 	case "s3-compatible":
-		storageCfg, err = runS3CompatibleWizard(s3Endpoint, accessKey, secretKey, s3Region, bucket, s3UsePathStyle)
+		storageCfg, err = runS3CompatibleWizard(opts.s3Endpoint, opts.accessKey, opts.secretKey, opts.s3Region, opts.bucket, opts.s3UsePathStyle)
 	case "webdav":
-		storageCfg, err = runWebDAVWizard(webdavURL, webdavUsername, webdavPassword, webdavPathPrefix)
+		storageCfg, err = runWebDAVWizard(opts.webdavURL, opts.webdavUsername, opts.webdavPassword, opts.webdavPathPrefix)
 	default:
 		return fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -396,7 +466,7 @@ func initFullSetup(ctx context.Context, keyPath, provider, bucket, accountID, ac
 			printInfo("Or use a service account JSON file instead.")
 			return fmt.Errorf("GCS credentials not configured")
 		}
-		return fmt.Errorf("failed to create storage client: %w", err)
+		return fmt.Errorf("failed to create storage client: %s", redactSAS(err.Error()))
 	}
 
 	shouldClearRemote := false
@@ -437,18 +507,11 @@ skipKeyGen:
 
 	exists, err := store.BucketExists(ctx)
 	if err != nil {
-		return fmt.Errorf("could not verify bucket '%s': %w", storageCfg.Bucket, err)
+		return bucketCheckError(storageCfg, err)
 	} else if !exists {
-		if storageCfg.Provider == storage.ProviderWebDAV {
-			return fmt.Errorf("could not access WebDAV path '%s' - check your URL and credentials", storageCfg.PathPrefix)
-		}
-		return fmt.Errorf("bucket '%s' does not exist. Please create it first in your storage provider's console.\n  For R2: https://dash.cloudflare.com/ → R2 → Create bucket\n  For S3: https://console.aws.amazon.com/s3/ → Create bucket (use 'automatic' location)\n  For GCS: https://console.cloud.google.com/storage/ → Create bucket", storageCfg.Bucket)
+		return missingBucketError(storageCfg)
 	}
-	if storageCfg.Provider == storage.ProviderWebDAV {
-		printSuccess("Connected to WebDAV ('" + storageCfg.PathPrefix + "')")
-	} else {
-		printSuccess("Connected to '" + storageCfg.Bucket + "'")
-	}
+	printSuccess(connectedMessage(storageCfg))
 
 	// Clear remote if user chose to start fresh
 	if shouldClearRemote {
@@ -468,28 +531,20 @@ skipKeyGen:
 			printInfo("The remote bucket has files encrypted with a different key.")
 			fmt.Println()
 			printInfo("Options:")
-			printInfo("  1. Run 'claude-sync init --passphrase' to try a different passphrase")
+			printInfo("  1. Run 'stradl init --passphrase' to try a different passphrase")
 			printInfo("  2. Copy the age-key.txt from your original device")
-			printInfo("  3. Run 'claude-sync reset --remote' to clear remote and start fresh")
+			printInfo("  3. Run 'stradl reset --remote' to clear remote and start fresh")
 			fmt.Println()
 			return fmt.Errorf("encryption key mismatch - cannot sync with remote")
 		}
 		printSuccess("Encryption key verified")
 	}
 
-	// Resolve sync scope (prompts if not provided via --scope)
-	scope, err = resolveScope(scope)
-	if err != nil {
-		return err
-	}
-
 	// Save config
 	cfg := &config.Config{
 		Storage:       storageCfg,
-		EncryptionKey: "~/.claude-sync/age-key.txt",
-	}
-	if scope == config.ScopeSessions {
-		cfg.Scope = config.ScopeSessions
+		EncryptionKey: "~/" + config.ConfigDir + "/" + config.AgeKeyFile,
+		Scope:         scope,
 	}
 
 	if err := config.Save(cfg); err != nil {
@@ -499,9 +554,19 @@ skipKeyGen:
 	// Done
 	fmt.Println()
 	fmt.Println(colorGreen + "  Setup complete!" + colorReset)
+	if scope == config.ScopeSessions {
+		printInfo("Syncing sessions only (use 'stradl init --scope full' to include settings and plugins)")
+	}
 	fmt.Println()
-	printInfo("Run 'claude-sync push' to upload your sessions")
-	printInfo("Run 'claude-sync pull' on other devices to sync")
+	printInfo("Next:")
+	fmt.Printf("    %sstradl sync%s              sync this Mac now\n", colorCyan, colorReset)
+	fmt.Printf("    %sstradl agent install%s     keep it in sync in the background\n", colorCyan, colorReset)
+	fmt.Println()
+	if usePassphrase {
+		printInfo("Then run 'stradl init' with the same passphrase on your other Macs.")
+	} else {
+		printInfo("Then copy " + keyPath + " to your other Macs and run 'stradl init' there.")
+	}
 	fmt.Println()
 
 	return nil
@@ -626,7 +691,7 @@ func runR2Wizard(accountID, accessKey, secretKey, bucket string) (*storage.Stora
 			Name: "Bucket",
 			Prompt: &survey.Input{
 				Message: "Bucket name:",
-				Default: "claude-sync",
+				Default: "stradl",
 			},
 			Validate: survey.Required,
 		},
@@ -721,7 +786,7 @@ func runS3Wizard(accessKey, secretKey, region, bucket string) (*storage.StorageC
 			Name: "Bucket",
 			Prompt: &survey.Input{
 				Message: "Bucket name:",
-				Default: "claude-sync",
+				Default: "stradl",
 			},
 			Validate: survey.Required,
 		},
@@ -810,7 +875,7 @@ func runS3CompatibleWizard(endpoint, accessKey, secretKey, region, bucket string
 			Name: "Bucket",
 			Prompt: &survey.Input{
 				Message: "Bucket name:",
-				Default: "claude-sync",
+				Default: "stradl",
 			},
 			Validate: survey.Required,
 		},
@@ -882,7 +947,7 @@ func runGCSWizard(projectID, credentialsFile, bucket string) (*storage.StorageCo
 			Name: "Bucket",
 			Prompt: &survey.Input{
 				Message: "Bucket name:",
-				Default: "claude-sync",
+				Default: "stradl",
 			},
 			Validate: survey.Required,
 		},
@@ -988,7 +1053,7 @@ func runWebDAVWizard(webdavURL, username, password, pathPrefix string) (*storage
 					if pathPrefix != "" {
 						return pathPrefix
 					}
-					return "claude-sync"
+					return "stradl"
 				}(),
 			},
 			Validate: survey.Required,
@@ -1018,110 +1083,110 @@ func runWebDAVWizard(webdavURL, username, password, pathPrefix string) (*storage
 	return cfg, nil
 }
 
+// twoWaySyncNote is printed by push and pull. They keep their names for muscle
+// memory, but the legacy one-way transfers (push propagating local deletes to
+// remote, pull trusting device clocks) are gone.
+const twoWaySyncNote = "push/pull run a full two-way sync in Stradl"
+
+// runTwoWaySync runs one safe two-way reconcile, waiting for a sync already in
+// progress to finish. push and pull reach the engine only through this
+// variable, so tests can confirm they never take the legacy code paths.
+var runTwoWaySync = func(ctx context.Context, cfg *config.Config) (*sync.SyncReport, error) {
+	return sync.RunSync(ctx, cfg, quiet, true)
+}
+
+// runMCPSync pushes (push=true) or pulls MCP server configs under the device
+// sync lock. A variable so tests can observe it.
+var runMCPSync = runMCPLocked
+
+// syncLockPath is the device-wide sync lock for cfg, matching sync.RunSync.
+func syncLockPath(cfg *config.Config) string {
+	if cfg.StateDirOverride != "" {
+		return filepath.Join(cfg.StateDirOverride, config.LockFile)
+	}
+	return config.LockFilePath()
+}
+
+// runMCPLocked runs the MCP push or pull while holding the sync lock. The MCP
+// baseline lives in state.json, which a background sync rewrites, so running
+// unlocked could lose one side's update.
+func runMCPLocked(ctx context.Context, cfg *config.Config, push bool) error {
+	release, err := sync.AcquireLock(syncLockPath(cfg), true, 2*time.Minute)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	syncer, err := sync.NewSyncer(cfg, quiet)
+	if err != nil {
+		return err
+	}
+	if push {
+		return runMCPPush(ctx, syncer)
+	}
+	return runMCPPull(ctx, syncer)
+}
+
+// runPushPull is the shared body of push and pull: one two-way sync, then the
+// MCP push or pull when enabled, then after (pull's optional history rebuild).
+func runPushPull(includeMCP, mcpPush bool, after func() error) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+
+	if !quiet {
+		fmt.Printf("%s⋯ %s (same as 'stradl sync')%s\n", colorDim, twoWaySyncNote, colorReset)
+	}
+
+	start := time.Now()
+	report, err := runTwoWaySync(ctx, cfg)
+	if errors.Is(err, sync.ErrLocked) {
+		return fmt.Errorf("another sync is still running; try again in a minute")
+	}
+	if err != nil {
+		return err
+	}
+	if !quiet {
+		printSyncReport(report, time.Since(start))
+	}
+
+	if includeMCP || cfg.IsMCPSyncEnabled() {
+		if err := runMCPSync(ctx, cfg, mcpPush); err != nil {
+			return err
+		}
+	}
+
+	if after != nil {
+		if err := after(); err != nil {
+			return err
+		}
+	}
+
+	if len(report.Errors) > 0 {
+		return fmt.Errorf("%d file(s) failed to sync", len(report.Errors))
+	}
+	return nil
+}
+
 func pushCmd() *cobra.Command {
 	var includeMCP bool
 
 	cmd := &cobra.Command{
 		Use:   "push",
-		Short: "Upload local changes to cloud storage",
-		Long:  `Encrypt and upload changed files from ~/.claude to cloud storage.`,
+		Short: "Two-way sync with your other devices (same as 'stradl sync')",
+		Long: `Run a full two-way sync, exactly like 'stradl sync'.
+
+In claude-sync, push uploaded local changes and deleted remote copies of files
+deleted here. Stradl never deletes remote copies: deleting a session on one Mac
+only removes it there, and sessions changed on two Macs are merged.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-
-			syncer, err := sync.NewSyncer(cfg, quiet)
-			if err != nil {
-				return err
-			}
-
-			if !quiet {
-				syncer.SetProgressFunc(func(event sync.ProgressEvent) {
-					if event.Error != nil {
-						fmt.Printf("\r%s✗%s %s: %v\n", colorYellow, colorReset, event.Path, event.Error)
-						return
-					}
-
-					switch event.Action {
-					case "scan":
-						if event.Complete {
-							fmt.Printf("\r%s✓%s No changes to push\n", colorGreen, colorReset)
-						} else {
-							fmt.Printf("%s⋯%s %s\n", colorDim, colorReset, event.Path)
-						}
-					case "upload":
-						if event.Complete {
-							// Final newline after progress
-						} else {
-							// Clear line and show progress
-							progress := fmt.Sprintf("[%d/%d]", event.Current, event.Total)
-							shortPath := util.TruncatePath(event.Path, 50)
-							fmt.Printf("\r%s↑%s %s%s%s %s (%s)%s",
-								colorCyan, colorReset,
-								colorDim, progress, colorReset,
-								shortPath, util.FormatSize(event.Size),
-								strings.Repeat(" ", 10))
-						}
-					case "delete":
-						shortPath := util.TruncatePath(event.Path, 50)
-						fmt.Printf("\r%s✗%s [%d/%d] %s (deleted)%s\n",
-							colorYellow, colorReset,
-							event.Current, event.Total,
-							shortPath,
-							strings.Repeat(" ", 10))
-					}
-				})
-			}
-
-			ctx := context.Background()
-			result, err := syncer.Push(ctx)
-			if err != nil {
-				return err
-			}
-
-			if !quiet {
-				fmt.Println() // Clear the progress line
-
-				if len(result.Uploaded) == 0 && len(result.Deleted) == 0 && len(result.Errors) == 0 {
-					// Already printed "No changes"
-				} else {
-					// Summary
-					var parts []string
-					if len(result.Uploaded) > 0 {
-						parts = append(parts, fmt.Sprintf("%s%d uploaded%s", colorGreen, len(result.Uploaded), colorReset))
-					}
-					if len(result.Deleted) > 0 {
-						parts = append(parts, fmt.Sprintf("%s%d deleted%s", colorYellow, len(result.Deleted), colorReset))
-					}
-					if len(result.Errors) > 0 {
-						parts = append(parts, fmt.Sprintf("%s%d failed%s", colorYellow, len(result.Errors), colorReset))
-					}
-					if len(parts) > 0 {
-						fmt.Printf("%s✓%s Push complete: %s\n", colorGreen, colorReset, strings.Join(parts, ", "))
-					}
-
-					if len(result.Errors) > 0 {
-						fmt.Printf("\n%sErrors:%s\n", colorYellow, colorReset)
-						for _, e := range result.Errors {
-							fmt.Printf("  %s•%s %v\n", colorYellow, colorReset, e)
-						}
-					}
-				}
-			}
-
-			// MCP sync if enabled
-			if includeMCP || cfg.IsMCPSyncEnabled() {
-				if err := runMCPPush(ctx, syncer); err != nil {
-					return err
-				}
-			}
-
-			return nil
+			return runPushPull(includeMCP, true, nil)
 		},
 	}
 
-	cmd.Flags().BoolVar(&includeMCP, "include-mcp", false, "Also sync MCP server configs from ~/.claude.json")
+	cmd.Flags().BoolVar(&includeMCP, "include-mcp", false, "Also push MCP server configs from ~/.claude.json")
 	return cmd
 }
 
@@ -1130,146 +1195,40 @@ func pullCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "pull",
-		Short: "Download remote changes from cloud storage",
-		Long: `Download and decrypt changed files from cloud storage to ~/.claude.
+		Short: "Two-way sync with your other devices (same as 'stradl sync')",
+		Long: `Run a full two-way sync, exactly like 'stradl sync'.
 
-On first pull with existing local files, you'll be prompted to confirm
-before any files are overwritten. Use --dry-run to preview changes first.
+In claude-sync, pull overwrote local files whenever the remote copy looked
+newer by the clock. Stradl compares versions instead of clocks and merges
+sessions changed on two Macs, so local work is never overwritten.
 
 Examples:
-  claude-sync pull              # Pull with safety prompts
-  claude-sync pull --dry-run    # Preview what would be changed
-  claude-sync pull --force      # Skip confirmation prompts`,
+  stradl pull                    # Two-way sync
+  stradl pull --rebuild-history  # ...then rebuild ~/.claude/history.jsonl
+  stradl diff                    # Compare with remote without changing anything`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-
-			syncer, err := sync.NewSyncer(cfg, quiet)
-			if err != nil {
-				return err
-			}
-
-			ctx := context.Background()
-
-			// Check for first pull with existing local files
-			if !syncer.HasState() {
-				hasExisting, err := hasExistingClaudeFiles(cfg)
-				if err != nil {
-					return err
-				}
-
-				if hasExisting && !force {
-					return handleFirstPullWithExistingFiles(ctx, syncer, dryRun)
-				}
-			}
-
-			// Handle dry-run for normal pulls
 			if dryRun {
-				return showPullPreview(ctx, syncer)
+				fmt.Println("Two-way sync has no dry run. 'stradl diff' compares this device with remote without changing anything.")
+				return nil
 			}
-
-			if !quiet {
-				syncer.SetProgressFunc(func(event sync.ProgressEvent) {
-					if event.Error != nil {
-						fmt.Printf("\r%s✗%s %s: %v\n", colorYellow, colorReset, event.Path, event.Error)
-						return
+			var after func() error
+			if rebuildHistory {
+				after = func() error {
+					if err := runHistoryRebuild(); err != nil {
+						return fmt.Errorf("rebuilding history: %w", err)
 					}
-
-					switch event.Action {
-					case "scan":
-						if event.Complete {
-							fmt.Printf("\r%s✓%s Already up to date\n", colorGreen, colorReset)
-						} else {
-							fmt.Printf("%s⋯%s %s\n", colorDim, colorReset, event.Path)
-						}
-					case "download":
-						if event.Complete {
-							// Final newline after progress
-						} else {
-							// Clear line and show progress
-							progress := fmt.Sprintf("[%d/%d]", event.Current, event.Total)
-							shortPath := util.TruncatePath(event.Path, 50)
-							fmt.Printf("\r%s↓%s %s%s%s %s (%s)%s",
-								colorGreen, colorReset,
-								colorDim, progress, colorReset,
-								shortPath, util.FormatSize(event.Size),
-								strings.Repeat(" ", 10))
-						}
-					case "conflict":
-						fmt.Printf("\r%s⚠%s Conflict: %s (saved as .conflict)\n",
-							colorYellow, colorReset, event.Path)
-					}
-				})
-			}
-
-			result, err := syncer.Pull(ctx)
-			if err != nil {
-				return err
-			}
-
-			if !quiet {
-				fmt.Println() // Clear the progress line
-
-				if len(result.Downloaded) == 0 && len(result.Conflicts) == 0 && len(result.Errors) == 0 {
-					// Already printed "Already up to date"
-				} else {
-					// Summary
-					var parts []string
-					if len(result.Downloaded) > 0 {
-						parts = append(parts, fmt.Sprintf("%s%d downloaded%s", colorGreen, len(result.Downloaded), colorReset))
-					}
-					if len(result.Conflicts) > 0 {
-						parts = append(parts, fmt.Sprintf("%s%d conflicts%s", colorYellow, len(result.Conflicts), colorReset))
-					}
-					if len(result.Errors) > 0 {
-						parts = append(parts, fmt.Sprintf("%s%d failed%s", colorYellow, len(result.Errors), colorReset))
-					}
-					if len(parts) > 0 {
-						fmt.Printf("%s✓%s Pull complete: %s\n", colorGreen, colorReset, strings.Join(parts, ", "))
-					}
-
-					if len(result.Conflicts) > 0 {
-						fmt.Printf("\n%sConflicts (both local and remote changed):%s\n", colorYellow, colorReset)
-						for _, c := range result.Conflicts {
-							fmt.Printf("  %s•%s %s\n", colorYellow, colorReset, c)
-						}
-						fmt.Printf("\n%sLocal versions kept. Remote saved as .conflict files.%s\n", colorDim, colorReset)
-						fmt.Printf("%sRun '%sclaude-sync conflicts%s%s' to review and resolve.%s\n", colorDim, colorCyan, colorReset, colorDim, colorReset)
-					}
-
-					if len(result.Errors) > 0 {
-						fmt.Printf("\n%sErrors:%s\n", colorYellow, colorReset)
-						for _, e := range result.Errors {
-							fmt.Printf("  %s•%s %v\n", colorYellow, colorReset, e)
-						}
-					}
+					return nil
 				}
 			}
-
-			// MCP sync if enabled
-			if includeMCP || cfg.IsMCPSyncEnabled() {
-				if err := runMCPPull(ctx, syncer); err != nil {
-					return err
-				}
-			}
-
-			// Rebuild prompt history from the freshly-pulled session files.
-			if rebuildHistory && !dryRun {
-				if err := runHistoryRebuild(); err != nil {
-					return fmt.Errorf("rebuilding history: %w", err)
-				}
-			}
-
-			return nil
+			return runPushPull(includeMCP, false, after)
 		},
 	}
 
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be changed without making changes")
-	cmd.Flags().BoolVar(&force, "force", false, "Overwrite existing files without confirmation")
-	cmd.Flags().BoolVar(&includeMCP, "include-mcp", false, "Also sync MCP server configs from ~/.claude.json")
-	cmd.Flags().BoolVar(&rebuildHistory, "rebuild-history", false, "Rebuild ~/.claude/history.jsonl from session files after pulling")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show how to preview changes ('stradl diff') without syncing")
+	cmd.Flags().BoolVar(&force, "force", false, "No longer needed")
+	_ = cmd.Flags().MarkDeprecated("force", "two-way sync never overwrites local files, so there is nothing to confirm")
+	cmd.Flags().BoolVar(&includeMCP, "include-mcp", false, "Also pull MCP server configs into ~/.claude.json")
+	cmd.Flags().BoolVar(&rebuildHistory, "rebuild-history", false, "Rebuild ~/.claude/history.jsonl from session files after syncing")
 
 	return cmd
 }
@@ -1444,10 +1403,10 @@ When both local and remote files change, the remote version is saved
 as a .conflict file. Use this command to review and resolve them.
 
 Examples:
-  claude-sync conflicts              # Interactive resolution
-  claude-sync conflicts --list       # Just list conflicts
-  claude-sync conflicts --keep local # Keep all local versions
-  claude-sync conflicts --keep remote # Keep all remote versions`,
+  stradl conflicts              # Interactive resolution
+  stradl conflicts --list       # Just list conflicts
+  stradl conflicts --keep local # Keep all local versions
+  stradl conflicts --keep remote # Keep all remote versions`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			claudeDir := config.ClaudeDir()
 
@@ -1723,21 +1682,21 @@ func resetCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "reset",
-		Short: "Reset claude-sync (clear data and start fresh)",
-		Long: `Reset claude-sync configuration and optionally clear remote/local data.
+		Short: "Reset stradl (clear data and start fresh)",
+		Long: `Reset stradl configuration and optionally clear remote/local data.
 
 Use this if you forgot your passphrase or want to start fresh.
 
 Examples:
-  claude-sync reset                    # Clear local config only
-  claude-sync reset --remote           # Also delete all files from cloud storage
-  claude-sync reset --local            # Also clear local sync state
-  claude-sync reset --remote --local   # Full reset (nuclear option)`,
+  stradl reset                    # Clear local config only
+  stradl reset --remote           # Also delete all files from cloud storage
+  stradl reset --local            # Also clear local sync state
+  stradl reset --remote --local   # Full reset (nuclear option)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reader := bufio.NewReader(os.Stdin)
 
 			fmt.Println()
-			printWarning("This will reset claude-sync:")
+			printWarning("This will reset stradl:")
 			fmt.Println()
 
 			if clearRemote {
@@ -1811,7 +1770,7 @@ Examples:
 			fmt.Println()
 			printSuccess("Reset complete!")
 			fmt.Println()
-			printInfo("Run 'claude-sync init' to set up again with a new passphrase.")
+			printInfo("Run 'stradl init' to set up again with a new passphrase.")
 			fmt.Println()
 
 			return nil
@@ -1933,7 +1892,7 @@ device's migrate run and reported as "left for other devices".`,
 				fmt.Printf("%s✓%s Migration complete: %s\n", colorGreen, colorReset, strings.Join(parts, ", "))
 
 				if len(result.Foreign) > 0 {
-					fmt.Printf("\n%sRun 'claude-sync migrate' on your other devices to convert the remaining keys.%s\n", colorDim, colorReset)
+					fmt.Printf("\n%sRun 'stradl migrate' on your other devices to convert the remaining keys.%s\n", colorDim, colorReset)
 				}
 				if len(result.Errors) > 0 {
 					fmt.Printf("\n%sErrors:%s\n", colorYellow, colorReset)
@@ -1948,243 +1907,6 @@ device's migrate run and reported as "left for other devices".`,
 	}
 
 	return cmd
-}
-
-// GitHubRelease represents a GitHub release from the API
-type GitHubRelease struct {
-	TagName string `json:"tag_name"`
-	Name    string `json:"name"`
-	Assets  []struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-	} `json:"assets"`
-}
-
-func updateCmd() *cobra.Command {
-	var checkOnly bool
-
-	cmd := &cobra.Command{
-		Use:   "update",
-		Short: "Update claude-sync to the latest version",
-		Long: `Check for updates and automatically download the latest version.
-
-Examples:
-  claude-sync update          # Update to latest version
-  claude-sync update --check  # Only check for updates, don't install`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Printf("%s⋯%s Checking for updates...\n", colorDim, colorReset)
-
-			// Get latest release from GitHub
-			release, err := getLatestRelease()
-			if err != nil {
-				return fmt.Errorf("failed to check for updates: %w", err)
-			}
-
-			latestVersion := strings.TrimPrefix(release.TagName, "v")
-			currentVersion := strings.TrimPrefix(version, "v")
-
-			if latestVersion == currentVersion {
-				fmt.Printf("%s✓%s Already up to date (v%s)\n", colorGreen, colorReset, currentVersion)
-				return nil
-			}
-
-			// Compare versions (simple string comparison works for semver)
-			if util.CompareVersions(currentVersion, latestVersion) >= 0 {
-				fmt.Printf("%s✓%s Already up to date (v%s)\n", colorGreen, colorReset, currentVersion)
-				return nil
-			}
-
-			fmt.Printf("%s↑%s New version available: %sv%s%s → %sv%s%s\n",
-				colorCyan, colorReset,
-				colorDim, currentVersion, colorReset,
-				colorGreen, latestVersion, colorReset)
-
-			if checkOnly {
-				fmt.Printf("\n%sRun 'claude-sync update' to install%s\n", colorDim, colorReset)
-				return nil
-			}
-
-			// Find the right asset for this OS/arch
-			assetName := util.GetBinaryName(latestVersion)
-			var downloadURL string
-			for _, asset := range release.Assets {
-				if asset.Name == assetName {
-					downloadURL = asset.BrowserDownloadURL
-					break
-				}
-			}
-
-			if downloadURL == "" {
-				return fmt.Errorf("no binary available for %s/%s", runtime.GOOS, runtime.GOARCH)
-			}
-
-			fmt.Printf("%s⋯%s Downloading %s...\n", colorDim, colorReset, assetName)
-
-			// Download the new binary
-			newBinary, err := downloadBinary(downloadURL)
-			if err != nil {
-				return fmt.Errorf("failed to download update: %w", err)
-			}
-
-			// Verify against the release's published checksums
-			if err := verifyChecksum(release, assetName, newBinary); err != nil {
-				return fmt.Errorf("refusing to install update: %w", err)
-			}
-
-			// Get current executable path
-			execPath, err := os.Executable()
-			if err != nil {
-				return fmt.Errorf("failed to get executable path: %w", err)
-			}
-			execPath, err = filepath.EvalSymlinks(execPath)
-			if err != nil {
-				return fmt.Errorf("failed to resolve executable path: %w", err)
-			}
-
-			// Replace the current binary
-			fmt.Printf("%s⋯%s Installing update...\n", colorDim, colorReset)
-			if err := replaceBinary(execPath, newBinary); err != nil {
-				return fmt.Errorf("failed to install update: %w", err)
-			}
-
-			fmt.Printf("%s✓%s Updated to v%s\n", colorGreen, colorReset, latestVersion)
-			fmt.Printf("\n%sRestart claude-sync to use the new version%s\n", colorDim, colorReset)
-
-			return nil
-		},
-	}
-
-	cmd.Flags().BoolVar(&checkOnly, "check", false, "Only check for updates, don't install")
-
-	return cmd
-}
-
-func getLatestRelease() (*GitHubRelease, error) {
-	url := "https://api.github.com/repos/tawanorg/claude-sync/releases/latest"
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", "claude-sync/"+version)
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
-	}
-
-	var release GitHubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, err
-	}
-
-	return &release, nil
-}
-
-// verifyChecksum validates the downloaded binary against the checksums.txt
-// asset published with the release. Releases predating checksum publication
-// warn instead of failing; once checksums.txt is present, a missing entry or
-// a mismatch aborts the update.
-func verifyChecksum(release *GitHubRelease, assetName string, data []byte) error {
-	var checksumsURL string
-	for _, asset := range release.Assets {
-		if asset.Name == "checksums.txt" {
-			checksumsURL = asset.BrowserDownloadURL
-			break
-		}
-	}
-	if checksumsURL == "" {
-		fmt.Printf("%s!%s Release has no checksums.txt; skipping integrity verification\n", colorYellow, colorReset)
-		return nil
-	}
-
-	body, err := downloadBinary(checksumsURL)
-	if err != nil {
-		return fmt.Errorf("failed to download checksums.txt: %w", err)
-	}
-
-	sum := sha256.Sum256(data)
-	got := hex.EncodeToString(sum[:])
-
-	for _, line := range strings.Split(string(body), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 2 {
-			continue
-		}
-		// sha256sum format: "<hash>  <filename>" ("*" prefix = binary mode)
-		if strings.TrimPrefix(fields[1], "*") != assetName {
-			continue
-		}
-		if !strings.EqualFold(fields[0], got) {
-			return fmt.Errorf("sha256 mismatch for %s: release lists %s, downloaded %s", assetName, fields[0], got)
-		}
-		fmt.Printf("%s✓%s Checksum verified\n", colorGreen, colorReset)
-		return nil
-	}
-	return fmt.Errorf("checksums.txt has no entry for %s", assetName)
-}
-
-// maxBinarySize is the maximum allowed size for update binary downloads (200MB).
-// This prevents downloading excessively large files during update.
-const maxBinarySize = 200 * 1024 * 1024
-
-func downloadBinary(url string) ([]byte, error) {
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download failed with status %d", resp.StatusCode)
-	}
-
-	// Limit download size to prevent downloading excessively large files
-	limited := io.LimitReader(resp.Body, maxBinarySize+1)
-	data, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxBinarySize {
-		return nil, fmt.Errorf("binary exceeds maximum size of %d bytes", maxBinarySize)
-	}
-
-	return data, nil
-}
-
-func replaceBinary(execPath string, newBinary []byte) error {
-	// Write to a temporary file first
-	tmpPath := execPath + ".new"
-	if err := os.WriteFile(tmpPath, newBinary, 0755); err != nil {
-		return fmt.Errorf("failed to write new binary: %w", err)
-	}
-
-	// Backup current binary
-	backupPath := execPath + ".old"
-	if err := os.Rename(execPath, backupPath); err != nil {
-		_ = os.Remove(tmpPath)
-		return fmt.Errorf("failed to backup current binary: %w", err)
-	}
-
-	// Move new binary into place
-	if err := os.Rename(tmpPath, execPath); err != nil {
-		// Try to restore backup (ignore error, we're already failing)
-		_ = os.Rename(backupPath, execPath)
-		return fmt.Errorf("failed to install new binary: %w", err)
-	}
-
-	// Remove backup
-	_ = os.Remove(backupPath)
-
-	return nil
 }
 
 // verifyKeyMatchesRemote checks if the encryption key can decrypt existing remote files.
@@ -2294,452 +2016,6 @@ func clearRemoteStorage(ctx context.Context, store storage.Storage) error {
 	return store.DeleteBatch(ctx, keys)
 }
 
-// hasExistingClaudeFiles checks if ~/.claude has any files that would be synced
-func hasExistingClaudeFiles(cfg *config.Config) (bool, error) {
-	claudeDir := config.ClaudeDir()
-	if _, err := os.Stat(claudeDir); os.IsNotExist(err) {
-		return false, nil
-	}
-
-	files, err := sync.GetLocalFiles(claudeDir, cfg.GetEffectiveSyncPaths())
-	if err != nil {
-		return false, err
-	}
-
-	return len(files) > 0, nil
-}
-
-// handleFirstPullWithExistingFiles handles the case where the user is pulling
-// for the first time but already has local files that could be overwritten
-func handleFirstPullWithExistingFiles(ctx context.Context, syncer *sync.Syncer, dryRun bool) error {
-	// Get preview of what would happen
-	preview, err := syncer.PreviewPull(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to preview pull: %w", err)
-	}
-
-	// If nothing would be affected, proceed normally
-	if len(preview.WouldOverwrite) == 0 && len(preview.WouldDownload) == 0 && len(preview.WouldConflict) == 0 {
-		if !quiet {
-			fmt.Printf("%s✓%s Already up to date\n", colorGreen, colorReset)
-		}
-		return nil
-	}
-
-	// Show warning
-	fmt.Println()
-	printWarning("Local ~/.claude already has files that would be affected:")
-	fmt.Println()
-
-	// Show files that would be overwritten
-	for _, f := range preview.WouldOverwrite {
-		localTime := f.LocalTime.Format("2006-01-02")
-		remoteTime := f.RemoteTime.Format("2006-01-02")
-		fmt.Printf("  %sOVERWRITE%s  %s\n", colorYellow, colorReset, f.Path)
-		fmt.Printf("            %s(local: %s, remote: %s)%s\n", colorDim, localTime, remoteTime, colorReset)
-	}
-
-	// Show files that would be downloaded (new)
-	for _, f := range preview.WouldDownload {
-		fmt.Printf("  %sNEW%s        %s\n", colorGreen, colorReset, f.Path)
-	}
-
-	// Show files that would be kept
-	for _, f := range preview.WouldKeep {
-		fmt.Printf("  %sKEEP%s       %s %s(local newer)%s\n", colorCyan, colorReset, f.Path, colorDim, colorReset)
-	}
-
-	// Show local-only files
-	for _, f := range preview.LocalOnlyFiles {
-		fmt.Printf("  %sKEEP%s       %s %s(local only)%s\n", colorCyan, colorReset, f.Path, colorDim, colorReset)
-	}
-
-	// Show conflicts
-	for _, f := range preview.WouldConflict {
-		fmt.Printf("  %sCONFLICT%s   %s %s(both changed)%s\n", colorYellow, colorReset, f.Path, colorDim, colorReset)
-	}
-
-	fmt.Println()
-
-	// If dry-run, stop here
-	if dryRun {
-		fmt.Printf("%sDry run complete. No changes were made.%s\n", colorDim, colorReset)
-		fmt.Printf("%sRun 'claude-sync pull' to apply changes, or 'claude-sync pull --force' to skip this prompt.%s\n", colorDim, colorReset)
-		return nil
-	}
-
-	// Ask user what to do
-	prompt := &survey.Select{
-		Message: "How would you like to proceed?",
-		Options: []string{
-			"Backup existing files, then pull (recommended)",
-			"Overwrite without backup",
-			"Abort",
-		},
-	}
-	var choice int
-	if err := survey.AskOne(prompt, &choice); err != nil {
-		return err
-	}
-
-	switch choice {
-	case 0:
-		// Backup and proceed
-		backupDir, err := createBackup(syncer.SyncPaths())
-		if err != nil {
-			return fmt.Errorf("failed to create backup: %w", err)
-		}
-		printSuccess("Backup created: " + backupDir)
-		fmt.Println()
-		return executePull(ctx, syncer)
-
-	case 1:
-		// Proceed without backup
-		fmt.Println()
-		return executePull(ctx, syncer)
-
-	default:
-		// Abort
-		fmt.Println("  Aborted.")
-		return nil
-	}
-}
-
-// createBackup creates a backup of the current ~/.claude directory
-func createBackup(syncPaths []string) (string, error) {
-	claudeDir := config.ClaudeDir()
-	timestamp := time.Now().Format("20060102-150405")
-	backupDir := claudeDir + ".backup." + timestamp
-
-	// Create backup directory
-	if err := os.MkdirAll(backupDir, 0700); err != nil {
-		return "", fmt.Errorf("failed to create backup directory: %w", err)
-	}
-
-	// Copy all syncable files to backup
-	files, err := sync.GetLocalFiles(claudeDir, syncPaths)
-	if err != nil {
-		return "", fmt.Errorf("failed to list files: %w", err)
-	}
-
-	for relPath := range files {
-		srcPath := filepath.Join(claudeDir, relPath)
-		dstPath := filepath.Join(backupDir, relPath)
-
-		// Ensure destination directory exists
-		dstDir := filepath.Dir(dstPath)
-		if err := os.MkdirAll(dstDir, 0700); err != nil {
-			return "", fmt.Errorf("failed to create directory %s: %w", dstDir, err)
-		}
-
-		// Copy file
-		data, err := os.ReadFile(srcPath)
-		if err != nil {
-			return "", fmt.Errorf("failed to read %s: %w", relPath, err)
-		}
-
-		if err := os.WriteFile(dstPath, data, 0600); err != nil {
-			return "", fmt.Errorf("failed to write %s: %w", relPath, err)
-		}
-	}
-
-	return backupDir, nil
-}
-
-// showPullPreview shows what would happen during a pull without making changes
-func showPullPreview(ctx context.Context, syncer *sync.Syncer) error {
-	preview, err := syncer.PreviewPull(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to preview pull: %w", err)
-	}
-
-	// If nothing would happen
-	total := len(preview.WouldDownload) + len(preview.WouldOverwrite) + len(preview.WouldConflict)
-	if total == 0 {
-		fmt.Printf("%s✓%s Already up to date (dry run)\n", colorGreen, colorReset)
-		return nil
-	}
-
-	fmt.Println()
-	fmt.Printf("%sDry run - no changes will be made:%s\n\n", colorBold, colorReset)
-
-	// Show files that would be downloaded (new)
-	if len(preview.WouldDownload) > 0 {
-		fmt.Printf("Would download (%d new files):\n", len(preview.WouldDownload))
-		for _, f := range preview.WouldDownload {
-			fmt.Printf("  %s+%s %s (%s)\n", colorGreen, colorReset, f.Path, util.FormatSize(f.RemoteSize))
-		}
-		fmt.Println()
-	}
-
-	// Show files that would be overwritten
-	if len(preview.WouldOverwrite) > 0 {
-		fmt.Printf("Would overwrite (%d files):\n", len(preview.WouldOverwrite))
-		for _, f := range preview.WouldOverwrite {
-			fmt.Printf("  %s~%s %s (local: %s, remote: %s)\n",
-				colorYellow, colorReset, f.Path,
-				util.FormatSize(f.LocalSize), util.FormatSize(f.RemoteSize))
-		}
-		fmt.Println()
-	}
-
-	// Show files that would conflict
-	if len(preview.WouldConflict) > 0 {
-		fmt.Printf("Would create conflicts (%d files):\n", len(preview.WouldConflict))
-		for _, f := range preview.WouldConflict {
-			fmt.Printf("  %s!%s %s (both local and remote changed)\n", colorYellow, colorReset, f.Path)
-		}
-		fmt.Println()
-	}
-
-	// Show files that would be kept
-	if len(preview.WouldKeep) > 0 {
-		fmt.Printf("Would keep local (%d files newer locally):\n", len(preview.WouldKeep))
-		for _, f := range preview.WouldKeep {
-			fmt.Printf("  %s=%s %s\n", colorDim, colorReset, f.Path)
-		}
-		fmt.Println()
-	}
-
-	// Summary
-	fmt.Printf("%sSummary:%s %d would download, %d would overwrite, %d conflicts, %d unchanged\n",
-		colorBold, colorReset,
-		len(preview.WouldDownload),
-		len(preview.WouldOverwrite),
-		len(preview.WouldConflict),
-		len(preview.WouldKeep))
-	fmt.Println()
-	fmt.Printf("%sRun 'claude-sync pull' to apply these changes.%s\n", colorDim, colorReset)
-
-	return nil
-}
-
-// executePull performs the actual pull operation with progress output
-func executePull(ctx context.Context, syncer *sync.Syncer) error {
-	if !quiet {
-		syncer.SetProgressFunc(func(event sync.ProgressEvent) {
-			if event.Error != nil {
-				fmt.Printf("\r%s✗%s %s: %v\n", colorYellow, colorReset, event.Path, event.Error)
-				return
-			}
-
-			switch event.Action {
-			case "scan":
-				if event.Complete {
-					fmt.Printf("\r%s✓%s Already up to date\n", colorGreen, colorReset)
-				} else {
-					fmt.Printf("%s⋯%s %s\n", colorDim, colorReset, event.Path)
-				}
-			case "download":
-				if event.Complete {
-					// Final newline after progress
-				} else {
-					progress := fmt.Sprintf("[%d/%d]", event.Current, event.Total)
-					shortPath := util.TruncatePath(event.Path, 50)
-					fmt.Printf("\r%s↓%s %s%s%s %s (%s)%s",
-						colorGreen, colorReset,
-						colorDim, progress, colorReset,
-						shortPath, util.FormatSize(event.Size),
-						strings.Repeat(" ", 10))
-				}
-			case "conflict":
-				fmt.Printf("\r%s⚠%s Conflict: %s (saved as .conflict)\n",
-					colorYellow, colorReset, event.Path)
-			}
-		})
-	}
-
-	result, err := syncer.Pull(ctx)
-	if err != nil {
-		return err
-	}
-
-	if !quiet {
-		fmt.Println()
-
-		if len(result.Downloaded) == 0 && len(result.Conflicts) == 0 && len(result.Errors) == 0 {
-			// Already printed "Already up to date"
-		} else {
-			var parts []string
-			if len(result.Downloaded) > 0 {
-				parts = append(parts, fmt.Sprintf("%s%d downloaded%s", colorGreen, len(result.Downloaded), colorReset))
-			}
-			if len(result.Conflicts) > 0 {
-				parts = append(parts, fmt.Sprintf("%s%d conflicts%s", colorYellow, len(result.Conflicts), colorReset))
-			}
-			if len(result.Errors) > 0 {
-				parts = append(parts, fmt.Sprintf("%s%d failed%s", colorYellow, len(result.Errors), colorReset))
-			}
-			if len(parts) > 0 {
-				fmt.Printf("%s✓%s Pull complete: %s\n", colorGreen, colorReset, strings.Join(parts, ", "))
-			}
-
-			if len(result.Conflicts) > 0 {
-				fmt.Printf("\n%sConflicts (both local and remote changed):%s\n", colorYellow, colorReset)
-				for _, c := range result.Conflicts {
-					fmt.Printf("  %s•%s %s\n", colorYellow, colorReset, c)
-				}
-				fmt.Printf("\n%sLocal versions kept. Remote saved as .conflict files.%s\n", colorDim, colorReset)
-				fmt.Printf("%sRun '%sclaude-sync conflicts%s%s' to review and resolve.%s\n", colorDim, colorCyan, colorReset, colorDim, colorReset)
-			}
-
-			if len(result.Errors) > 0 {
-				fmt.Printf("\n%sErrors:%s\n", colorYellow, colorReset)
-				for _, e := range result.Errors {
-					fmt.Printf("  %s•%s %v\n", colorYellow, colorReset, e)
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-func changelogCmd() *cobra.Command {
-	var limit int
-
-	cmd := &cobra.Command{
-		Use:   "changelog",
-		Short: "Show release history and changelog",
-		Long: `Display the release history of claude-sync with version notes.
-
-Examples:
-  claude-sync changelog          # Show recent releases
-  claude-sync changelog --limit 5 # Show last 5 releases`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Printf("%s⋯%s Fetching releases...\n\n", colorDim, colorReset)
-
-			releases, err := getAllReleases(limit)
-			if err != nil {
-				return fmt.Errorf("failed to fetch changelog: %w", err)
-			}
-
-			if len(releases) == 0 {
-				fmt.Printf("%sNo releases found.%s\n", colorDim, colorReset)
-				return nil
-			}
-
-			// Header
-			fmt.Printf("%s╭─────────────────────────────────────────────────────────────╮%s\n", colorCyan, colorReset)
-			fmt.Printf("%s│%s  %sCLAUDE-SYNC CHANGELOG%s                                      %s│%s\n", colorCyan, colorReset, colorBold, colorReset, colorCyan, colorReset)
-			fmt.Printf("%s╰─────────────────────────────────────────────────────────────╯%s\n\n", colorCyan, colorReset)
-
-			currentVersion := strings.TrimPrefix(version, "v")
-
-			for i, release := range releases {
-				tagVersion := strings.TrimPrefix(release.TagName, "v")
-				isCurrent := tagVersion == currentVersion
-
-				// Version header with current marker
-				if isCurrent {
-					fmt.Printf("%s▸ %s%s %s(current)%s\n", colorGreen, release.TagName, colorReset, colorGreen, colorReset)
-				} else {
-					fmt.Printf("%s▸ %s%s\n", colorCyan, release.TagName, colorReset)
-				}
-
-				// Release date
-				if release.PublishedAt != "" {
-					if t, err := time.Parse(time.RFC3339, release.PublishedAt); err == nil {
-						fmt.Printf("  %sReleased: %s%s\n", colorDim, t.Format("January 2, 2006"), colorReset)
-					}
-				}
-
-				// Release notes (body)
-				if release.Body != "" {
-					fmt.Println()
-					printReleaseBody(release.Body)
-				}
-
-				// Separator between releases
-				if i < len(releases)-1 {
-					fmt.Printf("\n%s───────────────────────────────────────────────────────────────%s\n\n", colorDim, colorReset)
-				}
-			}
-
-			fmt.Println()
-			fmt.Printf("%sView all releases: %shttps://github.com/tawanorg/claude-sync/releases%s\n", colorDim, colorCyan, colorReset)
-			fmt.Println()
-
-			return nil
-		},
-	}
-
-	cmd.Flags().IntVarP(&limit, "limit", "n", 10, "Number of releases to show")
-
-	return cmd
-}
-
-// GitHubReleaseWithBody extends GitHubRelease with body and published date
-type GitHubReleaseWithBody struct {
-	TagName     string `json:"tag_name"`
-	Name        string `json:"name"`
-	Body        string `json:"body"`
-	PublishedAt string `json:"published_at"`
-	Assets      []struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-	} `json:"assets"`
-}
-
-func getAllReleases(limit int) ([]GitHubReleaseWithBody, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/tawanorg/claude-sync/releases?per_page=%d", limit)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", "claude-sync/"+version)
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
-	}
-
-	var releases []GitHubReleaseWithBody
-	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
-		return nil, err
-	}
-
-	return releases, nil
-}
-
-func printReleaseBody(body string) {
-	lines := strings.Split(body, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-
-		// Format markdown-style headers
-		if strings.HasPrefix(line, "## ") {
-			fmt.Printf("  %s%s%s\n", colorBold, strings.TrimPrefix(line, "## "), colorReset)
-			continue
-		}
-		if strings.HasPrefix(line, "### ") {
-			fmt.Printf("  %s%s%s\n", colorBold, strings.TrimPrefix(line, "### "), colorReset)
-			continue
-		}
-
-		// Format bullet points
-		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
-			content := strings.TrimPrefix(strings.TrimPrefix(line, "- "), "* ")
-			fmt.Printf("  %s•%s %s\n", colorCyan, colorReset, content)
-			continue
-		}
-
-		// Regular text
-		fmt.Printf("  %s\n", line)
-	}
-}
-
 // MCP sync commands
 
 func mcpCmd() *cobra.Command {
@@ -2824,12 +2100,7 @@ func mcpEnableCmd() *cobra.Command {
 			fmt.Printf("%s✓%s MCP auto-sync enabled.\n", colorGreen, colorReset)
 
 			// Push current state immediately
-			syncer, err := sync.NewSyncer(cfg, quiet)
-			if err != nil {
-				return err
-			}
-			ctx := context.Background()
-			return runMCPPush(ctx, syncer)
+			return runMCPLocked(context.Background(), cfg, true)
 		},
 	}
 }
@@ -2907,14 +2178,7 @@ func mcpPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-
-			syncer, err := sync.NewSyncer(cfg, quiet)
-			if err != nil {
-				return err
-			}
-
-			ctx := context.Background()
-			return runMCPPush(ctx, syncer)
+			return runMCPLocked(context.Background(), cfg, true)
 		},
 	}
 }
@@ -2928,14 +2192,7 @@ func mcpPullCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-
-			syncer, err := sync.NewSyncer(cfg, quiet)
-			if err != nil {
-				return err
-			}
-
-			ctx := context.Background()
-			return runMCPPull(ctx, syncer)
+			return runMCPLocked(context.Background(), cfg, false)
 		},
 	}
 }
@@ -3001,13 +2258,19 @@ func runMCPPull(ctx context.Context, syncer *sync.Syncer) error {
 	return nil
 }
 
-// autoCmd manages auto-sync hooks in Claude Code settings
+// autoCmd handles the Claude Code hooks older claude-sync versions installed.
+// Stradl syncs from a background agent instead, so it only reports and
+// removes those hooks; it never installs new ones.
 func autoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "auto",
-		Short: "Manage auto-sync hooks for Claude Code",
-		Long: `Install or remove claude-sync hooks that automatically pull on session start
-and push on session end. Hooks are stored in ~/.claude/settings.json.`,
+		Short: "Legacy Claude Code hooks (Stradl uses a background agent instead)",
+		Long: `claude-sync could sync from Claude Code hooks: pull on SessionStart and push
+on Stop, stored in ~/.claude/settings.json. Stradl keeps every Mac in sync
+with a background agent instead; run 'stradl agent install'.
+
+'auto disable' removes leftover claude-sync hooks, and 'auto status' reports
+whether any are still installed.`,
 	}
 
 	cmd.AddCommand(
@@ -3019,58 +2282,48 @@ and push on session end. Hooks are stored in ~/.claude/settings.json.`,
 	return cmd
 }
 
+// legacyHookStatus reports which claude-sync hooks are installed in Claude
+// Code's settings.json.
+func legacyHookStatus() (claudesettings.AutoSyncStatus, error) {
+	settings, err := claudesettings.Load(claudesettings.SettingsPath(""))
+	if err != nil {
+		return claudesettings.AutoSyncStatus{}, fmt.Errorf("failed to load settings: %w", err)
+	}
+	return settings.AutoSyncStatus(), nil
+}
+
+func printLegacyHooks(status claudesettings.AutoSyncStatus) {
+	if status.HasSessionStart {
+		fmt.Printf("    SessionStart → %s\n", claudesettings.HookCommandPull)
+	}
+	if status.HasStop {
+		fmt.Printf("    Stop → %s\n", claudesettings.HookCommandPush)
+	}
+}
+
 func autoEnableCmd() *cobra.Command {
-	var dryRun bool
-
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "enable",
-		Short: "Install auto-sync hooks into Claude Code",
-		Long: `Adds hooks to ~/.claude/settings.json:
-  - SessionStart: runs "claude-sync pull -q" when a session begins
-  - Stop: runs "claude-sync push -q" when a session ends
-
-Existing hooks are preserved. This command is idempotent.`,
+		Short: "Explain how to turn on background sync (no hooks are installed)",
+		Long: `Stradl does not install Claude Code hooks. Background sync is handled by the
+Stradl agent, which you install with 'stradl agent install'.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path := claudesettings.SettingsPath("")
+			fmt.Printf("%s⋯%s Stradl syncs with a background agent, not Claude Code hooks.\n", colorDim, colorReset)
+			fmt.Printf("    Run '%sstradl agent install%s' to keep this Mac in sync automatically.\n", colorCyan, colorReset)
 
-			settings, err := claudesettings.Load(path)
+			status, err := legacyHookStatus()
 			if err != nil {
-				return fmt.Errorf("failed to load settings: %w", err)
+				return err
 			}
-
-			changed := settings.EnableAutoSync()
-
-			if !changed {
-				if !quiet {
-					fmt.Printf("%s✓%s Auto-sync hooks already installed\n", colorGreen, colorReset)
-				}
-				return nil
+			if status.Enabled {
+				fmt.Println()
+				printWarning("Legacy claude-sync hooks are still installed:")
+				printLegacyHooks(status)
+				fmt.Printf("    Remove them with '%sstradl auto disable%s'.\n", colorCyan, colorReset)
 			}
-
-			if dryRun {
-				fmt.Printf("%s⋯%s Dry run: would install auto-sync hooks:\n", colorDim, colorReset)
-				fmt.Printf("    SessionStart → %s\n", claudesettings.HookCommandPull)
-				fmt.Printf("    Stop → %s\n", claudesettings.HookCommandPush)
-				return nil
-			}
-
-			if err := settings.Save(path); err != nil {
-				return fmt.Errorf("failed to save settings: %w", err)
-			}
-
-			if !quiet {
-				fmt.Printf("%s✓%s Auto-sync hooks installed:\n", colorGreen, colorReset)
-				fmt.Printf("    SessionStart → %s\n", claudesettings.HookCommandPull)
-				fmt.Printf("    Stop → %s\n", claudesettings.HookCommandPush)
-			}
-
 			return nil
 		},
 	}
-
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be changed without modifying files")
-
-	return cmd
 }
 
 func autoDisableCmd() *cobra.Command {
@@ -3078,7 +2331,7 @@ func autoDisableCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "disable",
-		Short: "Remove auto-sync hooks from Claude Code",
+		Short: "Remove legacy claude-sync hooks from Claude Code",
 		Long: `Removes claude-sync hooks from ~/.claude/settings.json.
 Other hooks are preserved. This command is idempotent.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -3093,13 +2346,13 @@ Other hooks are preserved. This command is idempotent.`,
 
 			if !changed {
 				if !quiet {
-					fmt.Printf("%s✓%s Auto-sync hooks not installed\n", colorGreen, colorReset)
+					fmt.Printf("%s✓%s No legacy claude-sync hooks installed\n", colorGreen, colorReset)
 				}
 				return nil
 			}
 
 			if dryRun {
-				fmt.Printf("%s⋯%s Dry run: would remove auto-sync hooks\n", colorDim, colorReset)
+				fmt.Printf("%s⋯%s Dry run: would remove legacy claude-sync hooks\n", colorDim, colorReset)
 				return nil
 			}
 
@@ -3108,7 +2361,7 @@ Other hooks are preserved. This command is idempotent.`,
 			}
 
 			if !quiet {
-				fmt.Printf("%s✓%s Auto-sync hooks removed\n", colorGreen, colorReset)
+				fmt.Printf("%s✓%s Legacy claude-sync hooks removed\n", colorGreen, colorReset)
 			}
 
 			return nil
@@ -3123,29 +2376,21 @@ Other hooks are preserved. This command is idempotent.`,
 func autoStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show auto-sync hook status",
+		Short: "Report legacy claude-sync hooks, if any",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path := claudesettings.SettingsPath("")
-
-			settings, err := claudesettings.Load(path)
+			status, err := legacyHookStatus()
 			if err != nil {
-				return fmt.Errorf("failed to load settings: %w", err)
+				return err
 			}
-
-			status := settings.AutoSyncStatus()
 
 			if status.Enabled {
-				fmt.Printf("%s✓%s Auto-sync: %senabled%s\n", colorGreen, colorReset, colorGreen, colorReset)
-				if status.HasSessionStart {
-					fmt.Printf("    SessionStart → %s\n", claudesettings.HookCommandPull)
-				}
-				if status.HasStop {
-					fmt.Printf("    Stop → %s\n", claudesettings.HookCommandPush)
-				}
+				fmt.Printf("%s!%s Legacy claude-sync hooks are installed:\n", colorYellow, colorReset)
+				printLegacyHooks(status)
+				fmt.Printf("    They run the old claude-sync, not Stradl. Remove them with '%sstradl auto disable%s'.\n", colorCyan, colorReset)
 			} else {
-				fmt.Printf("%s⋯%s Auto-sync: %snot installed%s\n", colorDim, colorReset, colorDim, colorReset)
-				fmt.Printf("    Run '%sclaude-sync auto enable%s' to install hooks\n", colorCyan, colorReset)
+				fmt.Printf("%s✓%s No legacy claude-sync hooks installed\n", colorGreen, colorReset)
 			}
+			fmt.Printf("    Background sync is handled by the Stradl agent ('%sstradl agent install%s').\n", colorCyan, colorReset)
 
 			return nil
 		},
