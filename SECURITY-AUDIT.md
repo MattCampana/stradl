@@ -1,3 +1,5 @@
+> **Note:** this is the upstream tawanorg/claude-sync security audit, kept for reference. It predates the Stradl fork, so it mentions the npm installer and other parts that no longer exist here. The current model is in [docs/security.md](docs/security.md).
+
 # Security Audit Report: claude-sync
 
 **Date:** 2026-03-08

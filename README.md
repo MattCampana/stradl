@@ -1,498 +1,130 @@
-<div align="center">
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/lockup-dark.svg">
+    <img src="assets/brand/lockup-light.svg" alt="stradl" width="360">
+  </picture>
+</p>
 
-<img src="assets/banner.svg" alt="Claude Sync" width="100%">
+<p align="center"><strong>Musical chairs for your Claude sessions.</strong></p>
 
-<br>
-
-*Encrypted with [age](https://github.com/FiloSottile/age) • R2 / S3 / GCS / WebDAV supported*
-
-[![Release](https://img.shields.io/github/v/release/tawanorg/claude-sync)](https://github.com/tawanorg/claude-sync/releases)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![npm](https://img.shields.io/npm/v/@tawandotorg/claude-sync)](https://www.npmjs.com/package/@tawandotorg/claude-sync)
-[![Socket Badge](https://badge.socket.dev/npm/package/@tawandotorg/claude-sync/1.11.1)](https://badge.socket.dev/npm/package/@tawandotorg/claude-sync/1.11.1)
-
-[Quick Start](#quick-start) • [Setup Guide](#setup-guide) • [Commands](#commands) • [Shell Integration](#shell-integration) • [Security](#security)
-
-</div>
+<p align="center">
+  <a href="https://github.com/REPLACE_OWNER/stradl/releases/latest"><img src="https://img.shields.io/github/v/release/REPLACE_OWNER/stradl?label=release" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/macOS-13%2B-black?logo=apple" alt="macOS 13+">
+</p>
 
 ---
 
-## Features
+Stradl keeps every Claude Code session on every one of your Macs. Start a conversation on your desk Mac, sit down at your laptop, and it's already there: in the Claude desktop app's sidebar and in `claude --resume`.
 
-- **Cross-device sync**: Continue Claude Code conversations on any laptop
-- **Multi-provider storage**: Cloudflare R2, AWS S3, Google Cloud Storage, S3-compatible (Backblaze B2, MinIO, Wasabi), or WebDAV (Nextcloud, ownCloud)
-- **End-to-end encryption**: All files encrypted with age before upload
-- **Passphrase-based keys**: Same passphrase = same key on any device (no file copying)
-- **Selective sync**: Choose `--scope sessions` to sync only conversation data (skip plugins/node_modules)
-- **Interactive wizard**: Arrow-key driven setup with validation
-- **Secure self-updating**: `claude-sync update` downloads and verifies SHA256 checksums
-- **Simple CLI**: `push`, `pull`, `status`, `diff`, `conflicts` commands
-- **Compression**: Gzip compression before encryption for faster syncs
-- **Shell integration**: Optional shell hooks for automatic push/pull
+- **Every session, everywhere.** Three sessions on one Mac, two on another and four on a third become nine on all three. Nothing is overwritten, and nothing is left behind.
+- **Built for the Claude desktop app.** Sessions show up in the Code tab's sidebar on every Mac, not just in the terminal.
+- **Different usernames are fine.** `/Users/matt` on one Mac and `/Users/breakpoint` on another just work.
+- **Your projects can live anywhere.** Stradl finds each project on each Mac by its git remote, so `~/code/app` here and `~/Projects/app` there are the same project.
+- **Conversations never fork silently.** Continue the same session on two Macs before they sync and Stradl merges both sides, so every turn survives.
+- **Your storage, your keys.** Sessions are compressed and encrypted on your Mac with [age](https://age-encryption.org) before they leave it. Azure (or R2, S3, GCS, WebDAV) only ever sees ciphertext.
+- **Set and forget.** A small menu bar app syncs in the background, at login, after you wake your Mac, and whenever a session changes.
 
-<div align="center">
-<img src="assets/claude-sync.gif" alt="Claude Sync Demo" width="100%">
-</div>
+## Install
 
-## Quick Start
+You need about ten minutes: two for Azure, then a couple per Mac.
 
-### First Device
+### 1. Create your storage (once)
+
+Open [Azure Cloud Shell](https://shell.azure.com) (Bash) and run:
 
 ```bash
-# Install
-npm install -g @tawandotorg/claude-sync
-
-# Set up (interactive wizard)
-claude-sync init
-
-# Push your sessions
-claude-sync push
+curl -fsSL https://raw.githubusercontent.com/REPLACE_OWNER/stradl/main/scripts/azure-setup.sh | bash -s -- \
+  --resource-group rg-stradl --location eastus --account <yourname>stradl
 ```
 
-### Second Device
+Pick a storage account name of 3 to 24 lowercase letters and digits. The script creates a private container with versioning and 30-day soft delete, then prints a **SAS token** scoped to that one container. Save the account name, the container name and the token in your password manager. Details are in [docs/azure.md](docs/azure.md).
+
+### 2. Install on each Mac
 
 ```bash
-# Install
-npm install -g @tawandotorg/claude-sync
-
-# Set up with SAME storage credentials
-claude-sync init
-# Select same provider (R2/S3/GCS/WebDAV)
-# Enter same bucket name and credentials
-# Choose "Passphrase" for encryption
-# Enter the SAME passphrase as first device
-# ✓ Encryption key verified  <-- confirms passphrase matches!
-
-# Preview what would be synced
-claude-sync pull --dry-run
-
-# Pull sessions (creates backup if you have existing files)
-claude-sync pull
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/REPLACE_OWNER/stradl/main/install.sh)"
 ```
 
-**Same passphrase = same encryption key.** The init verifies your passphrase can decrypt remote files before completing.
+The installer needs no admin rights, no Homebrew and no Go. It downloads the release for your Mac, verifies its checksum, installs `stradl` into `~/.local/bin`, then walks you through setup:
 
-## Setup Guide
+1. Choose **Azure Blob Storage** and paste the account, the container and the SAS token (the token stays hidden).
+2. Choose an **encryption passphrase**. Use the same passphrase on every Mac; it never leaves your Mac and can't be recovered, so keep it in your password manager.
+3. The menu bar app installs and starts at login.
 
-### Step 1: Choose a Storage Provider
+Repeat on your other Macs with the same storage details and the same passphrase.
 
-| Provider | Free Tier | Best For |
-|----------|-----------|----------|
-| **Cloudflare R2** | 10GB storage | Personal use (recommended) |
-| **AWS S3** | 5GB (12 months) | AWS users |
-| **Google Cloud Storage** | 5GB | GCP users |
-| **S3-compatible** | varies | Backblaze B2, MinIO, Wasabi, DigitalOcean Spaces, self-hosted |
-| **WebDAV** | Self-hosted (unlimited) | Nextcloud/ownCloud users |
+> Use Stradl in one macOS login per person. If a Mac has a separate work login, don't install it there: whatever is in that login's `~/.claude` would sync into your storage.
 
-### Step 2: Create a Bucket
+## Using it
 
-<details>
-<summary><b>Cloudflare R2</b> (recommended)</summary>
+Look for the Stradl mark in the menu bar:
 
-1. Go to [Cloudflare Dashboard](https://dash.cloudflare.com/) → R2 Object Storage
-2. Click "Create bucket" → name it `claude-sync`
-3. Go to "Manage R2 API Tokens" → "Create API Token"
-4. Select **Object Read & Write** permission → Create
+| Menu item | What it does |
+|-----------|--------------|
+| **Synced 2 min ago · 9 sessions** | Status at a glance |
+| **Sync Now** | Sync immediately |
+| **Pause Syncing** | Stop syncing until you resume (handy on a metered connection) |
+| **Restart Claude to show N new sessions** | Appears when sessions arrive from another Mac; see below |
+| **Open Log** | `~/.stradl/agent.log` |
 
-You'll need: Account ID, Access Key ID, Secret Access Key
-</details>
+**New sessions from another Mac appear after Claude restarts.** The Claude desktop app reads its sidebar when it launches, so Stradl lets you know when new sessions arrive and offers to restart Claude for you. Sessions already in your sidebar update in place.
 
-<details>
-<summary><b>AWS S3</b></summary>
+**An open session is never rewritten underneath you.** If a session is running on this Mac, updates from other Macs wait until you close it.
 
-1. Go to [S3 Console](https://s3.console.aws.amazon.com/s3/bucket/create) → Create bucket
-2. Go to [IAM Security Credentials](https://console.aws.amazon.com/iam/home#/security_credentials)
-3. Create Access Keys
+**Deleting a session only deletes it on that Mac.** The other Macs keep their copy, and so does your storage. If you continue that session elsewhere later, it comes back.
 
-You'll need: Access Key ID, Secret Access Key, Region
-</details>
+### Commands
 
-<details>
-<summary><b>Google Cloud Storage</b></summary>
+| Command | |
+|---------|---|
+| `stradl sync` | Two-way sync now |
+| `stradl status` | Agent status, last sync, and what's waiting to sync |
+| `stradl diff` | The files the next sync would upload, download or merge |
+| `stradl agent install` / `uninstall` | Start or stop the background app at login |
+| `stradl agent pause` / `resume` | Pause or resume background syncing |
+| `stradl update` | Update to the latest release |
+| `stradl init` | Set up storage and encryption again |
 
-1. Go to [Cloud Storage](https://console.cloud.google.com/storage/create-bucket) → Create bucket
-2. Go to [Service Accounts](https://console.cloud.google.com/iam-admin/serviceaccounts) → Create service account
-3. Grant "Storage Object Admin" role → Create JSON key
+## How it works
 
-You'll need: Project ID, Service Account JSON file (or use `gcloud auth application-default login`)
-</details>
+Every sync compares each file on your Mac with the copy in storage and with the version both last agreed on:
 
-<details>
-<summary><b>S3-compatible</b> (Backblaze B2, MinIO, Wasabi, DigitalOcean Spaces, ...)</summary>
+- **New on either side:** copied to the other side.
+- **Changed on one side:** that side wins.
+- **Changed on both sides:** transcripts are merged line by line (every message is kept, in time order); sidebar entries keep the most recently active version.
+- **Deleted on this Mac:** stays deleted here; every other copy is kept.
+- **Missing from storage:** restored from this Mac.
 
-Any provider exposing an S3-compatible API works through the **S3-compatible (custom endpoint)** option. Create a bucket and an application key with your provider, then supply its S3 endpoint URL.
-
-Example (Backblaze B2):
-
-```bash
-claude-sync init --provider s3-compatible --endpoint https://s3.us-west-004.backblazeb2.com
-```
-
-You'll need: Endpoint URL, Access Key ID, Secret Access Key, Bucket. The signing region is auto-detected from the endpoint (e.g. `us-west-004`); for providers that ignore it, `auto` is used.
-
-For servers that don't resolve buckets as subdomains (e.g. Ceph RGW, or MinIO without wildcard DNS), add `--use-path-style` to address objects as `endpoint/bucket/key` instead of `bucket.endpoint/key`:
-
-```bash
-claude-sync init --provider s3-compatible --endpoint https://ceph.example.com --use-path-style
-```
-
-It's off by default and unnecessary for Backblaze B2, Wasabi, and DigitalOcean Spaces, which all support virtual-hosted addressing.
-
-> Custom endpoints automatically relax the AWS SDK's default integrity-checksum headers, which some S3-compatible providers reject. AWS S3 behavior is unchanged.
-</details>
-
-<details>
-<summary><b>WebDAV (Nextcloud, ownCloud, etc.)</b></summary>
-
-No bucket to create — just point at your existing WebDAV server.
-
-1. **Nextcloud**: Go to Settings → Security → Devices & sessions → Create app password
-2. Note your WebDAV URL: `https://your-server/remote.php/dav/files/USERNAME/`
-
-You'll need: WebDAV URL, Username, App password
-
-The wizard will create a `claude-sync` subdirectory automatically.
-</details>
-
-### Step 3: Run Init
-
-```bash
-claude-sync init
-```
-
-The interactive wizard will guide you through:
-
-1. **Select storage provider** (R2, S3, GCS, or WebDAV)
-2. **Enter credentials** (provider-specific)
-3. **Choose encryption method**:
-   - **Passphrase** (recommended) - same passphrase on all devices = same key
-   - **Random key** - must copy `~/.claude-sync/age-key.txt` to other devices
-4. **Test the connection** to verify everything works
-
-### Step 4: Push and Pull
-
-```bash
-# Upload local changes
-claude-sync push
-
-# Download remote changes
-claude-sync pull
-```
-
-## What Gets Synced
-
-| Path | Content |
-|------|---------|
-| `~/.claude/projects/` | Session files, auto-memory |
-| `~/.claude/plans/` | Implementation plans from plan mode |
-| `~/.claude/tasks/` | Task tracking state |
-| `~/.claude/history.jsonl` | Command history |
-| `~/.claude/agents/` | Custom agents |
-| `~/.claude/skills/` | Custom skills |
-| `~/.claude/plugins/` | Plugins |
-| `~/.claude/rules/` | Custom rules |
-| `~/.claude/settings.json` | Settings |
-| `~/.claude/settings.local.json` | Local settings |
-| `~/.claude/CLAUDE.md` | Global instructions |
-
-### Sync scope
-
-`init` asks whether to sync everything or just conversation data; you can also set it with `--scope`:
-
-| Scope | Syncs | Use when |
-|-------|-------|----------|
-| `full` (default) | everything in the table above | you want settings, skills, agents, and plugins mirrored too |
-| `sessions` | `projects/`, `history.jsonl`, `tasks/`, `plans/` only | you just want `claude --resume` to work across machines |
-
-```bash
-claude-sync init --scope sessions
-```
-
-**Why `sessions` exists:** `full` includes `plugins/`, whose plugin caches bundle `node_modules` and Python `.venv` trees — thousands of large, machine-/arch-specific files that are regenerated on demand and should not be synced. `sessions` skips them, keeping syncs small, fast, and portable. The scope is saved in `~/.claude-sync/config.yaml` and applies to every `push`/`pull`.
-
-## Cross-Device Path Mapping
-
-Claude Code indexes project sessions by **absolute filesystem path**:
-
-```
-/Users/alice/my-app → ~/.claude/projects/-Users-alice-my-app/
-/Users/bob/my-app   → ~/.claude/projects/-Users-bob-my-app/
-```
-
-Synced verbatim, those would be **different projects** and `claude --resume` on the second machine would never find the first machine's sessions. claude-sync solves this by translating paths during sync:
-
-- **Home directories are mapped automatically.** Sessions are stored remotely under a portable `${HOME}` token (in both remote keys and transcript content), then rewritten to each device's real home on pull. Different usernames across machines just work.
-- **Other layout differences are configurable.** If one machine keeps projects in `~/work` and another in `~/Projects`, point both at the same token in `~/.claude-sync/config.yaml`:
-
-  ```yaml
-  # machine 1
-  path_map:
-    ~/work: WORK
-  ```
-
-  ```yaml
-  # machine 2
-  path_map:
-    ~/Projects: WORK
-  ```
-
-  Sessions under either directory sync to the shared `${WORK}` namespace and resume correctly on both machines.
-
-**Upgrading from an older version?** Run `claude-sync migrate` once on each device to convert existing remote data to portable keys. Paths the current device doesn't own are left for the other device's migrate run.
-
-## Commands
-
-```bash
-claude-sync init        # Set up configuration (interactive wizard)
-claude-sync push        # Upload local changes to cloud storage
-claude-sync pull        # Download remote changes from cloud storage
-claude-sync status      # Show pending local changes
-claude-sync diff        # Show differences between local and remote
-claude-sync conflicts   # List and resolve conflicts
-claude-sync rebuild-history  # Rebuild ~/.claude/history.jsonl from session files
-claude-sync reset       # Reset configuration (forgot passphrase)
-claude-sync migrate     # Convert legacy remote keys to portable path-mapped keys
-claude-sync update      # Update to latest version (verifies release checksums)
-claude-sync changelog   # Show release history
-claude-sync --help      # Show all commands
-```
-
-### Pull Options
-
-```bash
-claude-sync pull                    # Normal pull (prompts if existing files)
-claude-sync pull --dry-run          # Preview what would change
-claude-sync pull --force            # Skip confirmation prompts
-claude-sync pull --rebuild-history  # Also rebuild history.jsonl after pulling
-```
-
-### Rebuilding Prompt History
-
-`history.jsonl` is synced as a single file, so pushes from two devices are
-last-writer-wins and one device's prompt-history entries can be lost — which
-breaks the `/resume` session picker. Session files sync cleanly (one file per
-session), so the history can always be reconstructed from them:
-
-```bash
-claude-sync rebuild-history         # One-off rebuild
-claude-sync pull --rebuild-history  # Rebuild automatically after a pull
-```
-
-Every existing entry is preserved, recovered prompts are merged in and sorted by
-timestamp, and the previous file is kept as `history.jsonl.bak`.
-
-### Init Options
-
-```bash
-claude-sync init              # Full setup wizard
-claude-sync init --passphrase # Re-enter passphrase only (keeps storage config)
-claude-sync init --force      # Reset everything, start fresh
-```
-
-### Quiet Mode
-
-```bash
-claude-sync push -q     # No output (for scripts)
-claude-sync pull -q
-```
-
-### Check for Updates
-
-```bash
-claude-sync update --check   # Check without installing
-claude-sync update           # Download and install latest version
-```
-
-### Changelog
-
-```bash
-claude-sync changelog            # Show recent releases
-claude-sync changelog --limit 5  # Show last 5 releases
-```
-
-## Exclude Patterns
-
-Skip specific files or directories during sync by adding exclude patterns to your config (`~/.claude-sync/config.yaml`):
-
-```yaml
-exclude:
-  - "*.tmp"
-  - "projects/*/node_modules/*"
-  - "projects/*/.git/*"
-```
-
-Patterns use glob syntax and are matched against paths relative to `~/.claude`.
-
-## Shell Integration
-
-Add to `~/.zshrc` or `~/.bashrc`:
-
-```bash
-# Auto-pull on shell start
-if command -v claude-sync &> /dev/null; then
-  # Run in a subshell so the job is detached from the parent shell's
-  # job table — avoids interactive `[1] 12345` / `[1] + done` noise.
-  (claude-sync pull -q &) >/dev/null 2>&1
-fi
-
-# Auto-push on shell exit
-trap 'claude-sync push -q' EXIT
-```
-
-> **Note:** The subshell wrapper `(cmd &)` prevents zsh/bash from printing job control
-> messages (`[1] 12345` on start and `[1] + done cmd` on completion) every time you open
-> a terminal. A plain `claude-sync pull -q &` works but produces noisy shell prompts.
-
-## Pulling with Existing Files
-
-When you pull on a device that already has `~/.claude` files, claude-sync will:
-
-1. **Show what would change** - files that would be overwritten, kept, or downloaded
-2. **Ask for confirmation** - choose to backup, overwrite, or abort
-3. **Create a backup** - saves existing files to `~/.claude.backup.{timestamp}`
-
-```bash
-# Preview first
-claude-sync pull --dry-run
-
-# Pull with prompts
-claude-sync pull
-
-# Skip prompts (for scripts)
-claude-sync pull --force
-```
-
-## Conflict Resolution
-
-When both local and remote files change, the remote version is saved as `.conflict`:
-
-```bash
-claude-sync conflicts            # Interactive resolution
-claude-sync conflicts --list     # Just list conflicts
-claude-sync conflicts --keep local   # Keep all local versions
-claude-sync conflicts --keep remote  # Keep all remote versions
-```
-
-Interactive options:
-- **[l]** Keep local (delete conflict file)
-- **[r]** Keep remote (replace local)
-- **[d]** Show diff
-- **[s]** Skip
-- **[q]** Quit
-
-## Wrong Passphrase?
-
-If you entered the wrong passphrase on a new device:
-
-```bash
-# Re-enter passphrase (keeps your storage config)
-claude-sync init --passphrase
-```
-
-The init will verify your passphrase can decrypt remote files before completing.
-
-## Forgot Passphrase?
-
-The passphrase is **never stored**. If you forget it:
-
-1. Your encrypted files cannot be recovered
-2. Reset and start fresh:
-
-```bash
-claude-sync reset --remote   # Delete remote files and local config
-claude-sync init             # Set up again with new passphrase
-claude-sync push             # Re-upload from this device
-```
+Remote changes are detected by version tags, not timestamps, so a Mac with a wrong clock can't lose data. Uploads are compare-and-swap: if two Macs sync the same file at the same moment, the slower one merges instead of overwriting. Paths inside sessions are stored with a portable `${HOME}` token and rewritten for each Mac on download.
 
 ## Security
 
-- Files compressed with gzip, then encrypted with [age](https://github.com/FiloSottile/age) before upload
-- Passphrase-derived keys use Argon2 (memory-hard KDF)
-- Passphrase is never stored - only the derived key at `~/.claude-sync/age-key.txt`
-- Cloud storage is private (API key/IAM auth)
-- Config files and downloads stored with 0600/0700 permissions (user-only)
-- Self-update verifies SHA256 checksums before installing new binaries
-- Backward compatible: can read both compressed and uncompressed remote files
+- Encryption happens on your Mac. Storage holds only age-encrypted, gzip-compressed blobs.
+- The SAS token can reach exactly one container. Revoke it at any time by deleting its stored access policy in the Azure portal.
+- Your passphrase derives the encryption key on each Mac and is never stored or uploaded. Lose it and the synced copies can't be decrypted (your local sessions are unaffected).
+- Config lives in `~/.stradl/config.yaml` with permissions `0600`. Tokens are redacted from logs.
+- Blob versioning and 30-day soft delete give you an undo for anything that goes wrong.
 
-## Cost
+## Limitations
 
-Claude sessions typically use < 50MB. Syncing is effectively **free** on any provider:
+- **macOS only** for the menu bar app. Linux builds run the same sync engine headless (`stradl agent run --headless`).
+- **A project you haven't cloned on a Mac** can't be opened there; the session still syncs, and the Claude app tells you the folder is missing. Clone the repo anywhere under your home folder and Stradl will find it.
+- **Claude Code deletes transcripts older than 30 days** by default (`cleanupPeriodDays`). Raise it in `~/.claude/settings.json` on every Mac to keep old sessions everywhere.
+- The binaries aren't notarized by Apple. The curl installer doesn't trigger Gatekeeper; a browser download would.
 
-| Provider | Free Tier |
-|----------|-----------|
-| **Cloudflare R2** | 10GB storage, 1M writes, 10M reads/month |
-| **AWS S3** | 5GB for 12 months (then ~$0.023/GB) |
-| **Google Cloud Storage** | 5GB, 5K writes, 50K reads/month |
-| **WebDAV** | Self-hosted — no limits, no cost beyond your own server |
-
-## Installation Options
-
-### npm (recommended)
-
-**Prerequisite:** Node.js 14+ (no Go required - downloads pre-compiled binary)
+## Building from source
 
 ```bash
-# Global install
-npm install -g @tawandotorg/claude-sync
-
-# Or one-time use
-npx @tawandotorg/claude-sync init
+make build          # bin/stradl for this Mac
+make test           # go test ./...
+make release VERSION=0.1.0 RELEASE_REPO=you/stradl   # all four release archives + checksums
 ```
 
-### GitHub Packages
+The brand assets are generated from [assets/brand/src](assets/brand/src) (`python3 assets/brand/src/build.py`).
 
-**Prerequisite:** Node.js 14+
+## Credits
 
-```bash
-# Add to ~/.npmrc
-echo "@tawanorg:registry=https://npm.pkg.github.com" >> ~/.npmrc
+Stradl is built on [tawanorg/claude-sync](https://github.com/tawanorg/claude-sync) (MIT): its encryption, storage adapters and path mapping are the foundation the union sync engine, the desktop sidebar sync and the menu bar app sit on. Thanks, Tawan.
 
-# Install
-npm install -g @tawanorg/claude-sync
-```
-
-### Download Binary
-
-**Prerequisite:** None
-
-```bash
-# macOS ARM (M1/M2/M3)
-curl -L https://github.com/tawanorg/claude-sync/releases/latest/download/claude-sync-darwin-arm64 -o claude-sync
-chmod +x claude-sync
-sudo mv claude-sync /usr/local/bin/
-```
-
-See [GitHub Releases](https://github.com/tawanorg/claude-sync/releases) for all platforms.
-
-### Go Install
-
-**Prerequisite:** Go 1.21+ (for developers)
-
-```bash
-go install github.com/tawanorg/claude-sync/cmd/claude-sync@latest
-```
-
-### Build from Source
-
-**Prerequisite:** Go 1.21+
-
-```bash
-git clone https://github.com/tawanorg/claude-sync
-cd claude-sync
-make build
-./bin/claude-sync --version
-```
-
-## Development
-
-```bash
-make test          # Run tests
-make fmt           # Format code
-make check         # Run all pre-commit checks
-make build-all     # Build for all platforms
-make setup-hooks   # Enable git pre-commit hooks
-```
-
-## License
-
-MIT
+MIT licensed. See [LICENSE](LICENSE).

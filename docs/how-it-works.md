@@ -5,546 +5,99 @@ title: How It Works
 
 # How It Works
 
-[Home](./index) | [Architecture](./architecture) | [Security](./security)
+[Home](./index) | [Azure Setup](./azure) | [Security](./security)
 
 ---
 
-## Initialization
+## What gets synced
 
-When you run `claude-sync init`, an interactive wizard guides you through setup:
+| On your Mac | In storage | Why |
+|-------------|------------|-----|
+| `~/.claude/projects/**` | `projects/${HOME}-…/…` | Session transcripts, subagent transcripts, tool results |
+| `~/.claude/history.jsonl` | `history.jsonl` | Prompt history (up-arrow) |
+| `~/.claude/plans`, `~/.claude/tasks` | same | Plan files and task lists sessions refer to |
+| `~/Library/Application Support/Claude/claude-code-sessions/<account>/<org>/local_*.json` | `_desktop/sessions/…` | The Claude desktop app's Code-tab sidebar entries |
 
-### Step 1: Select Storage Provider
+Everything else stays on the Mac: credentials, `~/.claude.json`, settings, plugins, running-process records, and the desktop app's private state (tombstones, indexes, scheduled tasks). Every file is gzip-compressed and age-encrypted before upload, and stored as `<path>.age`.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  ? Choose your cloud storage provider:                  │
-│  > Cloudflare R2 (recommended - free tier: 10GB)        │
-│    Amazon S3                                            │
-│    Google Cloud Storage                                 │
-└─────────────────────────────────────────────────────────┘
-```
+## The sync pass
 
-### Step 2: Provider-Specific Credentials
+`stradl sync`, the menu bar app and the background agent all run the same reconcile pass, under a per-Mac lock so two passes never overlap. For each file it compares three things: the copy on this Mac, the copy in storage, and the version both sides last agreed on (kept in `~/.stradl/state.json`).
 
-**Cloudflare R2:**
-```
-┌─────────────────────────────────────────┐
-│  Cloudflare R2 Setup                    │
-├─────────────────────────────────────────┤
-│  ? Account ID: abc123def               │
-│  ? Access Key ID: xxxxxxxxxx           │
-│  ? Secret Access Key: **************** │
-│  ? Bucket name: claude-sync             │
-└─────────────────────────────────────────┘
-```
+| Situation | Result |
+|-----------|--------|
+| New on this Mac | Uploaded |
+| New in storage | Downloaded |
+| Changed only here | Uploaded |
+| Changed only in storage | Downloaded |
+| Changed on both sides | Merged (see below) |
+| Deleted on this Mac | Stays deleted here; storage and the other Macs keep it |
+| Deleted here, then changed on another Mac | Comes back with the new content |
+| Missing from storage | Restored from this Mac |
 
-**Amazon S3:**
-```
-┌─────────────────────────────────────────┐
-│  Amazon S3 Setup                        │
-├─────────────────────────────────────────┤
-│  ? Access Key ID: AKIAXXXXXXX          │
-│  ? Secret Access Key: **************** │
-│  ? AWS Region: us-east-1               │
-│  ? Bucket name: claude-sync             │
-└─────────────────────────────────────────┘
-```
+The result is a union: every session any Mac has ever created ends up on every Mac.
 
-**Google Cloud Storage:**
-```
-┌─────────────────────────────────────────┐
-│  Google Cloud Storage Setup             │
-├─────────────────────────────────────────┤
-│  ? GCP Project ID: my-project-123      │
-│  ? Authentication method:               │
-│    > Application Default Credentials    │
-│      Service Account JSON file          │
-│  ? Bucket name: claude-sync             │
-└─────────────────────────────────────────┘
-```
+### Change detection without clocks
 
-### Step 3: Encryption Setup
+Storage changes are detected by ETag, the version tag Azure assigns on every write, never by comparing timestamps. Laptop clocks drift, and a sync tool that trusts them eventually loses data. Local changes are detected by content hash, with a size-and-mtime fast path so an idle pass reads almost nothing.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  ? Choose encryption key method:                        │
-│  > Passphrase (recommended) - same key on all devices   │
-│    Random key - must copy key file to other devices     │
-└─────────────────────────────────────────────────────────┘
-                    │
-                    ▼ (if passphrase)
-┌─────────────────────────────────────────────────────────┐
-│  ? Passphrase (min 8 chars): ********                   │
-│  ? Confirm passphrase: ********                         │
-└─────────────────────────────────────────────────────────┘
+### Compare-and-swap uploads
+
+Every upload says "replace the version I last saw" (an `If-Match` precondition). If another Mac wrote the file in between, Azure rejects the upload, and Stradl fetches the newer version, merges, and tries again. Two Macs syncing the same session at the same moment both keep their turns.
+
+### Merging
+
+- **Transcripts and prompt history** are append-only JSONL files. Stradl takes the union of both versions' lines: entries are identified by their `uuid` (or exact content when there is none), the shared history keeps its order, and the two divergent tails are interleaved by timestamp. Claude Code rebuilds the conversation from each entry's `parentUuid`, so turns written on the other Mac survive as a branch, and the newest entry ends the file.
+- **Sidebar entries** keep whichever version was active most recently (`lastActivityAt`).
+- **Anything else** keeps the newer copy and saves the other beside it as `<file>.conflict.<timestamp>`.
+
+### Live sessions
+
+A session that is open in a running Claude process is never rewritten underneath it. The process holds the conversation in memory and keeps appending, so changing the file would either be ignored or fork the conversation. Stradl still uploads that Mac's new turns; updates from other Macs wait until the process exits.
+
+### Writes are atomic
+
+A downloaded file replaces the local one with a rename, so nothing ever sees half a file. When the new version simply extends the old one, which is the usual case for a transcript continued elsewhere, Stradl appends just the new lines.
+
+## Different usernames, different folders
+
+Paths are stored portably. `/Users/matt` becomes `${HOME}` in both file paths and file contents on upload, and turns back into the local home folder on download. Claude Code files transcripts under a folder named after the project's absolute path (`-Users-matt-code-app`), and that name is rewritten the same way.
+
+Projects can also live in different places on different Macs. When a sidebar entry is uploaded, Stradl records the git remote of the session's folder. On a Mac where that folder doesn't exist, it looks for a clone of the same repository in the usual places under your home folder (`~/code`, `~/Projects`, `~/Developer`, `~/src`, `~/Documents`, and similar, a few levels deep) and points the session there. A missing folder that isn't a repository, such as one of the desktop app's scratch folders, is created empty so the session still opens.
+
+You can also map folders explicitly with `path_map` in `~/.stradl/config.yaml`:
+
+```yaml
+path_map:
+  ~/work: WORK      # on this Mac
+# and on the other Mac:  ~/Projects: WORK
 ```
 
-### Step 4: Test Connection
+## The desktop sidebar
+
+The Claude desktop app keeps one small JSON record per Code-tab session, which points at a transcript (`cliSessionId`) and a working folder (`cwd`). It reads these records when it launches. Stradl syncs them like any other file, with paths and folders remapped for each Mac, so the same sessions appear in every Mac's sidebar.
+
+Because the app only reads its sidebar at launch, sessions that arrive while it is running appear after it restarts. The menu bar app counts them and offers **Restart Claude to show N new sessions**. Sessions already in the sidebar keep working in the meantime.
+
+## The background agent
+
+`stradl agent install` registers a per-user launchd agent (`com.breakpointdata.stradl`) that starts at login and shows the menu bar icon. It syncs:
+
+- right away at start and after the Mac wakes from sleep,
+- about 10 seconds after local session files stop changing (it checks every 20 seconds, reading only file sizes and times),
+- whenever storage changes (it checks every minute with a single listing),
+- and every 5 minutes regardless (`sync_interval_seconds` in the config).
+
+It writes its status to `~/.stradl/status.json` and logs to `~/.stradl/agent.log`. Pausing writes `~/.stradl/paused`, which `stradl agent resume` removes.
+
+## Files
 
 ```
-[3/3] Test Connection
-  ✓ Connected to 'claude-sync'
-
-  Setup complete!
-
-      Run 'claude-sync push' to upload your sessions
-      Run 'claude-sync pull' on other devices to sync
+~/.stradl/
+├── config.yaml     storage + encryption settings (0600)
+├── age-key.txt     encryption identity derived from your passphrase (0600)
+├── state.json      per-file hash, ETag and sync state
+├── status.json     the agent's last result (read by the menu bar and `stradl status`)
+├── agent.log       background agent log
+└── sync.lock       held while a sync runs
 ```
-
----
-
-## Key Derivation (Passphrase Mode)
-
-When you choose passphrase-based encryption:
-
-```
-Passphrase: "my-secret-phrase"
-                │
-                ▼
-┌────────────────────────────────────────────────────────┐
-│  Salt Generation                                        │
-│  salt = SHA256("claude-sync-v1")                       │
-│  = fixed 32 bytes                                       │
-│                                                         │
-│  Why fixed salt?                                        │
-│  - Same passphrase on different devices = same key     │
-│  - No need to sync salt between devices                │
-└────────────────────────────────────────────────────────┘
-                │
-                ▼
-┌────────────────────────────────────────────────────────┐
-│  Argon2id KDF                                           │
-│                                                         │
-│  Parameters:                                            │
-│  - Memory: 64 MB                                        │
-│  - Iterations: 3                                        │
-│  - Parallelism: 4 threads                               │
-│  - Output: 32 bytes                                     │
-└────────────────────────────────────────────────────────┘
-                │
-                ▼
-┌────────────────────────────────────────────────────────┐
-│  Scalar Clamping (RFC 7748)                             │
-│                                                         │
-│  key[0] &= 248                                          │
-│  key[31] &= 127                                         │
-│  key[31] |= 64                                          │
-│                                                         │
-│  Required for X25519 security                           │
-└────────────────────────────────────────────────────────┘
-                │
-                ▼
-┌────────────────────────────────────────────────────────┐
-│  Bech32 Encoding                                        │
-│  Prefix: AGE-SECRET-KEY-1                               │
-│  Output: age-compatible secret key string              │
-│                                                         │
-│  Saved to: ~/.claude-sync/age-key.txt                  │
-└────────────────────────────────────────────────────────┘
-```
-
----
-
-## Push Workflow
-
-When you run `claude-sync push`:
-
-### Phase 1: Change Detection
-
-```go
-for each path in SyncPaths {
-    if isDirectory(path) {
-        walkDirectory(path)  // Recursively check files
-    } else if isFile(path) {
-        checkFile(path)      // Compare with state
-    }
-}
-```
-
-**For each file:**
-```
-┌─────────────────────────────────────┐
-│  Read file content                   │
-│  Calculate SHA256 hash               │
-│  Get file size and modification time │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Compare with SyncState             │
-│                                      │
-│  if not in state → ADD              │
-│  if hash changed → MODIFY           │
-│  if in state but not on disk → DEL  │
-└─────────────────────────────────────┘
-```
-
-### Phase 2: Upload
-
-```
-For each file to upload:
-┌─────────────────────────────────────┐
-│  Read local file                     │
-│  path: ~/.claude/projects/foo/x.json │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Encrypt with age                    │
-│  - Read identity from age-key.txt   │
-│  - Extract recipient (public key)   │
-│  - Encrypt content                  │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Upload via Storage interface        │
-│  storage.Upload("path.age", data)   │
-│                                      │
-│  Provider-specific implementation:  │
-│  - R2: S3 PutObject to Cloudflare   │
-│  - S3: S3 PutObject to AWS          │
-│  - GCS: Objects.Insert              │
-└─────────────────────────────────────┘
-```
-
-### Phase 3: Progress Reporting
-
-```
-↑ [1/5] projects/abc123/session.json (4.2 KB)
-↑ [2/5] settings.json (512 B)
-↑ [3/5] CLAUDE.md (1.1 KB)
-✗ [4/5] history.jsonl (deleted)
-↑ [5/5] agents/custom.json (2.3 KB)
-
-✓ Push complete: 4 uploaded, 1 deleted
-```
-
-### Phase 4: Update State
-
-```go
-state.Files[path] = &FileState{
-    Path:     path,
-    Hash:     sha256Hash,
-    Size:     fileSize,
-    ModTime:  modificationTime,
-    Uploaded: time.Now(),
-}
-state.LastPush = time.Now()
-state.Save()  // Write to ~/.claude-sync/state.json
-```
-
----
-
-## Pull Workflow
-
-When you run `claude-sync pull`:
-
-### Phase 1: Fetch Remote State
-
-```
-┌─────────────────────────────────────┐
-│  storage.List("")                    │
-│                                      │
-│  Returns all objects in bucket:     │
-│  - Key (path.age)                   │
-│  - Size                             │
-│  - LastModified                     │
-│  - ETag                             │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Build remote file map              │
-│  Strip .age extension               │
-│  "foo.json.age" → "foo.json"       │
-└─────────────────────────────────────┘
-```
-
-### Phase 2: Determine Downloads
-
-```
-For each remote file:
-┌─────────────────────────────────────────────────────────┐
-│  localState = SyncState.Files[path]                      │
-│  localFile = read ~/.claude/{path}                       │
-│                                                          │
-│  if localFile not exists:                                │
-│      → DOWNLOAD (new file)                               │
-│                                                          │
-│  if localFile.hash == localState.hash:                  │
-│      if remote.modTime > localState.uploaded:           │
-│          → DOWNLOAD (remote is newer)                    │
-│      else:                                               │
-│          → SKIP (already synced)                         │
-│                                                          │
-│  if localFile.hash != localState.hash:                  │
-│      if remote.modTime > localState.uploaded:           │
-│          → CONFLICT (both changed)                       │
-│      else:                                               │
-│          → SKIP (local is newer, push will upload)       │
-└─────────────────────────────────────────────────────────┘
-```
-
-### Phase 3: Handle Conflicts
-
-When both local and remote have changed:
-
-```
-┌─────────────────────────────────────┐
-│  Download remote file                │
-│  storage.Download("path.age")       │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Decrypt content                     │
-│  (age decryption)                   │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Save as conflict file:              │
-│  {path}.conflict.20260208-153045     │
-│                                      │
-│  Keep local file unchanged           │
-└─────────────────────────────────────┘
-```
-
-### Phase 4: Download & Decrypt
-
-For non-conflict files:
-
-```
-┌─────────────────────────────────────┐
-│  storage.Download("path.age")       │
-│  Returns encrypted bytes            │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Decrypt with age                    │
-│  - Read identity from age-key.txt   │
-│  - Decrypt bytes → plaintext        │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Write to local file                 │
-│  path: ~/.claude/{path}             │
-│  Create parent directories           │
-└─────────────────────────────────────┘
-```
-
-### Phase 5: Progress Reporting
-
-```
-↓ [1/3] projects/xyz789/session.json (8.5 KB)
-↓ [2/3] skills/custom-skill.json (1.2 KB)
-⚠ Conflict: settings.json (saved as .conflict)
-
-✓ Pull complete: 2 downloaded, 1 conflicts
-
-Conflicts (both local and remote changed):
-  • settings.json
-
-Local versions kept. Remote saved as .conflict files.
-Run 'claude-sync conflicts' to review and resolve.
-```
-
----
-
-## Conflict Resolution
-
-### Detection
-
-A conflict occurs when:
-1. Local file has changed since last sync (`localHash != stateHash`)
-2. AND remote file has changed since last sync (`remoteModTime > stateUploaded`)
-
-### Resolution Options
-
-**Interactive mode (default):**
-```bash
-claude-sync conflicts
-
-Found 2 conflict(s):
-
-  1. settings.json
-     Conflict from: 20260208-153045
-
-  2. projects/abc123/session.json
-     Conflict from: 20260208-154512
-
-For each conflict, choose how to resolve:
-  [l] Keep local  [r] Keep remote  [d] Show diff  [s] Skip  [q] Quit
-
-[1/2] settings.json
-        Local: 512 B  |  Remote: 498 B  |  Conflict from: 20260208-153045
-        Resolve [l/r/d/s/q]: d
-
-        --- Local
-        +++ Remote (conflict)
-
-        @@ -1,5 +1,5 @@
-         {
-        -  "theme": "dark",
-        +  "theme": "light",
-           "autoSave": true
-         }
-
-        Resolve [l/r/d/s/q]: l
-        ✓ Kept local version
-
-✓ Resolved 1 of 2 conflict(s)
-```
-
-**Batch mode:**
-```bash
-claude-sync conflicts --keep local   # Keep all local versions
-claude-sync conflicts --keep remote  # Keep all remote versions
-```
-
-### Resolution Flow
-
-**Keep Local:**
-```
-1. Delete {path}.conflict.{timestamp}
-2. No changes to local file
-3. Next push will upload local version
-```
-
-**Keep Remote:**
-```
-1. mv {path}.conflict.{timestamp} → {path}
-2. Delete conflict file
-3. Update state with new hash
-```
-
----
-
-## State Management
-
-### State File Location
-
-```
-~/.claude-sync/state.json
-```
-
-### State Structure
-
-```json
-{
-  "files": {
-    "projects/abc123/session.json": {
-      "path": "projects/abc123/session.json",
-      "hash": "sha256:a1b2c3d4e5f6...",
-      "size": 4096,
-      "modTime": "2026-02-08T10:30:00Z",
-      "uploaded": "2026-02-08T10:31:00Z"
-    },
-    "settings.json": {
-      "path": "settings.json",
-      "hash": "sha256:9f8e7d6c5b4a...",
-      "size": 512,
-      "modTime": "2026-02-07T15:00:00Z",
-      "uploaded": "2026-02-07T15:01:00Z"
-    }
-  },
-  "lastSync": "2026-02-08T10:31:00Z",
-  "deviceId": "macbook-pro.local",
-  "lastPush": "2026-02-08T10:31:00Z",
-  "lastPull": "2026-02-08T09:00:00Z"
-}
-```
-
-### Why Track State?
-
-1. **Efficient Change Detection**: Compare hashes without reading storage
-2. **Conflict Detection**: Know if local changed since last sync
-3. **Offline Status**: `claude-sync status` works without network
-4. **Device Tracking**: Identify which device last synced
-
----
-
-## Self-Update Mechanism
-
-When you run `claude-sync update`:
-
-```
-┌─────────────────────────────────────┐
-│  Query GitHub API                    │
-│  GET /repos/tawanorg/claude-sync/   │
-│      releases/latest                 │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Compare versions                    │
-│  Current: from build ldflags        │
-│  Latest: from GitHub release         │
-└─────────────────────────────────────┘
-                │
-                ▼ (if update available)
-┌─────────────────────────────────────┐
-│  Download binary                     │
-│  Based on GOOS/GOARCH:               │
-│  - darwin-arm64                      │
-│  - darwin-amd64                      │
-│  - linux-amd64                       │
-│  - linux-arm64                       │
-└─────────────────────────────────────┘
-                │
-                ▼
-┌─────────────────────────────────────┐
-│  Replace binary                      │
-│  1. Write new binary as .new        │
-│  2. Rename current → .old           │
-│  3. Rename .new → current           │
-│  4. Delete .old                     │
-└─────────────────────────────────────┘
-```
-
-**Output:**
-```
-⋯ Checking for updates...
-↑ New version available: v0.3.2 → v0.4.0
-⋯ Downloading claude-sync-darwin-arm64...
-⋯ Installing update...
-✓ Updated to v0.4.0
-
-Restart claude-sync to use the new version
-```
-
----
-
-## Shell Integration
-
-For automatic syncing, add to your shell profile:
-
-```bash
-# ~/.zshrc or ~/.bashrc
-
-# Auto-pull on shell start (background, quiet)
-if command -v claude-sync &> /dev/null; then
-  # Subshell detaches the job from the parent shell's job table —
-  # avoids `[1] 12345` / `[1] + done` noise on every terminal open.
-  (claude-sync pull -q &) >/dev/null 2>&1
-fi
-
-# Auto-push on shell exit (quiet)
-trap 'claude-sync push -q' EXIT
-```
-
-This ensures:
-- Fresh sessions are pulled when you start a terminal
-- Local changes are pushed when you close a terminal
-
-> See the [README's Shell Integration section](../README.md#shell-integration) for the rationale behind the `(cmd &)` subshell wrapper.
-
----
-
-## Next
-
-- [Architecture](./architecture) - System design and components
-- [Security](./security) - Encryption and threat model

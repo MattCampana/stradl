@@ -18,7 +18,7 @@ Stradl keeps your Claude Code sessions in a storage container that you own. One 
 3. Run the script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/stradl/main/scripts/azure-setup.sh | bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/REPLACE_OWNER/stradl/main/scripts/azure-setup.sh | bash -s -- \
   --resource-group rg-stradl --location eastus --account bpstradl
 ```
 
@@ -103,7 +103,7 @@ The token carries no expiry of its own. It names the stored access policy, and t
 **Extend the expiry without touching the token.** Before the date the script printed, run the script again with `--rotate`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/stradl/main/scripts/azure-setup.sh | bash -s -- \
+curl -fsSL https://raw.githubusercontent.com/REPLACE_OWNER/stradl/main/scripts/azure-setup.sh | bash -s -- \
   --resource-group rg-stradl --account bpstradl --rotate
 ```
 
