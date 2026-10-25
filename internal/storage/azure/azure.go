@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -85,7 +86,7 @@ func (c *Client) UploadIf(ctx context.Context, key string, data []byte, ifMatch 
 	if ifMatch == "" {
 		cond.IfNoneMatch = to.Ptr(azcore.ETagAny)
 	} else {
-		cond.IfMatch = to.Ptr(azcore.ETag(ifMatch))
+		cond.IfMatch = to.Ptr(azcore.ETag(quoteETag(ifMatch)))
 	}
 	return c.put(ctx, key, data, &blob.AccessConditions{ModifiedAccessConditions: cond})
 }
@@ -241,16 +242,37 @@ func (c *Client) BucketExists(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// etagString returns an ETag in one canonical, unquoted form. Azure quotes
+// ETags in response headers ("0x8D...") but not in List results (0x8D...);
+// without normalizing, every listed blob would look changed on every sync.
 func etagString(e *azcore.ETag) string {
 	if e == nil {
 		return ""
 	}
-	return string(*e)
+	return strings.Trim(strings.TrimPrefix(string(*e), "W/"), `"`)
+}
+
+// quoteETag renders a canonical ETag the way HTTP preconditions expect it.
+func quoteETag(etag string) string {
+	if strings.HasPrefix(etag, `"`) {
+		return etag
+	}
+	return `"` + etag + `"`
 }
 
 // mapError translates Azure errors into the storage sentinels and adds a hint
 // for the failures a user can fix (an expired or under-privileged SAS token).
+// Every message is scrubbed of SAS signatures: transport errors (a DNS failure
+// on a mistyped account, say) quote the full request URL, token included, and
+// these messages end up in logs.
 func mapError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return redact(classify(err))
+}
+
+func classify(err error) error {
 	switch {
 	case bloberror.HasCode(err, bloberror.BlobNotFound, bloberror.ContainerNotFound):
 		return fmt.Errorf("%w: %w", storage.ErrNotFound, err)
@@ -269,6 +291,26 @@ func mapError(err error) error {
 		case http.StatusPreconditionFailed, http.StatusConflict:
 			return fmt.Errorf("%w: %w", storage.ErrPreconditionFailed, err)
 		}
+	}
+	return err
+}
+
+var sasSigRe = regexp.MustCompile(`(?i)(\bsig=)[^&\s"']+`)
+
+// redactedError replaces an error's message while keeping it unwrappable, so
+// errors.Is still sees the storage sentinels.
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.err }
+
+func redact(err error) error {
+	msg := err.Error()
+	if clean := sasSigRe.ReplaceAllString(msg, "${1}REDACTED"); clean != msg {
+		return &redactedError{msg: clean, err: err}
 	}
 	return err
 }

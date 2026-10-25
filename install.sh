@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stradl installer. Musical chairs for your sessions.
+# Stradl installer. Musical chairs for your Claude sessions.
 #
 #   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/OWNER/stradl/main/install.sh)"
 #

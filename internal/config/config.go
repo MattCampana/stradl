@@ -203,7 +203,7 @@ func Load() (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("config not found: run 'claude-sync init' first")
+			return nil, fmt.Errorf("config not found: run 'stradl init' first")
 		}
 		return nil, fmt.Errorf("failed to read config: %w", err)
 	}

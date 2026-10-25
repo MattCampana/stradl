@@ -1,12 +1,10 @@
-// Package icon holds the menu bar glyph. The PNGs are template images
-// (black on transparent; macOS recolors them for light and dark menu bars).
-// They are placeholders drawn by gen.go until the final logo replaces them
-// at the same paths.
+// Package icon holds the menu bar glyph: the Stradl "perch" mark (two seats,
+// one session disc on the seam) as macOS template images, black on
+// transparent so macOS recolors them for light and dark menu bars. They are
+// rendered from assets/brand/menubar.svg by assets/brand/src/build.py.
 package icon
 
 import _ "embed"
-
-//go:generate go run gen.go
 
 // MenuBar is the 22x22 (1x) glyph.
 //

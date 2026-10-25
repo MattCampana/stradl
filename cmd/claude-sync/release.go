@@ -307,21 +307,6 @@ func fetchReleaseBinary(ctx context.Context, release *GitHubRelease, goos, goarc
 	return extractBinary(archive, binaryName)
 }
 
-// currentExecutable returns the real path of the running binary, following
-// symlinks (e.g. /usr/local/bin/stradl -> /opt/stradl/bin/stradl) so the
-// update replaces the file itself rather than the link.
-func currentExecutable() (string, error) {
-	execPath, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("failed to locate the running executable: %w", err)
-	}
-	resolved, err := filepath.EvalSymlinks(execPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to resolve %s: %w", execPath, err)
-	}
-	return resolved, nil
-}
-
 // replaceExecutable atomically swaps the file at execPath for newBinary: the
 // new binary is written to a temp file in the same directory, flushed, and
 // renamed over the old one. A crash at any point leaves either the old or the

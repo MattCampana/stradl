@@ -51,7 +51,7 @@ const (
 )
 
 // tagline is Stradl's one-line pitch, shown under the banner.
-const tagline = "Musical chairs for your sessions."
+const tagline = "Musical chairs for your Claude sessions."
 
 // upstreamAttribution credits the project Stradl is built on.
 const upstreamAttribution = "Built on tawanorg/claude-sync (MIT)"
@@ -59,7 +59,7 @@ const upstreamAttribution = "Built on tawanorg/claude-sync (MIT)"
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "stradl",
-		Short: "Musical chairs for your Claude Code sessions",
+		Short: "Musical chairs for your Claude sessions",
 		Long: `Stradl keeps your Claude Code sessions in sync across all of your Macs, even
 when each one has a different username. Get up from one Mac, sit down at
 another, and pick up the same conversation.
@@ -1231,157 +1231,6 @@ Examples:
 	cmd.Flags().BoolVar(&rebuildHistory, "rebuild-history", false, "Rebuild ~/.claude/history.jsonl from session files after syncing")
 
 	return cmd
-}
-
-func statusCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Show pending local changes",
-		Long:  `Display files that have been added, modified, or deleted locally.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-
-			syncer, err := sync.NewSyncer(cfg, quiet)
-			if err != nil {
-				return err
-			}
-
-			ctx := context.Background()
-			changes, err := syncer.Status(ctx)
-			if err != nil {
-				return err
-			}
-
-			if len(changes) == 0 {
-				fmt.Println("No local changes")
-				return nil
-			}
-
-			fmt.Printf("%d change(s):\n\n", len(changes))
-
-			var added, modified, deleted []sync.FileChange
-			for _, c := range changes {
-				switch c.Action {
-				case "add":
-					added = append(added, c)
-				case "modify":
-					modified = append(modified, c)
-				case "delete":
-					deleted = append(deleted, c)
-				}
-			}
-
-			if len(added) > 0 {
-				fmt.Println("New files:")
-				for _, c := range added {
-					fmt.Printf("  + %s (%s)\n", c.Path, util.FormatSize(c.LocalSize))
-				}
-				fmt.Println()
-			}
-
-			if len(modified) > 0 {
-				fmt.Println("Modified files:")
-				for _, c := range modified {
-					fmt.Printf("  ~ %s (%s)\n", c.Path, util.FormatSize(c.LocalSize))
-				}
-				fmt.Println()
-			}
-
-			if len(deleted) > 0 {
-				fmt.Println("Deleted files:")
-				for _, c := range deleted {
-					fmt.Printf("  - %s\n", c.Path)
-				}
-				fmt.Println()
-			}
-
-			state := syncer.GetState()
-			if !state.LastPush.IsZero() {
-				fmt.Printf("Last push: %s\n", state.LastPush.Format(time.RFC3339))
-			}
-			if !state.LastPull.IsZero() {
-				fmt.Printf("Last pull: %s\n", state.LastPull.Format(time.RFC3339))
-			}
-
-			return nil
-		},
-	}
-}
-
-func diffCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "diff",
-		Short: "Show differences between local and remote",
-		Long:  `Compare local ~/.claude with remote cloud storage.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load()
-			if err != nil {
-				return err
-			}
-
-			syncer, err := sync.NewSyncer(cfg, quiet)
-			if err != nil {
-				return err
-			}
-
-			ctx := context.Background()
-			entries, err := syncer.Diff(ctx)
-			if err != nil {
-				return err
-			}
-
-			if len(entries) == 0 {
-				fmt.Println("No files found")
-				return nil
-			}
-
-			var localOnly, remoteOnly, modified, synced []sync.DiffEntry
-			for _, e := range entries {
-				switch e.Status {
-				case "local_only":
-					localOnly = append(localOnly, e)
-				case "remote_only":
-					remoteOnly = append(remoteOnly, e)
-				case "modified":
-					modified = append(modified, e)
-				case "synced":
-					synced = append(synced, e)
-				}
-			}
-
-			if len(localOnly) > 0 {
-				fmt.Printf("Local only (%d files):\n", len(localOnly))
-				for _, e := range localOnly {
-					fmt.Printf("  + %s (%s)\n", e.Path, util.FormatSize(e.LocalSize))
-				}
-				fmt.Println()
-			}
-
-			if len(remoteOnly) > 0 {
-				fmt.Printf("Remote only (%d files):\n", len(remoteOnly))
-				for _, e := range remoteOnly {
-					fmt.Printf("  - %s (%s)\n", e.Path, util.FormatSize(e.RemoteSize))
-				}
-				fmt.Println()
-			}
-
-			if len(modified) > 0 {
-				fmt.Printf("Modified (%d files):\n", len(modified))
-				for _, e := range modified {
-					fmt.Printf("  ~ %s (local: %s, remote: %s)\n", e.Path, util.FormatSize(e.LocalSize), util.FormatSize(e.RemoteSize))
-				}
-				fmt.Println()
-			}
-
-			fmt.Printf("Summary: %d synced, %d local only, %d remote only, %d modified\n",
-				len(synced), len(localOnly), len(remoteOnly), len(modified))
-
-			return nil
-		},
-	}
 }
 
 type conflictFile struct {

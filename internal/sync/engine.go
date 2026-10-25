@@ -167,6 +167,17 @@ func (s *Syncer) npathForKey(key string) (npath string, ok bool, unknownToken bo
 // when the backend supports it; losing a race to another device triggers a
 // fresh merge instead of an overwrite.
 func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
+	return s.reconcile(ctx, false)
+}
+
+// Preview reports what Sync would do right now without changing anything
+// locally or remotely: Uploaded, Downloaded, Merged, Restored, Deferred and
+// NewDesktopSessions list the files each action would touch.
+func (s *Syncer) Preview(ctx context.Context) (*SyncReport, error) {
+	return s.reconcile(ctx, true)
+}
+
+func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error) {
 	report := &SyncReport{}
 	rm := &reportMu{r: report}
 	roots := s.roots()
@@ -237,6 +248,7 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 
 	type job struct {
 		npath string
+		kind  string // upload, restore, download, new-desktop, merge
 		run   func() error
 	}
 	var jobs []job
@@ -276,7 +288,11 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 		case lf != nil && !hasRemote:
 			// New here, or the remote copy vanished: upload create-only.
 			restored := hasState && st.RemoteETag != "" && !localChanged
-			jobs = append(jobs, job{np, func() error {
+			kind := "upload"
+			if restored {
+				kind = "restore"
+			}
+			jobs = append(jobs, job{np, kind, func() error {
 				if err := s.reconcileUpload(ctx, np, lf, "", rm, repos, manifest, homeDir); err != nil {
 					return err
 				}
@@ -289,7 +305,7 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 		case lf == nil && hasRemote:
 			if hasState && !remoteChanged {
 				// Deleted on this device; keep it deleted here only.
-				if !st.LocalDeleted {
+				if !st.LocalDeleted && !dryRun {
 					s.state.MarkLocalDeleted(np, robj.ETag)
 				}
 				continue
@@ -299,7 +315,11 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 				continue
 			}
 			isNewDesktop := strings.HasPrefix(np, DesktopPrefix)
-			jobs = append(jobs, job{np, func() error {
+			kind := "download"
+			if isNewDesktop {
+				kind = "new-desktop"
+			}
+			jobs = append(jobs, job{np, kind, func() error {
 				root, rel := s.rootFor(roots, np)
 				target := &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel))}
 				if err := s.reconcileDownload(ctx, np, target, robj, nil, rm, repos, manifest, homeDir); err != nil {
@@ -320,7 +340,7 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 				if ifMatch == "" {
 					ifMatch = robj.ETag // legacy state without ETags
 				}
-				jobs = append(jobs, job{np, func() error {
+				jobs = append(jobs, job{np, "upload", func() error {
 					return s.reconcileUpload(ctx, np, lf, ifMatch, rm, repos, manifest, homeDir)
 				}})
 			case hasState && !localChanged && remoteChanged:
@@ -329,7 +349,7 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 					continue
 				}
 				expect := lf.info
-				jobs = append(jobs, job{np, func() error {
+				jobs = append(jobs, job{np, "download", func() error {
 					return s.reconcileDownload(ctx, np, lf, robj, expect, rm, repos, manifest, homeDir)
 				}})
 			default:
@@ -339,16 +359,35 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 					rm.add(&report.Deferred, np)
 					continue
 				}
-				jobs = append(jobs, job{np, func() error {
+				jobs = append(jobs, job{np, "merge", func() error {
 					return s.reconcileBoth(ctx, np, lf, rm, repos, manifest, homeDir)
 				}})
 			}
 
 		case lf == nil && !hasRemote:
-			if hasState {
+			if hasState && !dryRun {
 				s.state.RemoveFile(np)
 			}
 		}
+	}
+
+	if dryRun {
+		for _, j := range jobs {
+			switch j.kind {
+			case "upload":
+				report.Uploaded = append(report.Uploaded, j.npath)
+			case "restore":
+				report.Restored = append(report.Restored, j.npath)
+			case "download":
+				report.Downloaded = append(report.Downloaded, j.npath)
+			case "new-desktop":
+				report.Downloaded = append(report.Downloaded, j.npath)
+				report.NewDesktopSessions = append(report.NewDesktopSessions, j.npath)
+			case "merge":
+				report.Merged = append(report.Merged, j.npath)
+			}
+		}
+		return report, nil
 	}
 
 	// Run with a bounded worker pool.
@@ -392,9 +431,15 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 // tracked falls back to the legacy timestamp comparison.
 func remoteDiffers(st FileState, obj storage.ObjectInfo) bool {
 	if st.RemoteETag != "" && obj.ETag != "" {
-		return st.RemoteETag != obj.ETag
+		return normETag(st.RemoteETag) != normETag(obj.ETag)
 	}
 	return obj.LastModified.After(st.Uploaded)
+}
+
+// normETag strips quoting and weak markers so ETags from listings and from
+// response headers compare equal whatever the backend's spelling.
+func normETag(e string) string {
+	return strings.Trim(strings.TrimPrefix(e, "W/"), `"`)
 }
 
 // --- remote I/O helpers ------------------------------------------------------

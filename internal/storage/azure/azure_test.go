@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -94,6 +95,14 @@ func TestMapError(t *testing.T) {
 	plain := errors.New("boom")
 	if got := mapError(plain); got != plain {
 		t.Fatalf("unrelated errors must pass through unchanged, got %v", got)
+	}
+	leaky := errors.New(`Get "https://acct.blob.core.windows.net/stradl?restype=container&sv=2024&sp=racwdl&sig=AbC%2Fsecret%3D&se=2027": dial tcp: lookup acct: no such host`)
+	got := mapError(leaky)
+	if strings.Contains(got.Error(), "secret") || !strings.Contains(got.Error(), "sig=REDACTED") {
+		t.Fatalf("SAS signature not redacted: %v", got)
+	}
+	if !errors.Is(got, leaky) {
+		t.Fatal("redacted error must still unwrap to the original")
 	}
 }
 
@@ -194,6 +203,38 @@ func TestConditionalUpload(t *testing.T) {
 	data, _ = c.Download(ctx, key)
 	if string(data) != "v2" {
 		t.Fatalf("content = %q, want v2", data)
+	}
+}
+
+// Azure quotes ETags in headers but not in List results; both must agree or
+// every sync would think every blob changed.
+func TestETagsConsistentAcrossListAndWrites(t *testing.T) {
+	c := mustNew(t, newContainer(t))
+	ctx := context.Background()
+	const key = "projects/-HOME-x/s.jsonl.age"
+
+	etag, err := c.UploadIf(ctx, key, []byte("v1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := c.List(ctx, "")
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("list: %v %v", listed, err)
+	}
+	if listed[0].ETag != etag {
+		t.Fatalf("list ETag %q != upload ETag %q", listed[0].ETag, etag)
+	}
+	_, dlETag, err := c.DownloadWithETag(ctx, key)
+	if err != nil || dlETag != etag {
+		t.Fatalf("download ETag %q != upload ETag %q (%v)", dlETag, etag, err)
+	}
+	head, err := c.Head(ctx, key)
+	if err != nil || head.ETag != etag {
+		t.Fatalf("head ETag %v != upload ETag %q (%v)", head, etag, err)
+	}
+	// A precondition built from the listed ETag must be honored.
+	if _, err := c.UploadIf(ctx, key, []byte("v2"), listed[0].ETag); err != nil {
+		t.Fatalf("conditional write with listed ETag: %v", err)
 	}
 }
 

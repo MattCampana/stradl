@@ -1,0 +1,107 @@
+{
+  "_doc": "stradl / Perch identity spec. Every deliverable is generated from this file by build.py. Ratios are in units of s = seat (tile) edge length.",
+  "palette": {
+    "midnight": {
+      "hex": "#0F1222",
+      "use": "seats + wordmark on light surfaces"
+    },
+    "paper": {
+      "hex": "#F4F4F8",
+      "use": "seats + wordmark on dark surfaces"
+    },
+    "ultra": {
+      "hex": "#3B2DFF",
+      "use": "the session disc on light surfaces (primary brand colour)"
+    },
+    "ultraLight": {
+      "hex": "#8378FF",
+      "use": "the session disc on dark surfaces"
+    },
+    "mint": {
+      "hex": "#12B886",
+      "use": "status only: 'in sync' on light surfaces"
+    },
+    "mintLight": {
+      "hex": "#4BE3B8",
+      "use": "status only: 'in sync' on dark surfaces"
+    }
+  },
+  "mark": {
+    "_rules": [
+      "two equal seats, s x s, on a rising diagonal (lower-left + upper-right)",
+      "the seats touch at exactly one point: the seam; the disc centre IS the seam",
+      "all three outer corners of a seat are identical continuous corners (R = 185/824 s, smoothing 0.6, i.e. the macOS app-icon body scaled down)",
+      "the seam corner of each seat is cut by a concave arc of radius rk = disc + ring, with sharp (unfilleted) joins so it reads as occlusion",
+      "mark bounding box = 2s x 2s; the disc is never moved off the seam in the static mark"
+    ],
+    "cornerR": 0.22451,
+    "smoothing": 0.6,
+    "discR": 0.36,
+    "ring": 0.075,
+    "master512": {
+      "s": 208
+    }
+  },
+  "small16": {
+    "_doc": "hand-fitted full-colour master for 16-24 px (favicon, Finder list, Spotlight). 16-unit grid, seats on whole pixels, 4 px disc on whole pixels, ring 1.5 px at 16 px. From 32 px up use the 512 master (at 32 px its seats land on whole pixels too).",
+    "grid": 16,
+    "s": 7,
+    "cornerR": 1.5,
+    "smoothing": 0.4,
+    "discR": 2,
+    "ring": 1.5
+  },
+  "menubar": {
+    "_doc": "macOS template, 22 pt @2x on a 44-unit grid. Span 32 units (16 pt) so it sits with SF Symbols weight. #000000 + alpha only.",
+    "grid": 44,
+    "s": 16,
+    "cornerR": 3.4,
+    "smoothing": 0.5,
+    "discR": 5,
+    "ring": 3.5
+  },
+  "menubar16": {
+    "_doc": "template for 16 pt contexts, 16 pt @2x on a 32-unit grid; seats land on whole pixels at 16 px.",
+    "grid": 32,
+    "s": 12,
+    "cornerR": 2.6,
+    "smoothing": 0.4,
+    "discR": 3.5,
+    "ring": 3
+  },
+  "appicon": {
+    "canvas": 1024,
+    "body": [
+      100,
+      100,
+      824,
+      824
+    ],
+    "bodyR": 185,
+    "bodySmoothing": 0.6,
+    "markWidth": 0.62,
+    "shadow": {
+      "dy": 10,
+      "blur": 12,
+      "opacity": 0.3
+    }
+  },
+  "wordmark": {
+    "font": "Manrope (OFL)",
+    "weight": 600,
+    "tracking": -2.4,
+    "pairs": "ra:-1.5,ad:-0.6,dl:0.8",
+    "custom": "s terminals squared to horizontal cuts (matches the flat t, the vertical r cut and the d/l stems)"
+  },
+  "lockup": {
+    "_rules": [
+      "mark height = 1.46 x-height",
+      "mark is centred on the baseline-to-ascender band (top of d / l), so it overshoots both lines by the same 5% of its height, like round letters do",
+      "gap from mark to the s = 0.6 x-height",
+      "clear space on every side = 0.5 x-height"
+    ],
+    "gapXH": 0.6,
+    "padXH": 0.5,
+    "markXH": 1.46
+  }
+}
