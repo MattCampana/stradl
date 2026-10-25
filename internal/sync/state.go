@@ -21,6 +21,55 @@ type FileState struct {
 	Size     int64     `json:"size"`
 	ModTime  time.Time `json:"mod_time"`
 	Uploaded time.Time `json:"uploaded,omitempty"`
+
+	// RemoteETag is the ETag of the remote version this device's copy was last
+	// reconciled with. Comparing ETags detects remote changes without trusting
+	// any device's clock.
+	RemoteETag string `json:"remote_etag,omitempty"`
+
+	// LocalDeleted marks a file deleted on this device after it synced. The
+	// delete stays local: the remote copy is kept for the other devices and is
+	// not re-downloaded here unless another device changes it.
+	LocalDeleted bool `json:"local_deleted,omitempty"`
+}
+
+// SetReconciled records that npath's local copy (described by info and hash)
+// now matches the remote version etag.
+func (s *SyncState) SetReconciled(npath string, info os.FileInfo, hash, etag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Files[npath] = &FileState{
+		Path:       npath,
+		Hash:       hash,
+		Size:       info.Size(),
+		ModTime:    info.ModTime(),
+		Uploaded:   time.Now(),
+		RemoteETag: etag,
+	}
+}
+
+// MarkLocalDeleted records that npath was deleted on this device while the
+// remote copy (etag) stays in place.
+func (s *SyncState) MarkLocalDeleted(npath, etag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if f, ok := s.Files[npath]; ok {
+		f.LocalDeleted = true
+		if etag != "" {
+			f.RemoteETag = etag
+		}
+	}
+}
+
+// Snapshot returns a copy of the tracked file states keyed by path.
+func (s *SyncState) Snapshot() map[string]FileState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]FileState, len(s.Files))
+	for k, v := range s.Files {
+		out[k] = *v
+	}
+	return out
 }
 
 type SyncState struct {

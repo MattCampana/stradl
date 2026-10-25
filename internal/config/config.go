@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/tawanorg/claude-sync/internal/storage"
@@ -70,8 +71,21 @@ type Config struct {
 	//     ~/Projects: WORK
 	PathMap map[string]string `yaml:"path_map,omitempty"`
 
+	// DesktopSync also syncs the Claude desktop app's Code-tab session index
+	// (the sidebar entries under DesktopSessionsDir), so sessions appear in
+	// the desktop sidebar on every device, not only in `claude --resume`.
+	// Nil (unset) means enabled wherever the desktop app's folder exists.
+	DesktopSync *bool `yaml:"desktop_sync,omitempty"`
+
+	// SyncIntervalSeconds is how often the background agent reconciles with
+	// remote storage when nothing changed locally (default 300).
+	SyncIntervalSeconds int `yaml:"sync_interval_seconds,omitempty"`
+
 	// ClaudeDirOverride allows overriding the default ~/.claude path (for testing)
 	ClaudeDirOverride string `yaml:"-"`
+
+	// DesktopDirOverride allows overriding DesktopSessionsDir (for testing)
+	DesktopDirOverride string `yaml:"-"`
 
 	// StateDirOverride allows overriding the state file directory (for testing)
 	StateDirOverride string `yaml:"-"`
@@ -304,6 +318,37 @@ func (c *Config) GetEffectiveSyncPaths() []string {
 		return scoped
 	}
 	return within
+}
+
+// DesktopSessionsDir returns the Claude desktop app's Code-tab session index
+// directory (~/Library/Application Support/Claude/claude-code-sessions). It
+// holds one <account>/<org>/local_<id>.json record per sidebar entry.
+func DesktopSessionsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "Library", "Application Support", "Claude", "claude-code-sessions")
+}
+
+// EffectiveDesktopDir returns the desktop session index directory to sync,
+// or "" when desktop sync is disabled.
+func (c *Config) EffectiveDesktopDir() string {
+	if c.DesktopSync != nil && !*c.DesktopSync {
+		return ""
+	}
+	if c.DesktopDirOverride != "" {
+		return c.DesktopDirOverride
+	}
+	return DesktopSessionsDir()
+}
+
+// EffectiveSyncInterval returns the background reconcile interval.
+func (c *Config) EffectiveSyncInterval() time.Duration {
+	if c.SyncIntervalSeconds < 30 {
+		return 5 * time.Minute
+	}
+	return time.Duration(c.SyncIntervalSeconds) * time.Second
 }
 
 // IsMCPSyncEnabled returns true if MCP sync is explicitly enabled.

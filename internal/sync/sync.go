@@ -52,6 +52,7 @@ type Syncer struct {
 	onProgress ProgressFunc
 	cfg        *config.Config
 	paths      *PathMapper
+	home       string // this device's home directory (path mapping, folder resolution)
 }
 
 type SyncResult struct {
@@ -117,6 +118,7 @@ func NewSyncer(cfg *config.Config, quiet bool) (*Syncer, error) {
 		quiet:     quiet,
 		cfg:       cfg,
 		paths:     mapper,
+		home:      homeDir,
 	}, nil
 }
 
@@ -132,6 +134,7 @@ func NewSyncerWith(cfg *config.Config, store storage.Storage, enc *crypto.Encryp
 		quiet:     quiet,
 		cfg:       cfg,
 		paths:     mapper,
+		home:      homeDir,
 	}
 }
 
