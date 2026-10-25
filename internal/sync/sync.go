@@ -19,6 +19,7 @@ import (
 	"github.com/tawanorg/claude-sync/internal/storage"
 
 	// Register storage adapters
+	_ "github.com/tawanorg/claude-sync/internal/storage/azure"
 	_ "github.com/tawanorg/claude-sync/internal/storage/gcs"
 	_ "github.com/tawanorg/claude-sync/internal/storage/r2"
 	_ "github.com/tawanorg/claude-sync/internal/storage/s3"

@@ -29,6 +29,7 @@ import (
 	"github.com/tawanorg/claude-sync/internal/util"
 
 	// Register storage adapters
+	_ "github.com/tawanorg/claude-sync/internal/storage/azure"
 	_ "github.com/tawanorg/claude-sync/internal/storage/gcs"
 	_ "github.com/tawanorg/claude-sync/internal/storage/r2"
 	_ "github.com/tawanorg/claude-sync/internal/storage/s3"
@@ -39,6 +40,10 @@ var (
 	version = "dev" // Set via ldflags at build time: -ldflags "-X main.version=x.x.x"
 	quiet   bool
 )
+
+// extraCommands lets commands defined in other files of this package register
+// themselves from init() without editing the list in main.
+var extraCommands []func() *cobra.Command
 
 // ANSI color codes
 const (
@@ -76,6 +81,9 @@ func main() {
 		autoCmd(),
 		pathsCmd(),
 	)
+	for _, mk := range extraCommands {
+		rootCmd.AddCommand(mk())
+	}
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

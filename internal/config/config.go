@@ -13,10 +13,12 @@ import (
 )
 
 const (
-	ConfigDir  = ".claude-sync"
+	ConfigDir  = ".stradl"
 	ConfigFile = "config.yaml"
 	StateFile  = "state.json"
 	AgeKeyFile = "age-key.txt"
+	LockFile   = "sync.lock"
+	StatusFile = "status.json"
 
 	// MCPRemoteKey is the remote storage key for synced MCP server configs.
 	// The _external/ prefix separates it from ~/.claude/-relative files.
@@ -155,6 +157,17 @@ func ConfigFilePath() string {
 
 func StateFilePath() string {
 	return filepath.Join(ConfigDirPath(), StateFile)
+}
+
+// LockFilePath is the advisory lock serializing sync runs on this device.
+func LockFilePath() string {
+	return filepath.Join(ConfigDirPath(), LockFile)
+}
+
+// StatusFilePath holds the background agent's last-sync status for the menu
+// bar and `status`.
+func StatusFilePath() string {
+	return filepath.Join(ConfigDirPath(), StatusFile)
 }
 
 func AgeKeyFilePath() string {
