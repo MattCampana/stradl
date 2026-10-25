@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	gosync "sync"
@@ -615,6 +616,152 @@ func TestCanonicalRemote(t *testing.T) {
 	} {
 		if got := canonicalRemote(u); got != "github.com/breakpoint/webapp" {
 			t.Errorf("canonicalRemote(%q) = %q", u, got)
+		}
+	}
+}
+
+func TestSyncFoldsMovedSession(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	b := newDevice(t, root, "bob", store)
+	t0 := time.Now()
+
+	// The session starts in a scratch folder and syncs to bob.
+	a.writeSession("scratch", "s1", a.line("scratch", "u1", "", t0, "hello"))
+	a.sync()
+	b.sync()
+
+	// Claude Code on alice moves it into the repo folder, with a relocated row.
+	oldPath := filepath.Join(a.projectDir("scratch"), "s1.jsonl")
+	data, _ := os.ReadFile(oldPath)
+	repo := filepath.Join(a.home, "code", "repo")
+	reloc := fmt.Sprintf(`{"type":"relocated","sessionId":"s1","relocatedCwd":%q}`+"\n", repo)
+	moved := string(data) + a.line("repo", "u2", "u1", t0.Add(time.Minute), "after move") + reloc
+	_ = os.Remove(oldPath)
+	a.writeSession("repo", "s1", moved)
+	a.sync()
+
+	// Bob also continued the old copy before hearing about the move.
+	b.appendSession("scratch", "s1", b.line("scratch", "ub", "u1", t0.Add(30*time.Second), "bob on old copy"))
+	r := b.sync()
+	b.sync()
+
+	if _, err := os.Stat(filepath.Join(b.projectDir("scratch"), "s1.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("stale copy should be folded away on bob (report %+v)", r)
+	}
+	got := b.readSession("repo", "s1")
+	if !strings.Contains(got, "after move") || !strings.Contains(got, "bob on old copy") {
+		t.Fatalf("bob's current copy must hold every turn: %q", got)
+	}
+	// Alice ends up with bob's turn too, in the repo folder only.
+	a.sync()
+	if got := a.readSession("repo", "s1"); !strings.Contains(got, "bob on old copy") {
+		t.Fatalf("alice missing bob's turn: %q", got)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatal("the old copy came back on alice")
+	}
+}
+
+func TestSyncSkipsDeviceLocalFiles(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	a.writeSession("proj", "s1", a.line("proj", "u1", "", time.Now(), "x"))
+	dir := a.projectDir("proj")
+	for _, name := range []string{".stradl-123.tmp", "s1.jsonl.compact.tmp.9", "s1.lock", "s1.orphaned-1-ab.jsonl", "s1.jsonl.superseded-5"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.sync()
+	keys := store.keys()
+	for _, k := range keys {
+		if !strings.HasSuffix(k, "s1.jsonl.age") && !strings.HasPrefix(k, "_metadata/") {
+			t.Fatalf("device-local file uploaded: %s (all: %v)", k, keys)
+		}
+	}
+}
+
+func TestLiveSessionIgnoresReusedPID(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "sessions"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, startedAt time.Time) {
+		rec := fmt.Sprintf(`{"pid":%d,"sessionId":%q,"startedAt":%d}`, os.Getpid(), name, startedAt.UnixMilli())
+		_ = os.WriteFile(filepath.Join(dir, "sessions", name+".json"), []byte(rec), 0600)
+	}
+	write("fresh", time.Now())
+	write("stale", time.Now().Add(-6*time.Hour)) // this PID's process started long after
+	live := liveSessionIDs(dir)
+	if !live["fresh"] {
+		t.Fatal("a running session must count as live")
+	}
+	if runtime.GOOS == "darwin" && live["stale"] {
+		t.Fatal("a record whose PID was reused must not count as live")
+	}
+}
+
+func TestClampMtimeKeepsPulledSessionsInsideRetention(t *testing.T) {
+	root := t.TempDir()
+	d := newDevice(t, root, "alice", newCASStore())
+	old := time.Now().Add(-90 * 24 * time.Hour)
+	got := d.s.clampMtime("projects/x/s.jsonl", old)
+	if got.Before(time.Now().Add(-29 * 24 * time.Hour)) {
+		t.Fatalf("90-day-old mtime not clamped under the default 30-day retention: %v", got)
+	}
+	_ = os.WriteFile(filepath.Join(d.claude, "settings.json"), []byte(`{"cleanupPeriodDays":365}`), 0600)
+	if got := d.s.clampMtime("projects/x/s.jsonl", old); !got.Equal(old) {
+		t.Fatalf("with 365-day retention the real mtime should be kept: %v", got)
+	}
+	if got := d.s.clampMtime("plans/p.md", old); !got.Equal(old) {
+		t.Fatal("only transcripts are clamped")
+	}
+}
+
+func TestDesktopRecordDropsRuntimeFields(t *testing.T) {
+	in := []byte(`{"sessionId":"local_x","cwd":"/nope/does-not-exist","bridgeSessionIds":["b1"],"remoteControlAutoEligible":true,"toolSurfaceSnapshot":{"a":1},"title":"keep me","lastActivityAt":1792963248589}`)
+	out := finishDesktopDownload(in, "", nil)
+	for _, k := range []string{"bridgeSessionIds", "remoteControlAutoEligible", "toolSurfaceSnapshot"} {
+		if bytes.Contains(out, []byte(k)) {
+			t.Fatalf("%s survived: %s", k, out)
+		}
+	}
+	if !bytes.Contains(out, []byte(`"title":"keep me"`)) || !bytes.Contains(out, []byte(`1792963248589`)) {
+		t.Fatalf("real fields or exact timestamps lost: %s", out)
+	}
+}
+
+func TestMergeJSONLMetadataRowsDontCollapseInterleave(t *testing.T) {
+	l := func(uuid string, min int) string {
+		return fmt.Sprintf(`{"uuid":%q,"timestamp":"2026-10-25T10:%02d:00Z"}`, uuid, min)
+	}
+	meta := `{"type":"last-prompt","leafUuid":"x"}`
+	join := func(ls ...string) []byte { return []byte(strings.Join(ls, "\n") + "\n") }
+	local := join(l("1", 0), l("a", 2), meta, l("a2", 9))
+	remote := join(l("1", 0), l("b", 4), meta, l("b2", 6))
+	merged, _ := MergeJSONL(local, remote)
+	lines := strings.Split(strings.TrimSpace(string(merged)), "\n")
+	if lines[len(lines)-1] != l("a2", 9) {
+		t.Fatalf("newest entry must end the file:\n%s", merged)
+	}
+	// Merging from the other side keeps the same entries, once each, and the
+	// same newest entry last. (Only one device merges a divergence; the rest
+	// download its result, so byte-identical output isn't required.)
+	other, _ := MergeJSONL(remote, local)
+	olines := strings.Split(strings.TrimSpace(string(other)), "\n")
+	if olines[len(olines)-1] != l("a2", 9) || len(olines) != len(lines) {
+		t.Fatalf("reverse merge differs in substance:\n%s", other)
+	}
+	seen := map[string]int{}
+	for _, x := range olines {
+		seen[x]++
+	}
+	for _, x := range lines {
+		if seen[x] != 1 {
+			t.Fatalf("line %q appears %d times in the reverse merge", x, seen[x])
 		}
 	}
 }

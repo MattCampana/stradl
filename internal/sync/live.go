@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // liveSessionIDs returns the IDs of Claude Code sessions whose process is
@@ -32,15 +33,35 @@ func liveSessionIDs(claudeDir string) map[string]bool {
 		var rec struct {
 			PID       int    `json:"pid"`
 			SessionID string `json:"sessionId"`
+			StartedAt int64  `json:"startedAt"` // Unix millis
 		}
 		if json.Unmarshal(data, &rec) != nil || rec.SessionID == "" || rec.PID <= 0 {
 			continue
 		}
-		if processAlive(rec.PID) {
+		if processAlive(rec.PID) && !pidReused(rec.PID, rec.StartedAt) {
 			live[rec.SessionID] = true
 		}
 	}
 	return live
+}
+
+// pidReuseSlack tolerates the gap between a process starting and Claude Code
+// recording its session start.
+const pidReuseSlack = 2 * time.Minute
+
+// pidReused reports whether pid now belongs to a process that started after
+// the session record was written: Claude crashed, left its record behind, and
+// the PID went to something else. Without this check one stale record would
+// hold that session's sync forever.
+func pidReused(pid int, startedAtMillis int64) bool {
+	if startedAtMillis <= 0 {
+		return false
+	}
+	start, ok := processStartTime(pid)
+	if !ok {
+		return false
+	}
+	return start.After(time.UnixMilli(startedAtMillis).Add(pidReuseSlack))
 }
 
 func processAlive(pid int) bool {

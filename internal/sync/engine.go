@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -53,6 +54,7 @@ type SyncReport struct {
 	Deferred   []string // remote changes held back while a live session owns the file
 	Conflicts  []string // non-mergeable files changed on both sides; loser kept as .conflict copy
 	Skipped    []string // remote keys using a path token this device can't map
+	Moved      []string // stale copies of sessions Claude Code moved to another project folder, folded into the current copy
 
 	// NewDesktopSessions lists desktop sidebar records that did not exist on
 	// this device before. The desktop app loads its sidebar at launch, so they
@@ -85,7 +87,7 @@ func (s *Syncer) roots() []*syncRoot {
 		dir:   s.claudeDir,
 		paths: s.syncPaths(),
 		include: func(rel string) bool {
-			return !strings.Contains(rel, ".conflict.") && !isDeviceLocalMarker(rel) && !s.isExcluded(rel)
+			return !strings.Contains(rel, ".conflict.") && !isDeviceLocalFile(rel) && !s.isExcluded(rel)
 		},
 	}}
 	if dir := s.cfg.EffectiveDesktopDir(); dir != "" && dirExists(dir) {
@@ -101,10 +103,21 @@ func (s *Syncer) roots() []*syncRoot {
 // session on every Mac.
 const desktopReleasedSuffix = ".desktop-released.json"
 
-// isDeviceLocalMarker reports files under ~/.claude that describe this
-// device's own decisions and must never be synced.
-func isDeviceLocalMarker(rel string) bool {
-	return strings.HasSuffix(rel, desktopReleasedSuffix)
+// isDeviceLocalFile reports files under ~/.claude that belong to this device
+// alone and must never be synced: desktop release markers, Claude Code's
+// temp, lock and set-aside files (<id>.orphaned-*.jsonl,
+// *.jsonl.superseded-*), and Stradl's own in-flight temp files.
+func isDeviceLocalFile(rel string) bool {
+	base := path.Base(rel)
+	switch {
+	case strings.HasSuffix(base, desktopReleasedSuffix),
+		strings.HasPrefix(base, ".stradl-"),
+		strings.HasSuffix(base, ".tmp"), strings.Contains(base, ".tmp."),
+		strings.HasSuffix(base, ".lock"),
+		strings.Contains(base, ".orphaned-"), strings.Contains(base, ".superseded-"):
+		return true
+	}
+	return false
 }
 
 func (s *Syncer) rootFor(roots []*syncRoot, npath string) (*syncRoot, string) {
@@ -194,6 +207,9 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	report := &SyncReport{}
 	rm := &reportMu{r: report}
 	roots := s.roots()
+	if !dryRun {
+		report.Moved = s.foldMovedSessions(liveSessionIDs(s.claudeDir))
+	}
 
 	objects, err := s.storage.List(ctx, "")
 	if err != nil {
@@ -293,8 +309,10 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		localChanged := lf != nil && (!hasState || st.LocalDeleted || lhash != st.Hash)
 		remoteChanged := hasRemote && (!hasState || remoteDiffers(st, robj))
 		isLive := false
-		if id, ok := transcriptSessionID(np); ok && live[id] {
-			isLive = true
+		if id, ok := transcriptSessionID(np); ok {
+			// A transcript written in the last few seconds may belong to a
+			// Claude process that hasn't recorded itself yet.
+			isLive = live[id] || (lf != nil && s.recentWrite > 0 && time.Since(lf.info.ModTime()) < s.recentWrite)
 		}
 
 		switch {
@@ -403,23 +421,37 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		return report, nil
 	}
 
-	// Run with a bounded worker pool.
-	sem := make(chan struct{}, defaultWorkers)
-	var wg gosync.WaitGroup
+	// Run with a bounded worker pool: transcripts first, then sidebar
+	// records, so a record never lands on a device before its transcript.
+	var transcripts, records []job
 	for _, j := range jobs {
-		wg.Add(1)
-		go func(j job) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			if err := j.run(); errors.Is(err, errLocalChanged) {
-				rm.add(&report.Deferred, j.npath)
-			} else if err != nil {
-				rm.fail(j.npath, err)
-			}
-		}(j)
+		if strings.HasPrefix(j.npath, DesktopPrefix) {
+			records = append(records, j)
+		} else {
+			transcripts = append(transcripts, j)
+		}
 	}
-	wg.Wait()
+	for _, batch := range [][]job{transcripts, records} {
+		sem := make(chan struct{}, defaultWorkers)
+		var wg gosync.WaitGroup
+		for _, j := range batch {
+			wg.Add(1)
+			go func(j job) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				if err := j.run(); errors.Is(err, errLocalChanged) {
+					rm.add(&report.Deferred, j.npath)
+				} else if err != nil {
+					rm.fail(j.npath, err)
+				}
+			}(j)
+		}
+		wg.Wait()
+	}
+
+	// Downloads in this pass may have delivered the new copy of a moved session.
+	report.Moved = append(report.Moved, s.foldMovedSessions(liveSessionIDs(s.claudeDir))...)
 
 	if len(report.Uploaded)+len(report.Merged)+len(report.Restored) > 0 {
 		if err := s.saveMtimes(ctx, manifest.snapshot(), manifestETag); err != nil {
@@ -437,6 +469,50 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		return report, fmt.Errorf("failed to save state: %w", err)
 	}
 	return report, nil
+}
+
+// recentWriteWindow treats a transcript written this recently as live.
+const recentWriteWindow = 5 * time.Second
+
+// transcriptLiveNow re-checks, right before a local write, whether a Claude
+// process has claimed the transcript since the pass was planned.
+func (s *Syncer) transcriptLiveNow(npath string) bool {
+	id, ok := transcriptSessionID(npath)
+	return ok && liveSessionIDs(s.claudeDir)[id]
+}
+
+// clampMtime keeps a downloaded transcript's restored modification time inside
+// this device's retention window. Claude Code's cleanup deletes transcripts
+// whose mtime is older than cleanupPeriodDays, so restoring a months-old mtime
+// would let the sweep delete a session minutes after it arrived.
+func (s *Syncer) clampMtime(npath string, mt time.Time) time.Time {
+	if mt.IsZero() || !strings.HasPrefix(npath, "projects/") || path.Ext(npath) != ".jsonl" {
+		return mt
+	}
+	days := claudeCleanupDays(s.claudeDir) - 2
+	if days < 1 {
+		days = 1
+	}
+	if floor := time.Now().Add(-time.Duration(days) * 24 * time.Hour); mt.Before(floor) {
+		return floor
+	}
+	return mt
+}
+
+// claudeCleanupDays reads cleanupPeriodDays from ~/.claude/settings.json,
+// defaulting to Claude Code's 30.
+func claudeCleanupDays(claudeDir string) int {
+	data, err := os.ReadFile(filepath.Join(claudeDir, "settings.json"))
+	if err != nil {
+		return 30
+	}
+	var st struct {
+		CleanupPeriodDays int `json:"cleanupPeriodDays"`
+	}
+	if json.Unmarshal(data, &st) != nil || st.CleanupPeriodDays <= 0 {
+		return 30
+	}
+	return st.CleanupPeriodDays
 }
 
 // remoteDiffers reports whether the remote object changed since st was
@@ -515,6 +591,9 @@ func (s *Syncer) put(ctx context.Context, npath string, plain []byte, ifMatch st
 	if err != nil {
 		return "", fmt.Errorf("failed to encrypt: %w", err)
 	}
+	if int64(len(enc)) > storage.MaxDownloadSize {
+		return "", fmt.Errorf("too large to sync (%d MB compressed; other devices accept up to %d MB)", len(enc)>>20, storage.MaxDownloadSize>>20)
+	}
 	key := s.engineRemoteKey(npath)
 	if c, ok := s.conditional(); ok {
 		return c.UploadIf(ctx, key, enc, ifMatch)
@@ -563,10 +642,13 @@ func (s *Syncer) reconcileDownload(ctx context.Context, npath string, lf *localF
 	if etag == "" {
 		etag = obj.ETag
 	}
+	if s.transcriptLiveNow(npath) {
+		return errLocalChanged
+	}
 	if err := writeLocal(lf.abs, data, expect, s.claudeDir, lf.root.dir); err != nil {
 		return err
 	}
-	if mt := manifest.get(s.engineRemoteKey(npath)); !mt.IsZero() {
+	if mt := s.clampMtime(npath, manifest.get(s.engineRemoteKey(npath))); !mt.IsZero() {
 		_ = os.Chtimes(lf.abs, mt, mt)
 	}
 	info, err := os.Stat(lf.abs)
@@ -649,6 +731,11 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 			}
 		}
 
+		if writeHere && s.transcriptLiveNow(npath) {
+			// A Claude process picked the session up meanwhile; touch nothing
+			// and merge once it exits.
+			return errLocalChanged
+		}
 		if !writeHere && !uploadThere {
 			// Same content in a different order: already equivalent.
 			s.state.SetReconciled(npath, info, sha256Hex(localData), etag)

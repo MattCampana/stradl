@@ -101,6 +101,8 @@ func finishDesktopDownload(data []byte, home string, repos *repoIndex) []byte {
 		delete(m, desktopHintKey)
 	}
 
+	stripped := stripRuntimeFields(m)
+
 	cwd, _ := m["cwd"].(string)
 	if cwd != "" && !dirExists(cwd) {
 		switch {
@@ -117,7 +119,7 @@ func finishDesktopDownload(data []byte, home string, repos *repoIndex) []byte {
 		}
 	}
 
-	if !hadHint && m["cwd"] == cwd {
+	if !hadHint && !stripped && m["cwd"] == cwd {
 		return data
 	}
 	out, err := json.Marshal(m)
@@ -125,6 +127,33 @@ func finishDesktopDownload(data []byte, home string, repos *repoIndex) []byte {
 		return data
 	}
 	return out
+}
+
+// runtimeFields describe the desktop app's live state on the device that
+// wrote a record (remote-control bindings, SSH processes, a turn that was
+// waiting for input, per-launch snapshots). Carried to another Mac they would
+// make its app try to resume a bridge or process that only exists elsewhere.
+var runtimeFields = []string{
+	"bridgeSessionIds", "steeredByRemoteClient", "sshRemoteProcessId",
+	"interruptedAwaitingPerson", "toolSurfaceSnapshot", "promptAppendSnapshot",
+	"armedWorkAtQuit", "heldAcrossLoss",
+}
+
+func stripRuntimeFields(m map[string]any) bool {
+	changed := false
+	for k := range m {
+		drop := strings.HasPrefix(k, "remoteControl")
+		for _, f := range runtimeFields {
+			if k == f {
+				drop = true
+			}
+		}
+		if drop {
+			delete(m, k)
+			changed = true
+		}
+	}
+	return changed
 }
 
 // rewritePathFields replaces the from prefix with to in every top-level string

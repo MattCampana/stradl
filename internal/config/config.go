@@ -109,6 +109,7 @@ var SyncPaths = []string{
 	"plans",
 	"tasks",
 	"history.jsonl",
+	"paste-cache",
 	"rules",
 	"workflows",
 }
@@ -122,6 +123,7 @@ var SessionSyncPaths = []string{
 	"history.jsonl",
 	"tasks",
 	"plans",
+	"paste-cache", // content-addressed large pastes that history.jsonl refers to
 }
 
 // ScopedSyncPaths returns the sync path set for the given scope. "sessions"

@@ -54,6 +54,10 @@ type Syncer struct {
 	cfg        *config.Config
 	paths      *PathMapper
 	home       string // this device's home directory (path mapping, folder resolution)
+
+	// recentWrite treats transcripts modified this recently as live (see
+	// recentWriteWindow); zero disables the heuristic.
+	recentWrite time.Duration
 }
 
 type SyncResult struct {
@@ -112,14 +116,15 @@ func NewSyncer(cfg *config.Config, quiet bool) (*Syncer, error) {
 	}
 
 	return &Syncer{
-		storage:   store,
-		encryptor: enc,
-		state:     state,
-		claudeDir: claudeDir,
-		quiet:     quiet,
-		cfg:       cfg,
-		paths:     mapper,
-		home:      homeDir,
+		storage:     store,
+		encryptor:   enc,
+		state:       state,
+		claudeDir:   claudeDir,
+		quiet:       quiet,
+		cfg:         cfg,
+		paths:       mapper,
+		home:        homeDir,
+		recentWrite: recentWriteWindow,
 	}, nil
 }
 
@@ -128,14 +133,15 @@ func NewSyncerWith(cfg *config.Config, store storage.Storage, enc *crypto.Encryp
 	homeDir, _ := os.UserHomeDir()
 	mapper, _ := NewPathMapper(homeDir, cfg.PathMap)
 	return &Syncer{
-		storage:   store,
-		encryptor: enc,
-		state:     state,
-		claudeDir: claudeDir,
-		quiet:     quiet,
-		cfg:       cfg,
-		paths:     mapper,
-		home:      homeDir,
+		storage:     store,
+		encryptor:   enc,
+		state:       state,
+		claudeDir:   claudeDir,
+		quiet:       quiet,
+		cfg:         cfg,
+		paths:       mapper,
+		home:        homeDir,
+		recentWrite: recentWriteWindow,
 	}
 }
 

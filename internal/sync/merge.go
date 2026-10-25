@@ -95,10 +95,22 @@ func MergeJSONL(local, remote []byte) (merged []byte, changed bool) {
 		return local, false
 	}
 
-	// The local tail starts after the last line both sides share.
+	// The local tail starts after the last conversation entry both sides
+	// share. Only uuid entries count: uuid-less metadata rows (last-prompt,
+	// custom-title, summaries) are often written identically on both devices
+	// after they diverge, and letting one of those end the shared prefix would
+	// collapse the interleave below into "local, then remote". Files without
+	// any uuid entries (the prompt history) fall back to every line.
+	hasUUID := false
+	for _, l := range loc {
+		if strings.HasPrefix(l.id, "u:") {
+			hasUUID = true
+			break
+		}
+	}
 	split := 0
 	for i, l := range loc {
-		if remoteIDs[l.id] {
+		if remoteIDs[l.id] && (!hasUUID || strings.HasPrefix(l.id, "u:")) {
 			split = i + 1
 		}
 	}
@@ -115,8 +127,7 @@ func MergeJSONL(local, remote []byte) (merged []byte, changed bool) {
 	tail := loc[split:]
 	i, j := 0, 0
 	for i < len(tail) || j < len(remoteOnly) {
-		// Ties go to local, keeping this device's order stable.
-		if j >= len(remoteOnly) || (i < len(tail) && !remoteOnly[j].ts.Before(tail[i].ts)) {
+		if j >= len(remoteOnly) || (i < len(tail) && !lineAfter(tail[i], remoteOnly[j])) {
 			emit(tail[i])
 			i++
 		} else {
@@ -125,6 +136,15 @@ func MergeJSONL(local, remote []byte) (merged []byte, changed bool) {
 		}
 	}
 	return out.Bytes(), true
+}
+
+// lineAfter orders divergent lines by time, breaking ties by identity, so
+// both devices interleave the same two tails the same way.
+func lineAfter(a, b jsonlLine) bool {
+	if !a.ts.Equal(b.ts) {
+		return a.ts.After(b.ts)
+	}
+	return a.id > b.id
 }
 
 // IsMergeableJSONL reports whether a sync-namespace path is an append-mostly

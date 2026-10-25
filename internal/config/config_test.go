@@ -13,7 +13,7 @@ import (
 func TestScopedSyncPaths(t *testing.T) {
 	t.Run("sessions scope is limited to portable session data", func(t *testing.T) {
 		got := ScopedSyncPaths("sessions")
-		want := []string{"projects", "history.jsonl", "tasks", "plans"}
+		want := []string{"projects", "history.jsonl", "tasks", "plans", "paste-cache"}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("ScopedSyncPaths(\"sessions\") = %v, want %v", got, want)
 		}
