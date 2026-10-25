@@ -1,94 +1,63 @@
 name: Release
 
+# Push a tag to cut a release:  git tag v1.2.3 && git push origin v1.2.3
+# A tag with a pre-release suffix (v1.2.3-rc.1) is published as a pre-release,
+# so .../releases/latest/download/ keeps pointing at the last stable build.
+
 on:
   push:
-    branches: [main]
+    tags: ['v*']
 
 permissions:
   contents: write
-  issues: write
-  pull-requests: write
-  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # Apple Silicon runner: the darwin builds need cgo, and it cross-builds
+    # the Intel binary with clang -arch x86_64.
+    runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v6
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
-          go-version: '1.21'
+          go-version-file: go.mod
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+      - name: Test
+        run: go test -short ./...
 
-      - name: Install dependencies
-        run: npm install -g semantic-release @semantic-release/changelog @semantic-release/exec @semantic-release/git
+      - name: Build release assets
+        run: scripts/build-release.sh "${GITHUB_REF_NAME#v}" "${{ github.repository }}" dist
 
-      - name: Run tests
-        run: go test ./...
-
-      - name: Release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npx semantic-release
-
-      - name: Build platform binaries
-        if: success()
+      - name: Smoke-test the darwin/arm64 binary
         run: |
-          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$VERSION" ]; then
-            LDFLAGS="-s -w -X main.version=${VERSION}"
-            GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o bin/claude-sync-darwin-arm64 ./cmd/claude-sync
-            GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o bin/claude-sync-darwin-amd64 ./cmd/claude-sync
-            GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o bin/claude-sync-linux-arm64 ./cmd/claude-sync
-            GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o bin/claude-sync-linux-amd64 ./cmd/claude-sync
-            GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o bin/claude-sync-windows-amd64.exe ./cmd/claude-sync
-            GOOS=windows GOARCH=arm64 go build -ldflags "$LDFLAGS" -o bin/claude-sync-windows-arm64.exe ./cmd/claude-sync
-          fi
+          mkdir smoke
+          tar -xzf dist/stradl_darwin_arm64.tar.gz -C smoke
+          smoke/stradl --version
 
-      # Not continue-on-error: a silent npm publish failure left the registry
-      # 9 minor versions behind the git tags for 16 weeks. A failed publish must
-      # fail the release.
-      - name: Publish platform packages to npm
-        if: success()
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Test the installer against the built assets
+        run: scripts/test-install.sh dist
+
+      # The attached copy has this repo baked in, so
+      # .../releases/latest/download/install.sh works without STRADL_REPO.
+      - name: Attach installer
         run: |
-          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$VERSION" ]; then
-            PUBLISHED=$(npm view @tawandotorg/claude-sync version 2>/dev/null || echo "")
-            if [ "${VERSION#v}" = "$PUBLISHED" ]; then
-              echo "Version ${VERSION#v} already published to npm, skipping"
-              exit 0
-            fi
-            bash scripts/publish-npm.sh "$VERSION"
-          fi
+          sed "s#REPLACE_OWNER/stradl#${GITHUB_REPOSITORY}#" install.sh >dist/install.sh
+          grep -qF "STRADL_REPO:-${GITHUB_REPOSITORY}}" dist/install.sh
 
-      - name: Publish to GitHub Packages
-        if: success()
-        continue-on-error: true
+      - name: Create GitHub release
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -n "$VERSION" ]; then
-            # Switch to GitHub registry and update scope
-            echo "@tawanorg:registry=https://npm.pkg.github.com" > .npmrc
-            echo "//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}" >> .npmrc
-
-            # Update package name for GitHub Packages (scope must match owner)
-            sed -i 's/"@tawandotorg\/claude-sync"/"@tawanorg\/claude-sync"/' package.json
-
-            npm version ${VERSION#v} --no-git-tag-version --allow-same-version
-            npm publish || echo "Already published to GitHub Packages, skipping"
-          fi
+          prerelease=""
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Stradl $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            ${prerelease:+"$prerelease"}

@@ -6,8 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   test:
+    name: Test (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -15,17 +19,20 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
 
       - name: Download dependencies
         run: go mod download
 
-      - name: Run all tests
-        run: go test -v ./...
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -short ./...
 
       - name: Run coverage on library packages
         run: |
-          go test -coverprofile=coverage.out -covermode=atomic \
+          go test -short -coverprofile=coverage.out -covermode=atomic \
             ./internal/claudesettings/ \
             ./internal/config/ \
             ./internal/crypto/ \
@@ -53,18 +60,39 @@ jobs:
           name: coverage-report
           path: coverage.out
 
-      - name: Build
+      # The Linux release binaries are pure Go; make sure that still builds.
+      - name: Build (CGO_ENABLED=0)
+        env:
+          CGO_ENABLED: '0'
         run: go build ./...
 
-      # The npm installer is the primary distribution path but has no Go
-      # coverage. Its redirect allowlist broke silently once already.
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Test installer
+        run: scripts/test-install.sh
 
-      - name: Test npm installer
-        run: node --test
+  macos:
+    name: Build & test (macOS, cgo)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -short ./...
+
+      # Same script the release workflow runs, so a broken release build
+      # shows up on the PR instead of on the tag.
+      - name: Build release assets
+        run: scripts/build-release.sh 0.0.0-ci "${{ github.repository }}" dist
+
+      - name: Test installer against the built assets
+        run: scripts/test-install.sh dist
 
   lint:
     runs-on: ubuntu-latest
@@ -74,7 +102,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
+          go-version-file: go.mod
 
       - name: Check formatting
         run: |
@@ -84,6 +112,9 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
+
+      - name: shellcheck
+        run: shellcheck install.sh scripts/build-release.sh scripts/test-install.sh
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
