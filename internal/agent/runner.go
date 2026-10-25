@@ -21,6 +21,10 @@ const (
 	DefaultQuiet       = 10 * time.Second
 	DefaultRemotePoll  = 60 * time.Second
 	DefaultLockedRetry = 15 * time.Second
+	// DefaultDeferredRetry re-runs a sync soon after one that held files
+	// back (a session open in Claude, or a file written mid-sync), so they
+	// land shortly after the session closes instead of at the next interval.
+	DefaultDeferredRetry = 45 * time.Second
 	// DefaultMaxDebounce caps how long a stream of local writes (a session
 	// that keeps talking) can postpone a sync while waiting for quiet.
 	DefaultMaxDebounce = 2 * time.Minute
@@ -62,7 +66,7 @@ type Options struct {
 	OnChange func()
 	Log      *Logger
 
-	LocalPoll, Quiet, RemotePoll, LockedRetry, MaxDebounce time.Duration
+	LocalPoll, Quiet, RemotePoll, LockedRetry, DeferredRetry, MaxDebounce time.Duration
 }
 
 // Snapshot is the Runner's current state for display.
@@ -139,6 +143,7 @@ func NewRunner(o Options) *Runner {
 	def(&o.Quiet, DefaultQuiet)
 	def(&o.RemotePoll, DefaultRemotePoll)
 	def(&o.LockedRetry, DefaultLockedRetry)
+	def(&o.DeferredRetry, DefaultDeferredRetry)
 	def(&o.MaxDebounce, DefaultMaxDebounce)
 
 	r := &Runner{o: o, trigger: make(chan struct{}, 1), nudge: make(chan struct{}, 1)}
@@ -436,6 +441,9 @@ func (r *Runner) finish(ctx context.Context, start, end time.Time, cfg *config.C
 		r.retryAt = end.Add(r.backoff(cfg))
 	} else {
 		r.failures = 0
+		if report != nil && len(report.Deferred) > 0 {
+			r.retryAt = end.Add(r.o.DeferredRetry)
+		}
 	}
 	r.notify(end, errMsg, newDesktop)
 }

@@ -523,6 +523,20 @@ func TestRunnerReportsPerFileErrors(t *testing.T) {
 	h.expectSyncs(0, 30*s)
 }
 
+func TestRunnerRetriesSoonAfterDeferredFiles(t *testing.T) {
+	h := newHarness(t, func(h *harness, _ *Options) {
+		h.results = []syncResult{{report: &sync.SyncReport{Deferred: []string{"projects/x/s.jsonl"}}}}
+	})
+	h.start()
+	h.advance(44 * s)
+	h.expectSyncs(0)
+	h.advance(45 * s)
+	h.expectSyncs(0, 45*s)
+	// A clean sync afterwards doesn't keep retrying (offsets are from start).
+	h.advance(165 * s)
+	h.expectSyncs(0, 45*s)
+}
+
 func TestRunnerTracksDesktopSessionsUntilClaudeRestarts(t *testing.T) {
 	h := newHarness(t, func(h *harness, _ *Options) {
 		h.appUp = true
