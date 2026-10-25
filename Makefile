@@ -1,27 +1,41 @@
-.PHONY: build install clean test fmt lint release-dry-run setup-hooks check
+.PHONY: all build install clean test fmt lint build-all release test-install run deps setup-hooks check
 
-BINARY_NAME=claude-sync
-VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+BINARY_NAME=stradl
+# Release tags are vX.Y.Z; binaries carry the bare semver.
+VERSION?=$(patsubst v%,%,$(shell git describe --tags --dirty 2>/dev/null || echo 0.0.0-dev))
+# GitHub owner/name that `stradl update` checks. Empty keeps the default
+# compiled into cmd/claude-sync; release builds always set it.
+RELEASE_REPO?=
 BUILD_DIR=bin
+DIST_DIR=dist
+PREFIX?=$(HOME)/.local
 GO=go
 
 # Build flags
-LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)"
+LDFLAGS=-ldflags "-s -w -X main.version=$(VERSION)$(if $(RELEASE_REPO), -X main.releaseRepo=$(RELEASE_REPO))"
+
+# The macOS menu bar needs cgo; Linux builds are pure Go, like the release.
+ifeq ($(shell uname -s),Darwin)
+CGO_ENABLED?=1
+else
+CGO_ENABLED?=0
+endif
 
 # Default target
 all: build
 
-# Build the binary
+# Build the binary for the host
 build:
-	$(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/claude-sync
+	CGO_ENABLED=$(CGO_ENABLED) $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/claude-sync
 
-# Install to GOPATH/bin
-install:
-	$(GO) install $(LDFLAGS) ./cmd/claude-sync
+# Install the host build to $(PREFIX)/bin (default ~/.local/bin, like install.sh)
+install: build
+	mkdir -p $(PREFIX)/bin
+	install -m 755 $(BUILD_DIR)/$(BINARY_NAME) $(PREFIX)/bin/$(BINARY_NAME)
 
 # Clean build artifacts
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(DIST_DIR)
 
 # Run tests
 test:
@@ -31,25 +45,21 @@ test:
 fmt:
 	$(GO) fmt ./...
 
-# Lint code (requires golangci-lint)
+# Lint code (requires golangci-lint and shellcheck)
 lint:
 	golangci-lint run
+	shellcheck install.sh scripts/build-release.sh scripts/test-install.sh
 
-# Build for multiple platforms
-build-all: build-darwin build-linux build-windows
-	cd $(BUILD_DIR) && shasum -a 256 $(BINARY_NAME)-* > checksums.txt
+# Build the release tarballs + checksums.txt into ./dist (macOS only; see
+# scripts/build-release.sh). CI runs the same script on tag pushes.
+build-all: release
 
-build-darwin:
-	GOOS=darwin GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/claude-sync
-	GOOS=darwin GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/claude-sync
+release:
+	scripts/build-release.sh "$(VERSION)" "$(or $(RELEASE_REPO),REPLACE_OWNER/stradl)" $(DIST_DIR)
 
-build-linux:
-	GOOS=linux GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/claude-sync
-	GOOS=linux GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 ./cmd/claude-sync
-
-build-windows:
-	GOOS=windows GOARCH=amd64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/claude-sync
-	GOOS=windows GOARCH=arm64 $(GO) build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME)-windows-arm64.exe ./cmd/claude-sync
+# End-to-end test of install.sh against locally served release assets
+test-install:
+	scripts/test-install.sh
 
 # Development: build and run
 run: build
@@ -59,10 +69,6 @@ run: build
 deps:
 	$(GO) mod download
 	$(GO) mod tidy
-
-# Dry run semantic-release (requires npm packages)
-release-dry-run:
-	npx semantic-release --dry-run
 
 # Setup git hooks
 setup-hooks:

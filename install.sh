@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+# Stradl installer. Musical chairs for your sessions.
+#
+#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/OWNER/stradl/main/install.sh)"
+#
+# Downloads the release for this OS/arch from GitHub Releases, verifies it
+# against checksums.txt, and installs it to ~/.local/bin/stradl. Needs no sudo,
+# Homebrew, or Go, so it works for a Standard (non-admin) macOS user. When a
+# terminal is available it then runs `stradl init` and, on macOS,
+# `stradl agent install`.
+#
+# This file must stay compatible with /bin/bash 3.2 (what macOS ships), so no
+# associative arrays, no ${var,,}, and no expanding empty arrays under set -u.
+set -euo pipefail
+
+# The release workflow rewrites this default in the copy it attaches to each
+# release, so .../releases/latest/download/install.sh needs no STRADL_REPO.
+REPO="${STRADL_REPO:-REPLACE_OWNER/stradl}"
+
+BIN_DIR="$HOME/.local/bin"
+BIN="$BIN_DIR/stradl"
+CONFIG_FILE="$HOME/.stradl/config.yaml"
+AGENT_PLIST="$HOME/Library/LaunchAgents/com.breakpointdata.stradl.plist"
+
+PATH_MARKER="# Added by the Stradl installer: put ~/.local/bin on PATH"
+# Single quotes on purpose: $HOME and $PATH expand when the profile is read.
+# shellcheck disable=SC2016
+PATH_LINE='case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac'
+
+# Set as main runs; read by the cleanup trap and the summary.
+OS=""
+ARCH=""
+TMP=""
+STAGED=""
+UPDATED_PROFILES=""
+KNOWN_PROFILES=""
+PATH_STATE=""
+SETUP_STATE=""
+SETUP_FAILED=0
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  RED=$'\033[31m'
+  GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'
+  RESET=$'\033[0m'
+else
+  BOLD="" DIM="" RED="" GREEN="" YELLOW="" RESET=""
+fi
+
+info() { printf '%s==>%s %s\n' "$BOLD" "$RESET" "$*"; }
+warn() { printf '%swarning:%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+die() {
+  printf '%serror:%s %s\n' "$RED" "$RESET" "$*" >&2
+  exit 1
+}
+
+# pretty shows a path under $HOME as ~/...
+pretty() {
+  case "$1" in
+    "$HOME"/*) printf '%s' "~${1#"$HOME"}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+usage() {
+  cat <<'EOF'
+Install Stradl, which keeps Claude Code sessions in sync across your Macs.
+
+Usage:
+  /bin/bash -c "$(curl -fsSL <url>/install.sh)"
+  curl -fsSL <url>/install.sh | bash -s -- [--no-setup]
+
+Options:
+  --no-setup   install the binary only; skip `stradl init` and the agent
+  -h, --help   show this help
+
+Environment:
+  STRADL_REPO      GitHub owner/name to install from
+  STRADL_VERSION   install this version (e.g. 1.2.3) instead of the latest
+  STRADL_BASE_URL  download the release assets from this URL instead
+  STRADL_NO_SETUP  set to 1 to behave like --no-setup
+EOF
+}
+
+cleanup() {
+  if [ -n "$STAGED" ]; then rm -f "$STAGED"; fi
+  if [ -n "$TMP" ]; then rm -rf "$TMP"; fi
+}
+
+detect_platform() {
+  case "$(uname -s)" in
+    Darwin) OS=darwin ;;
+    Linux) OS=linux ;;
+    *) die "unsupported OS: $(uname -s) (Stradl runs on macOS and Linux)" ;;
+  esac
+  case "$(uname -m)" in
+    arm64 | aarch64) ARCH=arm64 ;;
+    x86_64 | amd64) ARCH=amd64 ;;
+    *) die "unsupported CPU architecture: $(uname -m)" ;;
+  esac
+  # A shell running under Rosetta reports x86_64 on Apple Silicon. Install
+  # the native build anyway.
+  if [ "$OS" = darwin ] && [ "$ARCH" = amd64 ] &&
+    [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
+    ARCH=arm64
+  fi
+}
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is required but not installed"
+}
+
+sha256() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{ print $1 }'
+  else
+    sha256sum "$1" | awk '{ print $1 }'
+  fi
+}
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# base_url prints where the release assets live.
+base_url() {
+  if [ -n "${STRADL_BASE_URL:-}" ]; then
+    printf '%s' "${STRADL_BASE_URL%/}"
+    return 0
+  fi
+  case "$REPO" in
+    *REPLACE_OWNER*)
+      die "this copy of install.sh doesn't know which GitHub repo to install from.
+Tell it with STRADL_REPO, for example:
+  STRADL_REPO=owner/stradl /bin/bash -c \"\$(curl -fsSL <url>/install.sh)\""
+      ;;
+  esac
+  [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+    die "STRADL_REPO must look like owner/name, got '$REPO'"
+  if [ -n "${STRADL_VERSION:-}" ]; then
+    local v="${STRADL_VERSION#v}"
+    [[ "$v" =~ ^[0-9A-Za-z.+-]+$ ]] || die "STRADL_VERSION looks wrong: '$STRADL_VERSION'"
+    printf '%s' "https://github.com/$REPO/releases/download/v$v"
+  else
+    printf '%s' "https://github.com/$REPO/releases/latest/download"
+  fi
+}
+
+fetch() {
+  local url="$1" dest="$2"
+  local proto="=https,http"
+  # Only allow a plain-http URL when it was asked for (local testing); an
+  # https download may not be redirected down to http.
+  case "$url" in https://*) proto="=https" ;; esac
+  if ! curl -fsSL --proto "$proto" --retry 3 --connect-timeout 20 -o "$dest" "$url"; then
+    die "download failed: $url
+Is there a published release with an asset for $OS/$ARCH?"
+  fi
+}
+
+# add_path_line appends the marked PATH line to a shell profile once.
+add_path_line() {
+  local profile="$1"
+  if [ -f "$profile" ] && grep -qF "$PATH_MARKER" "$profile"; then
+    KNOWN_PROFILES="$KNOWN_PROFILES $(pretty "$profile")"
+    return 0
+  fi
+  if ! { printf '\n%s\n%s\n' "$PATH_MARKER" "$PATH_LINE" >>"$profile"; } 2>/dev/null; then
+    warn "couldn't update $(pretty "$profile"); add $(pretty "$BIN_DIR") to your PATH yourself"
+    return 0
+  fi
+  UPDATED_PROFILES="$UPDATED_PROFILES $(pretty "$profile")"
+}
+
+ensure_path() {
+  case ":$PATH:" in
+    *":$BIN_DIR:"*)
+      PATH_STATE="already on PATH"
+      return 0
+      ;;
+  esac
+  local shell_name="${SHELL:-}"
+  shell_name="${shell_name##*/}"
+  # zsh is the macOS login shell; .bash_profile only if the user has one, so
+  # creating it doesn't stop bash from reading an existing ~/.profile.
+  if [ "$OS" = darwin ] || [ "$shell_name" = zsh ] || [ -f "$HOME/.zprofile" ]; then
+    add_path_line "$HOME/.zprofile"
+  fi
+  if [ -f "$HOME/.bash_profile" ]; then
+    add_path_line "$HOME/.bash_profile"
+  elif [ "$OS" = linux ] && [ "$shell_name" != zsh ]; then
+    add_path_line "$HOME/.profile"
+  fi
+  if [ -n "$UPDATED_PROFILES" ]; then
+    PATH_STATE="added to${UPDATED_PROFILES}; open a new terminal to pick it up"
+  elif [ -n "$KNOWN_PROFILES" ]; then
+    PATH_STATE="set up in${KNOWN_PROFILES}; open a new terminal to pick it up"
+  else
+    PATH_STATE="not on PATH; add $(pretty "$BIN_DIR") to it in your shell profile"
+  fi
+}
+
+run_setup() {
+  # curl | bash leaves stdin on the pipe, so talk to the terminal directly,
+  # and skip setup entirely when there isn't one (CI, ssh without -t).
+  if ! { : </dev/tty; } 2>/dev/null; then
+    SETUP_STATE="skipped (no terminal); run 'stradl init' to finish"
+    return 0
+  fi
+
+  if [ -f "$CONFIG_FILE" ]; then
+    SETUP_STATE="already configured ($(pretty "$CONFIG_FILE"))"
+    # An upgrade replaced the binary under a running agent; restart it, but
+    # only if this Mac had it installed in the first place.
+    if [ "$OS" = darwin ] && [ -f "$AGENT_PLIST" ]; then
+      info "Restarting the background agent"
+      if "$BIN" agent install </dev/tty; then
+        SETUP_STATE="$SETUP_STATE; agent restarted"
+      else
+        SETUP_FAILED=1
+        SETUP_STATE="$SETUP_STATE; agent restart failed, run 'stradl agent install'"
+      fi
+    fi
+    return 0
+  fi
+
+  echo
+  info "Setting up Stradl"
+  if ! "$BIN" init </dev/tty; then
+    SETUP_FAILED=1
+    SETUP_STATE="'stradl init' did not finish; run it again when ready"
+    return 0
+  fi
+  SETUP_STATE="configured"
+
+  if [ "$OS" = darwin ]; then
+    echo
+    info "Installing the background agent"
+    if "$BIN" agent install </dev/tty; then
+      SETUP_STATE="configured; background agent installed"
+    else
+      SETUP_FAILED=1
+      SETUP_STATE="configured, but the agent did not install; run 'stradl agent install'"
+    fi
+  fi
+}
+
+main() {
+  local setup=1
+  case "${STRADL_NO_SETUP:-}" in
+    "" | 0 | false | no) ;;
+    *) setup=0 ;;
+  esac
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --no-setup) setup=0 ;;
+      -h | --help)
+        usage
+        return 0
+        ;;
+      --) ;;
+      *) die "unknown option: $1 (see --help)" ;;
+    esac
+    shift
+  done
+
+  detect_platform
+  require curl
+  require tar
+  command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1 ||
+    die "shasum or sha256sum is required to verify the download"
+
+  local base asset
+  base="$(base_url)"
+  asset="stradl_${OS}_${ARCH}.tar.gz"
+
+  local tmp_root="${TMPDIR:-/tmp}"
+  TMP="$(mktemp -d "${tmp_root%/}/stradl-install.XXXXXX")"
+  trap cleanup EXIT
+
+  info "Downloading $asset"
+  fetch "$base/$asset" "$TMP/$asset"
+  fetch "$base/checksums.txt" "$TMP/checksums.txt"
+
+  local want got
+  want="$(awk -v f="$asset" '{ n = $2; sub(/^\*/, "", n); if (n == f) { print $1; exit } }' "$TMP/checksums.txt")"
+  [ -n "$want" ] || die "checksums.txt has no entry for $asset; nothing was installed"
+  got="$(sha256 "$TMP/$asset")"
+  if [ "$(lower "$want")" != "$(lower "$got")" ]; then
+    die "checksum mismatch for $asset; nothing was installed
+  expected $want
+  got      $got"
+  fi
+  info "Verified checksum"
+
+  # Extract only the binary, so a stray entry in the archive can't land
+  # anywhere else.
+  mkdir "$TMP/x"
+  tar -xzf "$TMP/$asset" -C "$TMP/x" stradl 2>/dev/null || die "couldn't unpack $asset"
+  if [ ! -f "$TMP/x/stradl" ] || [ -L "$TMP/x/stradl" ]; then
+    die "$asset doesn't contain a stradl executable"
+  fi
+
+  # Refuse to replace a working install with something that won't start.
+  local version
+  chmod 755 "$TMP/x/stradl"
+  version="$("$TMP/x/stradl" --version 2>/dev/null)" ||
+    die "the downloaded stradl doesn't run on this machine ($OS/$ARCH); nothing was installed"
+  version="${version##* }"
+
+  mkdir -p "$BIN_DIR" || die "couldn't create $(pretty "$BIN_DIR")"
+  [ ! -d "$BIN" ] || die "$(pretty "$BIN") is a directory; move it out of the way and retry"
+  # Stage next to the target and rename into place: atomic, and safe while
+  # the agent is running the old binary.
+  STAGED="$BIN_DIR/.stradl.install.$$"
+  cp "$TMP/x/stradl" "$STAGED"
+  chmod 755 "$STAGED"
+  if [ "$OS" = darwin ]; then
+    xattr -d com.apple.quarantine "$STAGED" 2>/dev/null || true
+  fi
+  mv -f "$STAGED" "$BIN"
+  STAGED=""
+  info "Installed $(pretty "$BIN")"
+
+  ensure_path
+
+  if [ "$setup" = 1 ]; then
+    run_setup
+  else
+    SETUP_STATE="skipped (--no-setup); run 'stradl init' to finish"
+    if [ "$OS" = darwin ] && [ -f "$AGENT_PLIST" ]; then
+      SETUP_STATE="skipped (--no-setup); run 'stradl agent install' to restart the agent on the new version"
+    fi
+  fi
+
+  echo
+  printf '%sStradl %s is installed.%s\n' "$GREEN$BOLD" "$version" "$RESET"
+  printf '  %sbinary%s  %s\n' "$DIM" "$RESET" "$(pretty "$BIN")"
+  printf '  %sPATH%s    %s\n' "$DIM" "$RESET" "$PATH_STATE"
+  printf '  %ssetup%s   %s\n' "$DIM" "$RESET" "$SETUP_STATE"
+  if [ "$PATH_STATE" != "already on PATH" ]; then
+    # shellcheck disable=SC2016 # printed for the user to paste, unexpanded
+    printf '\nTo use it in this terminal now:\n  export PATH="$HOME/.local/bin:$PATH"\n'
+  fi
+
+  if [ "$SETUP_FAILED" = 1 ]; then
+    return 1
+  fi
+}
+
+main "$@"
