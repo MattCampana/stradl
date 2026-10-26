@@ -51,6 +51,11 @@ func FolderStats(cfg *config.Config) ([]FolderStat, error) {
 			if !strings.HasPrefix(np, prefix) || fs.LocalDeleted {
 				continue
 			}
+			// State can still hold files that no longer sync (build output
+			// added to the excluded names later): count what syncs now.
+			if inner := np[len(prefix):]; !s.folderInclude(inner) || cfg.IsBuildArtifact(inner) {
+				continue
+			}
 			st.Files++
 			st.Bytes += fs.Size
 			if fs.ModTime.After(st.LastChange) {

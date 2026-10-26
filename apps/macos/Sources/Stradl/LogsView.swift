@@ -24,13 +24,18 @@ struct LogsView: View {
             .padding(.vertical, 10)
             Divider()
             let lines = visible
+            // A lazy stack, not a List: scrolling a table-backed List while
+            // it updates re-enters AppKit's table view.
             ScrollViewReader { proxy in
-                List(lines) { line in
-                    LogLineView(line: line)
-                        .listRowInsets(EdgeInsets(top: 1, leading: 10, bottom: 1, trailing: 10))
-                        .id(line.id)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(lines) { line in
+                            LogLineView(line: line).id(line.id)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
                 }
-                .listStyle(.plain)
                 .font(.system(.callout, design: .monospaced))
                 .onChange(of: tail.lines.last?.id) { _ in
                     // visible, not lines: lines is the list from before the change.

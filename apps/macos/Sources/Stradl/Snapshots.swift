@@ -13,12 +13,18 @@ enum Snapshots {
         for pane in Pane.allCases {
             model.pane = pane
             try? await Task.sleep(nanoseconds: 2_500_000_000)
-            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
-                  let view = window.contentView?.superview ?? window.contentView,
-                  let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
-            view.cacheDisplay(in: view.bounds, to: rep)
+            guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }) else { continue }
             let name = pane.rawValue.lowercased().replacingOccurrences(of: " ", with: "-")
-            try? rep.representation(using: .png, properties: [:])?.write(to: out.appendingPathComponent("\(name).png"))
+            // The window as the window server composites it (what a person
+            // sees, sidebar glass included); an app may capture its own windows.
+            if let cg = CGWindowListCreateImage(.null, .optionIncludingWindow, CGWindowID(window.windowNumber), [.boundsIgnoreFraming, .bestResolution]) {
+                let rep = NSBitmapImageRep(cgImage: cg)
+                try? rep.representation(using: .png, properties: [:])?.write(to: out.appendingPathComponent("\(name).png"))
+            } else if let view = window.contentView?.superview ?? window.contentView,
+                      let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                view.cacheDisplay(in: view.bounds, to: rep)
+                try? rep.representation(using: .png, properties: [:])?.write(to: out.appendingPathComponent("\(name).png"))
+            }
         }
         NSApp.terminate(nil)
     }

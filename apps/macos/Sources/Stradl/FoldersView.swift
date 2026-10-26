@@ -3,37 +3,50 @@ import SwiftUI
 
 /// The project folders that sync: every folder a session works in, plus
 /// extra folders, with git repositories carried whole.
+///
+/// A plain scrolling stack rather than a List: an AppKit-backed List here
+/// updated itself from inside its own table-view callbacks ("reentrant
+/// operation in its NSTableView delegate"), which stopped the whole window
+/// from drawing.
 struct FoldersView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Every folder a session works in syncs to all your Macs, at the same place under your home folder. Build output such as node_modules stays on each Mac.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
-            if let c = model.config, !c.folderSync {
-                Card {
-                    Text("Project folders don't sync on this Mac. Turn on Project folders in Settings to sync the folders your sessions work in.")
-                        .foregroundStyle(.secondary)
-                }
-                .padding(24)
-            }
-            List {
-                Section {
-                    // Real projects first, the Claude app's scratch folders last.
-                    ForEach(model.folders.sorted { ($0.isScratch ? 1 : 0, -$0.files) < ($1.isScratch ? 1 : 0, -$1.files) }) { f in
-                        FolderRow(folder: f)
-                    }
-                    if model.folders.isEmpty {
-                        Text("No project folders yet. They're picked up from your sessions at the next sync.")
+        let folders = model.folders.sorted {
+            // Real projects first, the Claude app's scratch folders last.
+            ($0.isScratch ? 1 : 0, -$0.files, $0.path) < ($1.isScratch ? 1 : 0, -$1.files, $1.path)
+        }
+        let extras = model.config?.extraFolders ?? []
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Every folder a session works in syncs to all your Macs, at the same place under your home folder. Build output such as node_modules stays on each Mac.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let c = model.config, !c.folderSync {
+                    Card {
+                        Text("Project folders don't sync on this Mac. Turn on Project folders in Settings to sync the folders your sessions work in.")
                             .foregroundStyle(.secondary)
                     }
                 }
+                if folders.isEmpty {
+                    Card {
+                        Text("No project folders yet. They're picked up from your sessions at the next sync.")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(folders.enumerated()), id: \.element.id) { i, f in
+                            if i > 0 { Divider().padding(.leading, 52) }
+                            FolderRow(folder: f, extraEntry: extraEntry(for: f, in: extras)) { entry in
+                                model.editList("extra_folders", add: false, entry)
+                            }
+                        }
+                    }
+                    .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.separator, lineWidth: 0.5))
+                }
             }
-            .listStyle(.inset(alternatesRowBackgrounds: true))
+            .padding(24)
         }
         .toolbar {
             ToolbarItem {
@@ -42,6 +55,14 @@ struct FoldersView: View {
             }
         }
         .task { await model.refreshFolders() }
+    }
+
+    /// The extra_folders entry that adds this folder, if one does.
+    private func extraEntry(for f: FolderStat, in extras: [String]) -> String? {
+        extras.first { entry in
+            let expanded = entry.hasPrefix("~/") ? StradlPaths.home.appendingPathComponent(String(entry.dropFirst(2))).path : entry
+            return expanded == f.abs
+        }
     }
 
     private func addFolder() {
@@ -58,16 +79,19 @@ struct FoldersView: View {
     }
 }
 
+/// One folder. It gets everything it shows as values, so a refresh of the
+/// app's state never re-enters a row while it draws.
 struct FolderRow: View {
-    @EnvironmentObject var model: AppModel
     var folder: FolderStat
+    var extraEntry: String?
+    var stopSyncing: (String) -> Void
 
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: folder.git ? "point.3.connected.trianglepath.dotted" : "folder")
                 .font(.system(size: 18))
                 .foregroundStyle(folder.exists ? Color.accentColor : .secondary)
-                .frame(width: 24)
+                .frame(width: 28)
                 .help(folder.git ? "A git repository: history and branches sync too" : "A folder")
             VStack(alignment: .leading, spacing: 2) {
                 Text(folder.isScratch ? (folder.path as NSString).lastPathComponent : "~/" + folder.path)
@@ -75,45 +99,38 @@ struct FolderRow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help("~/" + folder.path)
-                HStack(spacing: 6) {
-                    Text(folder.git ? "Git repository" : folder.isScratch ? "Claude app scratch folder" : "Folder")
-                    Text("·")
-                    Text(folder.files.plural("file"))
-                    Text("·")
-                    Text(folder.bytes.bytes)
-                    if let t = folder.lastChange, !t.isZero {
-                        Text("·")
-                        Text("changed \(t.ago)")
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Text(details)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
-            Spacer()
+            Spacer(minLength: 8)
             if !folder.exists {
                 Text("Not on this Mac").font(.caption).foregroundStyle(.orange)
             }
-            Button { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder.abs)]) } label: {
+            if let entry = extraEntry {
+                Button("Stop Syncing") { stopSyncing(entry) }
+                    .controlSize(.small)
+                    .help("Remove this extra folder from Stradl (nothing is deleted)")
+            }
+            Button {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder.abs)])
+            } label: {
                 Image(systemName: "magnifyingglass")
             }
             .buttonStyle(.borderless)
             .help("Show in Finder")
             .disabled(!folder.exists)
         }
-        .padding(.vertical, 4)
-        .contextMenu {
-            if let c = model.config, c.extraFolders.contains(where: { expand($0) == folder.abs }) {
-                Button("Stop Syncing This Extra Folder") {
-                    if let entry = c.extraFolders.first(where: { expand($0) == folder.abs }) {
-                        model.editList("extra_folders", add: false, entry)
-                    }
-                }
-            }
-            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder.abs)]) }
-        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
     }
 
-    private func expand(_ p: String) -> String {
-        p.hasPrefix("~/") ? StradlPaths.home.appendingPathComponent(String(p.dropFirst(2))).path : p
+    private var details: String {
+        var parts = [folder.git ? "Git repository" : folder.isScratch ? "Claude app scratch folder" : "Folder",
+                     folder.files.plural("file"), folder.bytes.bytes]
+        if let t = folder.lastChange, !t.isZero {
+            parts.append("changed \(t.ago)")
+        }
+        return parts.joined(separator: " · ")
     }
 }
