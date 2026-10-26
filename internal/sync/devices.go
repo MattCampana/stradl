@@ -95,7 +95,7 @@ func DeviceID(cfg *config.Config) (string, error) {
 		return "", err
 	}
 	id := hex.EncodeToString(b[:])
-	if err := writeFileAtomic(p, []byte(id+"\n")); err != nil {
+	if err := writeFileAtomic(p, []byte(id+"\n"), 0600); err != nil {
 		return "", fmt.Errorf("failed to save device ID: %w", err)
 	}
 	return id, nil
@@ -237,7 +237,7 @@ func recordRecent(cfg *config.Config, claudeDir string, report *SyncReport, now 
 	if err != nil {
 		return list, err
 	}
-	return list, writeFileAtomic(filepath.Join(StateDir(cfg), recentFile), append(data, '\n'))
+	return list, writeFileAtomic(filepath.Join(StateDir(cfg), recentFile), append(data, '\n'), 0600)
 }
 
 // countTranscripts counts the sessions (projects/<dir>/<id>.jsonl) on this
@@ -476,30 +476,4 @@ func ScopeScanFor(cfg *config.Config) (*ScopeSummary, error) {
 	}
 	s.state = state
 	return s.ScopeScan()
-}
-
-// writeFileAtomic replaces p with data (0600) without exposing a partial file.
-func writeFileAtomic(p string, data []byte) error {
-	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(p)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, p)
 }

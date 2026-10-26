@@ -176,7 +176,15 @@ func newHarness(t *testing.T) *harness {
 	if err := crypto.GenerateKey(h.key); err != nil {
 		t.Fatal(err)
 	}
-	h.now = time.Now().Truncate(time.Second)
+	// The most recent noon in the test zone: offsets of a few hours never
+	// cross midnight, so the day grouping the test checks is stable at any
+	// hour, and the clock never runs ahead of the files' real mtimes.
+	real := time.Now().In(h.loc)
+	y, m, d := real.Date()
+	h.now = time.Date(y, m, d, 12, 0, 0, 0, h.loc)
+	if h.now.After(real) {
+		h.now = h.now.AddDate(0, 0, -1)
+	}
 	h.alice = h.newMac("Alice's Mac", "alice")
 	h.bob = h.newMac("Bob's Mac", "bob")
 	return h
