@@ -161,8 +161,26 @@ func TestIsPortableContentPath(t *testing.T) {
 		"projects/-Users-a-x/memory/notes.md":                     true,
 		"projects/-Users-a-x/sess.jsonl.conflict.20260610-120000": true,
 		"projects/-Users-a-x/img.png":                             false,
-		"settings.json":                                           false,
-		"agents/foo.md":                                           false,
+		// Text configs that name paths are rewritten too.
+		"settings.json":                          true,
+		"settings.local.json":                    true,
+		"CLAUDE.md":                              true,
+		"agents/foo.md":                          true,
+		"commands/deploy.md":                     true,
+		"skills/review/SKILL.md":                 true,
+		"plugins/installed_plugins.json":         true,
+		"rules/team.yaml":                        true,
+		"workflows/ci.yml":                       true,
+		"skills/review/run.sh":                   false,
+		"plugins/cache/x/plugin.json":            false,
+		"agents/settings.json":                   false,
+		"todos/a.json":                           false,
+		"_folders/code/app/settings.json":        false, // project folders are never rewritten
+		"_folders/code/app/CLAUDE.md":            false,
+		"_desktop/sessions/a/b/local_x.json":     false,
+		"_folders/code/app/config/app.yaml":      false,
+		"_folders/code/app/agents/helper.md":     false,
+		"_folders/code/app/projects/notes.jsonl": false,
 	}
 	for in, want := range cases {
 		if got := IsPortableContentPath(in); got != want {

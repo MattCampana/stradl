@@ -21,7 +21,7 @@ func init() {
 var syncOnce = sync.RunSync
 
 func syncCmd() *cobra.Command {
-	var noWait bool
+	var noWait, allowMassDelete bool
 	var timeout time.Duration
 
 	cmd := &cobra.Command{
@@ -35,6 +35,12 @@ Deleting a session here only removes it here. A session open in a running
 Claude process is never rewritten underneath it; its updates wait until the
 process exits.
 
+Any other file deleted here (a setting, a skill, a file in a project folder)
+is deleted on every Mac; each other Mac moves its copy to ~/.stradl/trash,
+where it stays for 30 days. A file changed on another Mac meanwhile is kept
+instead. A sync that would delete more than half of a folder's files deletes
+none and warns; --allow-mass-delete lets it go ahead.
+
 When another sync is already running (the background agent's, say), this one
 waits up to 2 minutes for it to finish and then runs, so it always includes
 your latest changes. --no-wait skips it instead.`,
@@ -43,6 +49,7 @@ your latest changes. --no-wait skips it instead.`,
 			if err != nil {
 				return err
 			}
+			cfg.AllowMassDelete = allowMassDelete
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 
@@ -78,6 +85,7 @@ your latest changes. --no-wait skips it instead.`,
 		},
 	}
 	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Skip this sync, instead of waiting, when another one is running")
+	cmd.Flags().BoolVar(&allowMassDelete, "allow-mass-delete", false, "Delete files on every Mac even when that removes more than half of a folder's files")
 	cmd.Flags().Bool("wait", true, "Wait for a running sync to finish (the default)")
 	_ = cmd.Flags().MarkDeprecated("wait", "waiting is now the default; pass --no-wait to skip instead")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, "Give up after this long")
@@ -90,7 +98,7 @@ func printSyncReport(r *sync.SyncReport, took time.Duration) {
 			fmt.Printf("  %s%s%s %d %s\n", color, sym, colorReset, n, what)
 		}
 	}
-	if !r.Changed() && len(r.Deferred) == 0 && len(r.Errors) == 0 && len(r.Skipped) == 0 {
+	if !r.Changed() && len(r.Deferred)+len(r.Errors)+len(r.Skipped)+len(r.Warnings) == 0 {
 		printSuccess(fmt.Sprintf("✓ Everything is in sync (%s)", took.Round(100*time.Millisecond)))
 		return
 	}
@@ -98,11 +106,16 @@ func printSyncReport(r *sync.SyncReport, took time.Duration) {
 	line("↓", colorCyan, len(r.Downloaded), "downloaded")
 	line("⇄", colorCyan, len(r.Merged), "merged (changed on two devices)")
 	line("↺", colorCyan, len(r.Restored), "restored to remote")
-	line("…", colorDim, len(r.Deferred), "waiting for an open session to close")
+	line("✗", colorCyan, len(r.Deleted), "deleted on every Mac (deleted here)")
+	line("⌫", colorCyan, len(r.Trashed), "moved to ~/.stradl/trash (deleted on another Mac)")
+	line("…", colorDim, len(r.Deferred), "waiting for an open session or a git command to finish")
 	line("!", colorYellow, len(r.Conflicts), "conflicts kept as .conflict copies")
 	line("?", colorYellow, len(r.Skipped), "skipped (unknown path token; check path_map)")
 	if n := len(r.NewDesktopSessions); n > 0 {
 		printWarning(fmt.Sprintf("%d new session(s) from other devices: restart the Claude app to see them in the sidebar.", n))
+	}
+	for _, w := range r.Warnings {
+		printWarning(w)
 	}
 	for _, err := range r.Errors {
 		fmt.Printf("  %s✗%s %v\n", colorYellow, colorReset, err)

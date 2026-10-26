@@ -26,12 +26,18 @@ func init() {
 	storage.NewAzure = New
 }
 
+var (
+	_ storage.Conditional = (*Client)(nil)
+	_ storage.Streaming   = (*Client)(nil)
+)
+
 // deleteWorkers bounds concurrent deletes in DeleteBatch. The Blob Batch API
 // would save round trips, but it rejects container-scoped SAS tokens, which
 // are the recommended way to authenticate.
 const deleteWorkers = 8
 
-// Client implements storage.Storage and storage.Conditional for Azure Blob Storage
+// Client implements storage.Storage, storage.Conditional and storage.Streaming
+// for Azure Blob Storage
 type Client struct {
 	container *container.Client
 	name      string
@@ -82,14 +88,72 @@ func (c *Client) Upload(ctx context.Context, key string, data []byte) error {
 // UploadIf stores data only if the blob's current ETag equals ifMatch, or, when
 // ifMatch is empty, only if the blob does not exist yet.
 func (c *Client) UploadIf(ctx context.Context, key string, data []byte, ifMatch string) (string, error) {
+	return c.put(ctx, key, data, writeConditions(ifMatch))
+}
+
+// writeConditions is compare-and-swap for a write: the blob's ETag must equal
+// ifMatch, or with ifMatch empty the blob must not exist yet.
+func writeConditions(ifMatch string) *blob.AccessConditions {
 	cond := &blob.ModifiedAccessConditions{}
 	if ifMatch == "" {
 		cond.IfNoneMatch = to.Ptr(azcore.ETagAny)
 	} else {
 		cond.IfMatch = to.Ptr(azcore.ETag(quoteETag(ifMatch)))
 	}
-	return c.put(ctx, key, data, &blob.AccessConditions{ModifiedAccessConditions: cond})
+	return &blob.AccessConditions{ModifiedAccessConditions: cond}
 }
+
+// Stream uploads stage blocks of this size, a few at a time, so a file of any
+// size uploads in streamBlockSize*streamConcurrency of memory.
+const (
+	streamBlockSize   = 4 << 20
+	streamConcurrency = 4
+)
+
+// UploadStream stores everything read from r as a block blob, staging blocks
+// as they are read and committing them with the same conditions as UploadIf.
+// A read error stops the upload before the commit, so a failed upload never
+// replaces the blob.
+func (c *Client) UploadStream(ctx context.Context, key string, r io.Reader, ifMatch string) (string, error) {
+	resp, err := c.container.NewBlockBlobClient(key).UploadStream(ctx, r, &blockblob.UploadStreamOptions{
+		BlockSize:        streamBlockSize,
+		Concurrency:      streamConcurrency,
+		HTTPHeaders:      &blob.HTTPHeaders{BlobContentType: to.Ptr("application/octet-stream")},
+		AccessConditions: writeConditions(ifMatch),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to upload %s: %w", key, mapError(err))
+	}
+	return etagString(resp.ETag), nil
+}
+
+// DownloadStream opens a blob for reading with no size limit. Retries are
+// pinned to the version the first read returned.
+func (c *Client) DownloadStream(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	resp, err := c.container.NewBlobClient(key).DownloadStream(ctx, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to download %s: %w", key, mapError(err))
+	}
+	body := resp.NewRetryReader(ctx, &blob.RetryReaderOptions{MaxRetries: 3})
+	return &mappedReader{rc: body, key: key}, etagString(resp.ETag), nil
+}
+
+// mappedReader passes read errors through mapError, so callers see the
+// storage sentinels and never an unredacted SAS signature.
+type mappedReader struct {
+	rc  io.ReadCloser
+	key string
+}
+
+func (m *mappedReader) Read(p []byte) (int, error) {
+	n, err := m.rc.Read(p)
+	if err != nil && err != io.EOF {
+		err = fmt.Errorf("failed to read %s: %w", m.key, mapError(err))
+	}
+	return n, err
+}
+
+func (m *mappedReader) Close() error { return m.rc.Close() }
 
 func (c *Client) put(ctx context.Context, key string, data []byte, cond *blob.AccessConditions) (string, error) {
 	resp, err := c.container.NewBlockBlobClient(key).Upload(ctx, streaming.NopCloser(bytes.NewReader(data)), &blockblob.UploadOptions{
@@ -143,6 +207,32 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 		return fmt.Errorf("failed to delete %s: %w", key, mapError(err))
 	}
 	return nil
+}
+
+// DeleteIf removes the blob only if its current ETag equals ifMatch. A blob
+// that changed meanwhile is kept and the error wraps
+// storage.ErrPreconditionFailed; a blob that no longer exists is not an error.
+func (c *Client) DeleteIf(ctx context.Context, key, ifMatch string) error {
+	if ifMatch == "" {
+		return fmt.Errorf("delete %s: an ETag is required", key)
+	}
+	_, err := c.container.NewBlobClient(key).Delete(ctx, &blob.DeleteOptions{
+		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
+			IfMatch: to.Ptr(azcore.ETag(quoteETag(ifMatch))),
+		}},
+	})
+	if err == nil || bloberror.HasCode(err, bloberror.BlobNotFound) {
+		return nil
+	}
+	err = mapError(err)
+	if errors.Is(err, storage.ErrPreconditionFailed) {
+		// If-Match also fails on a blob that no longer exists: that delete
+		// has already happened.
+		if _, herr := c.Head(ctx, key); errors.Is(herr, storage.ErrNotFound) {
+			return nil
+		}
+	}
+	return fmt.Errorf("failed to delete %s: %w", key, err)
 }
 
 // DeleteBatch removes multiple objects concurrently

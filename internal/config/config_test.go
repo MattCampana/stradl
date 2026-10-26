@@ -576,3 +576,102 @@ func TestSetMCPSync(t *testing.T) {
 func boolPtr(b bool) *bool {
 	return &b
 }
+
+// loadYAML writes a config file under a temporary home and loads it.
+func loadYAML(t *testing.T, yaml string) *Config {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ConfigDir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ConfigDir, ConfigFile), []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestLoadMigratesUnchosenSessionsScopeToEverything(t *testing.T) {
+	// What init wrote by default in v2.0.0.
+	cfg := loadYAML(t, "encryption_key_path: ~/.stradl/age-key.txt\nscope: sessions\n")
+	if cfg.Scope != ScopeEverything || !cfg.IsMCPSyncEnabled() || cfg.ScopeExplicit {
+		t.Fatalf("scope = %q, mcp = %v, explicit = %v; want everything with MCP sync", cfg.Scope, cfg.IsMCPSyncEnabled(), cfg.ScopeExplicit)
+	}
+	// The next save persists it.
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(ConfigFilePath())
+	if !strings.Contains(string(data), "scope: everything") || !strings.Contains(string(data), "mcp_sync: true") {
+		t.Fatalf("saved config = %s", data)
+	}
+
+	for _, tc := range []struct{ yaml, want string }{
+		{"scope: sessions\nscope_explicit: true\n", ScopeSessions}, // chosen with --scope or paths add/remove
+		{"scope: full\n", ScopeFull},
+		{"scope: everything\n", ScopeEverything},
+		{"bucket: b\n", ""}, // no scope at all keeps the legacy full-scope meaning
+	} {
+		cfg := loadYAML(t, tc.yaml)
+		if cfg.Scope != tc.want || cfg.MCPSync != nil {
+			t.Errorf("%q: scope = %q (mcp %v), want %q untouched", tc.yaml, cfg.Scope, cfg.MCPSync, tc.want)
+		}
+	}
+}
+
+func TestLoadExpandsExtraFolders(t *testing.T) {
+	cfg := loadYAML(t, "scope: everything\nextra_folders:\n  - ~/work\n  - /abs/path\n  - \"~/My Projects/x\"\n")
+	home, _ := os.UserHomeDir()
+	want := []string{filepath.Join(home, "work"), "/abs/path", filepath.Join(home, "My Projects", "x")}
+	if !reflect.DeepEqual(cfg.ExtraFolders, want) {
+		t.Fatalf("extra_folders = %v, want %v", cfg.ExtraFolders, want)
+	}
+}
+
+func TestEverythingScope(t *testing.T) {
+	if got := ScopedSyncPaths(ScopeEverything); !reflect.DeepEqual(got, []string{"."}) {
+		t.Fatalf("everything paths = %v", got)
+	}
+	cfg := &Config{Scope: ScopeEverything, SyncPaths: []string{"projects", "plans"}}
+	if got := cfg.GetEffectiveSyncPaths(); !reflect.DeepEqual(got, []string{"."}) {
+		t.Fatalf("everything must ignore a narrower sync_paths: %v", got)
+	}
+	if !cfg.IsFolderSyncEnabled() {
+		t.Fatal("folder sync defaults on under everything")
+	}
+	off := false
+	cfg.FolderSync = &off
+	if cfg.IsFolderSyncEnabled() {
+		t.Fatal("folder_sync: false turns it off")
+	}
+	if (&Config{Scope: ScopeFull}).IsFolderSyncEnabled() || (&Config{}).IsFolderSyncEnabled() {
+		t.Fatal("folders sync only under everything")
+	}
+}
+
+func TestBuildArtifacts(t *testing.T) {
+	cfg := &Config{}
+	for _, p := range []string{"node_modules", "web/node_modules/x/index.js", ".venv/bin/python", "a/venv/lib", "pkg/__pycache__/m.pyc",
+		"lib/x.pyc", ".pytest_cache/v", ".mypy_cache", "site/.next/build", ".nuxt", "android/.gradle/c", "dir/.DS_Store",
+		".Spotlight-V100/x", ".Trashes"} {
+		if !cfg.IsBuildArtifact(p) {
+			t.Errorf("%s should be a build artifact", p)
+		}
+	}
+	for _, p := range []string{"src/main.go", "venvironment/x", "my_node_modules.txt", "pyc/readme", "next/x", "gradle/wrapper.jar", "x.pycx"} {
+		if cfg.IsBuildArtifact(p) {
+			t.Errorf("%s is not a build artifact", p)
+		}
+	}
+	if (&Config{SyncBuildArtifacts: true}).IsBuildArtifact("node_modules/x") {
+		t.Error("sync_build_artifacts includes them")
+	}
+	ex := &Config{FolderExclude: []string{"dist/**", "*.log"}}
+	if !ex.IsFolderExcluded("dist/a.js") || !ex.IsFolderExcluded("logs/run.log") || ex.IsFolderExcluded("src/a.js") {
+		t.Error("folder_exclude patterns not applied")
+	}
+}

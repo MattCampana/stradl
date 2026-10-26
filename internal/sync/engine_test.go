@@ -28,7 +28,11 @@ type casStore struct {
 	clockSkew time.Duration
 	// beforeUploadIf runs (unlocked) before a conditional write, to inject races.
 	beforeUploadIf func(key string)
+	// beforeDeleteIf runs (unlocked) before a conditional delete, likewise.
+	beforeDeleteIf func(key string)
 }
+
+var _ storage.Conditional = (*casStore)(nil)
 
 type casObj struct {
 	data []byte
@@ -83,6 +87,23 @@ func (c *casStore) DownloadWithETag(_ context.Context, key string) ([]byte, stri
 func (c *casStore) Delete(_ context.Context, key string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	delete(c.objs, key)
+	return nil
+}
+
+func (c *casStore) DeleteIf(_ context.Context, key, ifMatch string) error {
+	if hook := c.beforeDeleteIf; hook != nil {
+		hook(key)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cur, exists := c.objs[key]
+	if !exists {
+		return nil
+	}
+	if normETag(cur.etag) != normETag(ifMatch) {
+		return fmt.Errorf("%s: %w", key, storage.ErrPreconditionFailed)
+	}
 	delete(c.objs, key)
 	return nil
 }

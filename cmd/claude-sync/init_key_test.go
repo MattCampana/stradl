@@ -95,6 +95,10 @@ func (f *fakeRemote) Delete(_ context.Context, key string) error {
 	return nil
 }
 
+func (f *fakeRemote) DeleteIf(ctx context.Context, key, _ string) error {
+	return f.Delete(ctx, key)
+}
+
 func (f *fakeRemote) DeleteBatch(ctx context.Context, keys []string) error {
 	for _, k := range keys {
 		_ = f.Delete(ctx, k)
@@ -600,8 +604,27 @@ func TestInitKeepsOtherSettings(t *testing.T) {
 		if err := initFullSetup(ctx, config.AgeKeyFilePath(), opts); err != nil {
 			t.Fatalf("initFullSetup() = %v", err)
 		}
-		if got := load(t); got.Scope != config.ScopeSessions || got.SyncIntervalSeconds != 90 {
-			t.Errorf("scope = %q, interval = %d", got.Scope, got.SyncIntervalSeconds)
+		// A chosen "sessions" is kept, not migrated to "everything" on load.
+		if got := load(t); got.Scope != config.ScopeSessions || !got.ScopeExplicit || got.SyncIntervalSeconds != 90 {
+			t.Errorf("scope = %q (explicit %v), interval = %d", got.Scope, got.ScopeExplicit, got.SyncIntervalSeconds)
+		}
+	})
+
+	t.Run("an unchosen sessions scope moves to everything", func(t *testing.T) {
+		// What init wrote by default before "everything" existed.
+		setup(t, &config.Config{Scope: config.ScopeSessions, EncryptionKey: "~/.stradl/age-key.txt"})
+		if got := load(t); got.Scope != config.ScopeEverything || !got.IsMCPSyncEnabled() {
+			t.Fatalf("loaded scope = %q, mcp %v; want everything with MCP sync", got.Scope, got.IsMCPSyncEnabled())
+		}
+		if err := initFullSetup(ctx, config.AgeKeyFilePath(), fullSetupOpts()); err != nil {
+			t.Fatalf("initFullSetup() = %v", err)
+		}
+		raw, err := os.ReadFile(config.ConfigFilePath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), "scope: everything") || strings.Contains(string(raw), "scope_explicit") {
+			t.Errorf("the next save should persist the migrated scope:\n%s", raw)
 		}
 	})
 
@@ -621,8 +644,8 @@ func TestInitKeepsOtherSettings(t *testing.T) {
 		if got.IsLegacyConfig() || got.GetStorageConfig().Provider != storage.ProviderAzure {
 			t.Errorf("config still reads as legacy R2: %+v", got.GetStorageConfig())
 		}
-		if got.Scope != config.ScopeSessions || len(got.PathMap) != 1 {
-			t.Errorf("scope = %q, path_map = %v", got.Scope, got.PathMap)
+		if got.Scope != config.ScopeEverything || got.ScopeExplicit || !got.IsMCPSyncEnabled() || len(got.PathMap) != 1 {
+			t.Errorf("scope = %q (explicit %v, mcp %v), path_map = %v", got.Scope, got.ScopeExplicit, got.IsMCPSyncEnabled(), got.PathMap)
 		}
 	})
 }

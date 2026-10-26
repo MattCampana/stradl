@@ -24,18 +24,44 @@ import (
 // directories agree on entries. Updated with compare-and-swap.
 const MtimeManifestKey = "_metadata/mtimes.json.age"
 
+// ModesManifestKey is the remote key of the shared file-mode manifest: the
+// permission bits of synced files whose mode differs from the default for
+// their path (see defaultPerm), such as an executable script or git hook,
+// keyed like the mtime manifest. Updated with compare-and-swap.
+const ModesManifestKey = "_metadata/modes.json.age"
+
 // maxRaceRetries bounds how often one file is re-merged after losing a
 // compare-and-swap race to another device within a single sync.
 const maxRaceRetries = 4
 
+// massDeleteFloor is the smallest number of deletions the mass-delete guard
+// considers; below it, a folder can always lose more than half its files.
+const massDeleteFloor = 10
+
+type rootKind int
+
+const (
+	rootClaude  rootKind = iota // ~/.claude
+	rootDesktop                 // the desktop app's sidebar records
+	rootFolder                  // a project folder
+)
+
 // syncRoot is a local directory whose files join the sync namespace under
-// prefix: ~/.claude with no prefix, and the desktop session index under
-// DesktopPrefix.
+// prefix: ~/.claude with no prefix, the desktop session index under
+// DesktopPrefix, and each project folder under FoldersPrefix.
 type syncRoot struct {
 	dir     string
 	prefix  string
 	paths   []string
 	include func(rel string) bool
+	skipDir func(rel string) bool // directories left out of the scan entirely
+	kind    rootKind
+	label   string      // how the user knows the root: ~/.claude, ~/code/app
+	perm    os.FileMode // mode of files written here unless the modes manifest says otherwise
+
+	// deferred keeps the root out of this pass (git is working in it, or it
+	// couldn't be scanned completely).
+	deferred bool
 }
 
 type localFile struct {
@@ -51,22 +77,35 @@ type SyncReport struct {
 	Downloaded []string // remote changes written locally
 	Merged     []string // both sides changed; merged (transcripts) or newest kept
 	Restored   []string // remote copy had vanished; re-uploaded from this device
-	Deferred   []string // remote changes held back while a live session owns the file
+	Deferred   []string // remote changes held back while a live session owns the file, or project folders git is working in
 	Conflicts  []string // non-mergeable files changed on both sides; loser kept as .conflict copy
 	Skipped    []string // remote keys using a path token this device can't map
 	Moved      []string // stale copies of sessions Claude Code moved to another project folder, folded into the current copy
+
+	// Deleted lists files deleted on this device whose remote copy this pass
+	// deleted too, so every Mac drops them (everything except transcripts,
+	// prompt history and sidebar records, which keep every device's copy).
+	Deleted []string
+
+	// Trashed lists files another Mac deleted, moved from here into
+	// ~/.stradl/trash rather than deleted.
+	Trashed []string
 
 	// NewDesktopSessions lists desktop sidebar records that did not exist on
 	// this device before. The desktop app loads its sidebar at launch, so they
 	// show up after it restarts.
 	NewDesktopSessions []string
 
+	// Warnings are problems that held part of the sync back without failing
+	// it, such as deletions the mass-delete guard stopped.
+	Warnings []string
+
 	Errors []error
 }
 
 // Changed reports whether the pass moved any data.
 func (r *SyncReport) Changed() bool {
-	return len(r.Uploaded)+len(r.Downloaded)+len(r.Merged)+len(r.Restored) > 0
+	return len(r.Uploaded)+len(r.Downloaded)+len(r.Merged)+len(r.Restored)+len(r.Deleted)+len(r.Trashed) > 0
 }
 
 // reportMu guards SyncReport slices written from worker goroutines.
@@ -82,18 +121,58 @@ func (m *reportMu) fail(p string, err error) {
 	m.Unlock()
 }
 
+// roots returns the ~/.claude root and, when present, the desktop session
+// index. Project folders join them per pass (see syncRoots).
 func (s *Syncer) roots() []*syncRoot {
+	everything := s.cfg.IsEverything()
 	roots := []*syncRoot{{
 		dir:   s.claudeDir,
 		paths: s.syncPaths(),
 		include: func(rel string) bool {
-			return !strings.Contains(rel, ".conflict.") && !isDeviceLocalFile(rel) && !s.isExcluded(rel)
+			if strings.Contains(rel, ".conflict.") || isDeviceLocalFile(rel) || claudeDenied(rel) || s.isExcluded(rel) {
+				return false
+			}
+			return !everything || !s.cfg.IsBuildArtifact(rel)
 		},
+		skipDir: func(rel string) bool {
+			return claudeDenied(rel) || s.isExcluded(rel) || (everything && s.cfg.IsBuildArtifact(rel))
+		},
+		kind:  rootClaude,
+		label: "~/.claude",
+		perm:  0600,
 	}}
 	if dir := s.cfg.EffectiveDesktopDir(); dir != "" && dirExists(dir) {
-		roots = append(roots, &syncRoot{dir: dir, prefix: DesktopPrefix, paths: []string{"."}, include: isDesktopRecord})
+		roots = append(roots, &syncRoot{dir: dir, prefix: DesktopPrefix, paths: []string{"."}, include: isDesktopRecord, kind: rootDesktop, label: "Claude sidebar", perm: 0600})
 	}
 	return roots
+}
+
+// syncRoots returns every root for one pass: roots() plus, when folder sync
+// is on, each project folder (see discoverFolders).
+func (s *Syncer) syncRoots(objects []storage.ObjectInfo, useCache bool) []*syncRoot {
+	roots := s.roots()
+	if s.cfg.IsFolderSyncEnabled() {
+		for _, rel := range s.discoverFolders(objects, useCache) {
+			roots = append(roots, s.folderRoot(rel))
+		}
+	}
+	return roots
+}
+
+// claudeDeniedDirs are top-level ~/.claude folders that belong to one Mac:
+// running-process records, per-process environments and shell snapshots,
+// caches, telemetry, logs, IDE connection locks and backups.
+var claudeDeniedDirs = map[string]bool{
+	"sessions": true, "session-env": true, "shell-snapshots": true, "cache": true,
+	"statsig": true, "telemetry": true, "debug": true, "logs": true, "ide": true,
+	"backups": true,
+}
+
+// claudeDenied reports ~/.claude paths that never sync whatever the scope:
+// the per-Mac folders above and login credentials, which stay on each Mac.
+func claudeDenied(rel string) bool {
+	first, _, _ := strings.Cut(rel, "/")
+	return claudeDeniedDirs[first] || path.Base(rel) == ".credentials.json"
 }
 
 // desktopReleasedSuffix marks a transcript the desktop app released after the
@@ -104,13 +183,14 @@ func (s *Syncer) roots() []*syncRoot {
 const desktopReleasedSuffix = ".desktop-released.json"
 
 // isDeviceLocalFile reports files under ~/.claude that belong to this device
-// alone and must never be synced: desktop release markers, Claude Code's
-// temp, lock and set-aside files (<id>.orphaned-*.jsonl,
+// alone and must never be synced: login credentials, desktop release markers,
+// Claude Code's temp, lock and set-aside files (<id>.orphaned-*.jsonl,
 // *.jsonl.superseded-*), and Stradl's own in-flight temp files.
 func isDeviceLocalFile(rel string) bool {
 	base := path.Base(rel)
 	switch {
-	case strings.HasSuffix(base, desktopReleasedSuffix),
+	case base == ".credentials.json",
+		strings.HasSuffix(base, desktopReleasedSuffix),
 		strings.HasPrefix(base, ".stradl-"),
 		strings.HasSuffix(base, ".tmp"), strings.Contains(base, ".tmp."),
 		strings.HasSuffix(base, ".lock"),
@@ -120,11 +200,23 @@ func isDeviceLocalFile(rel string) bool {
 	return false
 }
 
+// unionPath reports paths that keep union semantics: transcripts and
+// everything else under projects/, the prompt history, and desktop sidebar
+// records. A local delete stays local and a vanished remote copy is restored.
+// Every other path mirrors deletes between Macs.
+func unionPath(npath string) bool {
+	return strings.HasPrefix(npath, "projects/") || npath == "history.jsonl" || strings.HasPrefix(npath, DesktopPrefix)
+}
+
 func (s *Syncer) rootFor(roots []*syncRoot, npath string) (*syncRoot, string) {
+	var best *syncRoot
 	for _, r := range roots {
-		if r.prefix != "" && strings.HasPrefix(npath, r.prefix) {
-			return r, strings.TrimPrefix(npath, r.prefix)
+		if r.prefix != "" && strings.HasPrefix(npath, r.prefix) && (best == nil || len(r.prefix) > len(best.prefix)) {
+			best = r
 		}
+	}
+	if best != nil {
+		return best, strings.TrimPrefix(npath, best.prefix)
 	}
 	for _, r := range roots {
 		if r.prefix == "" && !strings.HasPrefix(npath, "_") {
@@ -148,7 +240,7 @@ func (r *syncRoot) inScope(rel string) bool {
 }
 
 func (s *Syncer) engineRemoteKey(npath string) string {
-	if strings.HasPrefix(npath, DesktopPrefix) {
+	if strings.HasPrefix(npath, DesktopPrefix) || strings.HasPrefix(npath, FoldersPrefix) {
 		return npath + ".age"
 	}
 	return s.remoteKey(npath)
@@ -167,6 +259,12 @@ func (s *Syncer) npathForKey(key string) (npath string, ok bool, unknownToken bo
 		return "", false, false
 	}
 	if strings.HasPrefix(k, DesktopPrefix) {
+		return k, true, false
+	}
+	if strings.HasPrefix(k, FoldersPrefix) {
+		if path.Base(k) == folderMarker {
+			return "", false, false
+		}
 		return k, true, false
 	}
 	if strings.HasPrefix(k, "_") {
@@ -198,17 +296,46 @@ func isCanonicalRel(p string) bool {
 	return true
 }
 
-// Sync reconciles this device with remote storage in both directions under
-// union semantics: every device ends up with every file any device created.
+// scanRoot lists a root's local files in scope. A project folder that git is
+// working in (errGitBusy) or that can't be read completely returns an error
+// the caller turns into a deferral.
+func (s *Syncer) scanRoot(root *syncRoot) (map[string]os.FileInfo, error) {
+	if root.kind == rootFolder {
+		return s.scanFolder(root)
+	}
+	files, err := GetLocalFiles(root.dir, root.paths, root.skipDir)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]os.FileInfo, len(files))
+	for rel, info := range files {
+		rel = strings.TrimPrefix(rel, "./")
+		if root.inScope(rel) {
+			out[rel] = info
+		}
+	}
+	return out, nil
+}
+
+// Sync reconciles this device with remote storage in both directions:
+// every device ends up with every file any device created.
 //
 //   - New on either side: copied to the other.
 //   - Changed on one side: that side's version wins.
 //   - Changed on both: transcripts and history are merged line by line,
 //     desktop session records keep the most recently active version, and any
 //     other file keeps the newer copy and saves the other as .conflict.
-//   - Deleted locally: stays deleted here; the remote copy is kept for the
-//     other devices (and comes back here only if another device changes it).
-//   - Vanished remotely: re-uploaded from this device.
+//   - Deleted locally: transcripts, history and sidebar records stay deleted
+//     here only (the remote copy is kept for the other devices and comes back
+//     here only if another device changes it); every other file is deleted
+//     remotely too, with compare-and-swap, so a change made meanwhile on
+//     another Mac wins over the delete.
+//   - Vanished remotely: transcripts, history and sidebar records are
+//     re-uploaded from this device; any other file moves to ~/.stradl/trash,
+//     or, if it changed here since the last sync, is uploaded again.
+//
+// A pass that would delete or trash more than half of a folder's synced
+// files stops short of that and warns instead (see massDeleteFloor).
 //
 // Remote changes are detected by ETag, not timestamps, so clock skew between
 // devices can't cause lost or phantom updates. Uploads use compare-and-swap
@@ -219,18 +346,27 @@ func (s *Syncer) Sync(ctx context.Context) (*SyncReport, error) {
 }
 
 // Preview reports what Sync would do right now without changing anything
-// locally or remotely: Uploaded, Downloaded, Merged, Restored, Deferred and
-// NewDesktopSessions list the files each action would touch.
+// locally or remotely: Uploaded, Downloaded, Merged, Restored, Deleted,
+// Trashed, Deferred and NewDesktopSessions list the files each action would
+// touch, and Warnings what it would hold back.
 func (s *Syncer) Preview(ctx context.Context) (*SyncReport, error) {
 	return s.reconcile(ctx, true)
+}
+
+// job is one file's planned action.
+type job struct {
+	npath string
+	kind  string // upload, restore, download, new-desktop, merge, delete, trash
+	root  *syncRoot
+	run   func() error
 }
 
 func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error) {
 	report := &SyncReport{}
 	rm := &reportMu{r: report}
-	roots := s.roots()
 	if !dryRun {
 		report.Moved = s.foldMovedSessions(liveSessionIDs(s.claudeDir))
+		s.purgeTrash(time.Now())
 	}
 
 	objects, err := s.storage.List(ctx, "")
@@ -240,8 +376,44 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	if err := s.checkKey(ctx, objects, dryRun); err != nil {
 		return nil, err
 	}
+	roots := s.syncRoots(objects, true)
+
+	// Scan first: a project folder git is working in sits the pass out.
+	local := make(map[string]*localFile)
+	var lockWarnings []string
+	for _, root := range roots {
+		files, err := s.scanRoot(root)
+		var busy *gitBusyError
+		switch {
+		case errors.As(err, &busy):
+			root.deferred = true
+			report.Deferred = append(report.Deferred, root.prefix)
+			if !busy.since.IsZero() && time.Since(busy.since) > staleGitLock {
+				lockWarnings = append(lockWarnings, fmt.Sprintf("%s: git left %s behind %s ago, and the folder won't sync while it exists. If no git command is running there, delete that file.", root.label, busy.lock, time.Since(busy.since).Round(time.Minute)))
+			}
+			continue
+		case err != nil && root.kind == rootFolder:
+			root.deferred = true
+			rm.fail(root.label, fmt.Errorf("couldn't read the whole folder, so it was left as is: %w", err))
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("failed to scan %s: %w", root.dir, err)
+		}
+		for rel, info := range files {
+			local[root.prefix+rel] = &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel)), info: info}
+		}
+	}
+	active := func(np string) (*syncRoot, string, bool) {
+		root, rel := s.rootFor(roots, np)
+		return root, rel, root != nil && !root.deferred && root.inScope(rel)
+	}
+
 	remote := make(map[string]storage.ObjectInfo, len(objects))
+	hasModes := false
 	for _, obj := range objects {
+		if obj.Key == ModesManifestKey {
+			hasModes = true
+		}
 		np, ok, unknown := s.npathForKey(obj.Key)
 		if unknown {
 			report.Skipped = append(report.Skipped, obj.Key)
@@ -250,8 +422,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		if !ok {
 			continue
 		}
-		root, rel := s.rootFor(roots, np)
-		if root == nil || !root.inScope(rel) {
+		if _, _, in := active(np); !in {
 			continue
 		}
 		// Prefer the canonical (normalized) key over a legacy duplicate.
@@ -259,25 +430,6 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			continue
 		}
 		remote[np] = obj
-	}
-
-	local := make(map[string]*localFile)
-	for _, root := range roots {
-		var exclude func(string) bool
-		if root.prefix == "" {
-			exclude = s.isExcluded
-		}
-		files, err := GetLocalFiles(root.dir, root.paths, exclude)
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan %s: %w", root.dir, err)
-		}
-		for rel, info := range files {
-			rel = strings.TrimPrefix(rel, "./")
-			if !root.inScope(rel) {
-				continue
-			}
-			local[root.prefix+rel] = &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel)), info: info}
-		}
 	}
 
 	known := s.state.Snapshot()
@@ -289,7 +441,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		paths[p] = true
 	}
 	for p := range known {
-		if root, rel := s.rootFor(roots, p); root != nil && root.inScope(rel) {
+		if _, _, in := active(p); in {
 			paths[p] = true
 		}
 	}
@@ -297,14 +449,11 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	live := liveSessionIDs(s.claudeDir)
 	loaded, manifestETag := s.loadMtimes(ctx)
 	manifest := &mtimeBook{m: loaded}
+	s.modes = s.loadModes(ctx, hasModes)
+	defer func() { s.modes = nil }()
 	homeDir := s.home
 	repos := newRepoIndex(homeDir)
 
-	type job struct {
-		npath string
-		kind  string // upload, restore, download, new-desktop, merge
-		run   func() error
-	}
 	var jobs []job
 
 	sorted := make([]string, 0, len(paths))
@@ -318,17 +467,17 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		lf := local[np]
 		robj, hasRemote := remote[np]
 		st, hasState := known[np]
+		root, rel, _ := active(np)
 
 		if lf == nil && hasRemote {
 			// On a case-insensitive volume another Mac's spelling of a folder
 			// (~/Code vs ~/code) names a file the scan listed under this Mac's
 			// spelling. Treat it as present so it merges instead of being
 			// overwritten by a blind download.
-			if root, rel := s.rootFor(roots, np); root != nil {
-				abs := filepath.Join(root.dir, filepath.FromSlash(rel))
-				if info, err := os.Stat(abs); err == nil && info.Mode().IsRegular() {
-					lf = &localFile{root: root, rel: rel, abs: abs, info: info}
-				}
+			probe := &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel))}
+			if info, err := statLocal(probe); err == nil && (info.Mode().IsRegular() || (isSymlink(info) && root.kind == rootFolder)) {
+				probe.info = info
+				lf = probe
 			}
 		}
 
@@ -336,7 +485,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		if lf != nil {
 			if hasState && !st.LocalDeleted && st.Size == lf.info.Size() && st.ModTime.Equal(lf.info.ModTime()) {
 				lhash = st.Hash // unchanged size and mtime: skip re-hashing
-			} else if h, err := HashFile(lf.abs); err == nil {
+			} else if h, err := hashLocal(lf.abs, lf.info); err == nil {
 				lhash = h
 			} else {
 				rm.fail(np, err)
@@ -346,6 +495,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 
 		localChanged := lf != nil && (!hasState || st.LocalDeleted || lhash != st.Hash)
 		remoteChanged := hasRemote && (!hasState || remoteDiffers(st, robj))
+		mirror := !unionPath(np)
 		isLive := false
 		if id, ok := transcriptSessionID(np); ok {
 			// A transcript written in the last few seconds may belong to a
@@ -355,13 +505,24 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 
 		switch {
 		case lf != nil && !hasRemote:
-			// New here, or the remote copy vanished: upload create-only.
-			restored := hasState && st.RemoteETag != "" && !localChanged
+			synced := hasState && st.RemoteETag != "" && !st.LocalDeleted
+			if mirror && synced && !localChanged {
+				// Another Mac deleted it: keep this copy in the trash.
+				lf := lf
+				jobs = append(jobs, job{np, "trash", root, func() error {
+					return s.reconcileTrash(np, lf, rm)
+				}})
+				continue
+			}
+			// New here, the remote copy vanished (union), or it changed here
+			// after another Mac deleted it (an edit beats a delete): upload
+			// create-only.
+			restored := !mirror && hasState && st.RemoteETag != "" && !localChanged
 			kind := "upload"
 			if restored {
 				kind = "restore"
 			}
-			jobs = append(jobs, job{np, kind, func() error {
+			jobs = append(jobs, job{np, kind, root, func() error {
 				if err := s.reconcileUpload(ctx, np, lf, "", rm, repos, manifest, homeDir); err != nil {
 					return err
 				}
@@ -373,6 +534,14 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 
 		case lf == nil && hasRemote:
 			if hasState && !remoteChanged {
+				if mirror {
+					// Deleted on this device: delete it everywhere, unless
+					// another Mac changed it since (then its change wins).
+					jobs = append(jobs, job{np, "delete", root, func() error {
+						return s.reconcileRemoteDelete(ctx, np, robj, root, rel, rm, repos, manifest, homeDir)
+					}})
+					continue
+				}
 				// Deleted on this device; keep it deleted here only.
 				if !st.LocalDeleted && !dryRun {
 					s.state.MarkLocalDeleted(np, robj.ETag)
@@ -388,8 +557,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			if isNewDesktop {
 				kind = "new-desktop"
 			}
-			jobs = append(jobs, job{np, kind, func() error {
-				root, rel := s.rootFor(roots, np)
+			jobs = append(jobs, job{np, kind, root, func() error {
 				target := &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel))}
 				if err := s.reconcileDownload(ctx, np, target, robj, nil, rm, repos, manifest, homeDir); err != nil {
 					return err
@@ -403,13 +571,16 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		case lf != nil && hasRemote:
 			switch {
 			case hasState && !localChanged && !remoteChanged:
-				// In sync.
+				// In sync; only a mode change may be waiting.
+				if !dryRun {
+					s.reconcileMode(np, lf, st)
+				}
 			case hasState && localChanged && !remoteChanged:
 				ifMatch := st.RemoteETag
 				if ifMatch == "" {
 					ifMatch = robj.ETag // legacy state without ETags
 				}
-				jobs = append(jobs, job{np, "upload", func() error {
+				jobs = append(jobs, job{np, "upload", root, func() error {
 					return s.reconcileUpload(ctx, np, lf, ifMatch, rm, repos, manifest, homeDir)
 				}})
 			case hasState && !localChanged && remoteChanged:
@@ -418,7 +589,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 					continue
 				}
 				expect := lf.info
-				jobs = append(jobs, job{np, "download", func() error {
+				jobs = append(jobs, job{np, "download", root, func() error {
 					return s.reconcileDownload(ctx, np, lf, robj, expect, rm, repos, manifest, homeDir)
 				}})
 			default:
@@ -428,7 +599,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 					rm.add(&report.Deferred, np)
 					continue
 				}
-				jobs = append(jobs, job{np, "merge", func() error {
+				jobs = append(jobs, job{np, "merge", root, func() error {
 					return s.reconcileBoth(ctx, np, lf, rm, repos, manifest, homeDir)
 				}})
 			}
@@ -439,6 +610,9 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			}
 		}
 	}
+
+	jobs, report.Warnings = s.guardMassDeletes(jobs, roots, known)
+	report.Warnings = append(report.Warnings, lockWarnings...)
 
 	if dryRun {
 		for _, j := range jobs {
@@ -454,26 +628,37 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 				report.NewDesktopSessions = append(report.NewDesktopSessions, j.npath)
 			case "merge":
 				report.Merged = append(report.Merged, j.npath)
+			case "delete":
+				report.Deleted = append(report.Deleted, j.npath)
+			case "trash":
+				report.Trashed = append(report.Trashed, j.npath)
 			}
 		}
 		return report, nil
 	}
 
-	// Run with a bounded worker pool: transcripts first, then sidebar
-	// records, so a record never lands on a device before its transcript.
-	var transcripts, records []job
+	s.markFolders(ctx, roots, local, objects)
+
+	// Run with a bounded worker pool: transcripts, settings and project
+	// folders first, then sidebar records, so a record never lands on a device
+	// before its transcript and its folder.
+	var files, records []job
 	for _, j := range jobs {
 		if strings.HasPrefix(j.npath, DesktopPrefix) {
 			records = append(records, j)
 		} else {
-			transcripts = append(transcripts, j)
+			files = append(files, j)
 		}
 	}
+	// A first sync of everything can outlast the agent's time limit, or the
+	// Mac can sleep: save progress as it goes, so the next pass picks up where
+	// this one stopped instead of comparing every file again.
+	stopSaving := s.saveEvery(progressSaveInterval)
 	// Jobs that touch the same physical file (two remote spellings of one
 	// path on a case-insensitive volume) run one at a time: the second then
 	// sees the first's write and merges or defers instead of renaming over it.
 	locks := &keyedLocks{m: make(map[string]*gosync.Mutex)}
-	for _, batch := range [][]job{transcripts, records} {
+	for _, batch := range [][]job{files, records} {
 		sem := make(chan struct{}, defaultWorkers)
 		var wg gosync.WaitGroup
 		for _, j := range batch {
@@ -492,26 +677,158 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		}
 		wg.Wait()
 	}
+	stopSaving()
 
 	// Downloads in this pass may have delivered the new copy of a moved session.
 	report.Moved = append(report.Moved, s.foldMovedSessions(liveSessionIDs(s.claudeDir))...)
 
+	// Record what this pass did even when it ran out of time.
+	metaCtx, cancelMeta := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+	defer cancelMeta()
 	if len(report.Uploaded)+len(report.Merged)+len(report.Restored) > 0 {
-		if err := s.saveMtimes(ctx, manifest.snapshot(), manifestETag); err != nil {
+		if err := s.saveMtimes(metaCtx, manifest.snapshot(), manifestETag); err != nil {
 			s.log("Warning: failed to update mtime manifest: %v", err)
+		}
+	}
+	if err := s.saveModes(metaCtx, s.modes); err != nil {
+		// Forget the modes this pass recorded, so the next pass offers them
+		// again rather than taking the old manifest entries for a remote change.
+		for _, np := range s.modes.pendingPaths() {
+			s.state.setMode(np, 0)
+		}
+		s.log("Warning: failed to update file modes: %v", err)
+	}
+	if s.cfg.IsFolderSyncEnabled() {
+		var folders []string
+		for _, r := range roots {
+			if r.kind == rootFolder {
+				folders = append(folders, strings.TrimSuffix(strings.TrimPrefix(r.prefix, FoldersPrefix), "/"))
+			}
+		}
+		if err := s.saveFolderList(folders); err != nil {
+			s.log("Warning: failed to record project folders: %v", err)
 		}
 	}
 
 	now := time.Now()
 	s.state.LastSync = now
 	s.state.LastPull = now
-	if len(report.Uploaded)+len(report.Merged)+len(report.Restored) > 0 {
+	if len(report.Uploaded)+len(report.Merged)+len(report.Restored)+len(report.Deleted) > 0 {
 		s.state.LastPush = now
 	}
 	if err := s.state.Save(); err != nil {
 		return report, fmt.Errorf("failed to save state: %w", err)
 	}
 	return report, nil
+}
+
+// progressSaveInterval is how often a running pass saves its sync state.
+const progressSaveInterval = time.Minute
+
+// saveEvery saves the sync state every interval until the returned function
+// is called (which waits for a save in progress).
+func (s *Syncer) saveEvery(interval time.Duration) func() {
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if err := s.state.Save(); err != nil {
+					s.log("Warning: failed to save sync progress: %v", err)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
+}
+
+// guardMassDeletes holds back this Mac's deletions in a root when one pass
+// would delete more than half of the root's synced files, and at least
+// massDeleteFloor of them: that is more often a folder that vanished or a bad
+// checkout than a decision, and every other Mac would follow. Deletions
+// recorded in an earlier pass (before deletes were mirrored) don't count as
+// sudden.
+//
+// Trash moves (files another Mac deleted) aren't limited per root: that Mac
+// passed its own guard, and the trash keeps every copy. But when more than
+// half of everything this Mac synced vanished from remote storage or would go
+// at once, transcripts included, the container was most likely wiped or
+// replaced: then nothing is deleted or trashed (transcripts and history are
+// still restored).
+//
+// Files inside .git are left out of every count, as git replaces loose
+// objects with packs by the thousand.
+func (s *Syncer) guardMassDeletes(jobs []job, roots []*syncRoot, known map[string]FileState) ([]job, []string) {
+	if s.cfg.AllowMassDelete {
+		return jobs, nil
+	}
+	deletes := make(map[*syncRoot]int)
+	gone := 0
+	for _, j := range jobs {
+		if hasGitSegment(j.npath) {
+			continue
+		}
+		switch j.kind {
+		case "delete":
+			gone++
+			if !known[j.npath].LocalDeleted {
+				deletes[j.root]++
+			}
+		case "trash", "restore":
+			gone++
+		}
+	}
+	if gone < massDeleteFloor {
+		return jobs, nil
+	}
+	tracked := make(map[*syncRoot]int)
+	allTracked := 0
+	for np := range known {
+		if hasGitSegment(np) {
+			continue
+		}
+		if root, rel := s.rootFor(roots, np); root != nil && !root.deferred && root.inScope(rel) {
+			allTracked++
+			if !unionPath(np) {
+				tracked[root]++
+			}
+		}
+	}
+	var warnings []string
+	blocked := make(map[*syncRoot]bool)
+	everything := 2*gone > allTracked
+	if everything {
+		warnings = append(warnings, fmt.Sprintf("%d of the %d files this Mac synced are missing from remote storage or would be deleted at once, so nothing was deleted or moved to the trash. If remote storage was replaced or emptied on purpose, or you meant to delete them, run 'stradl sync --allow-mass-delete'.", gone, allTracked))
+	}
+	for _, r := range roots {
+		if n := deletes[r]; !everything && n >= massDeleteFloor && 2*n > tracked[r] {
+			blocked[r] = true
+			warnings = append(warnings, fmt.Sprintf("%s: %d of %d synced files would be deleted at once, so none were. If that is what you want, run 'stradl sync --allow-mass-delete'.", r.label, n, tracked[r]))
+		}
+	}
+	if !everything && len(blocked) == 0 {
+		return jobs, nil
+	}
+	kept := jobs[:0]
+	for _, j := range jobs {
+		if everything && (j.kind == "delete" || j.kind == "trash") {
+			continue
+		}
+		if j.kind == "delete" && blocked[j.root] {
+			continue
+		}
+		kept = append(kept, j)
+	}
+	return kept, warnings
 }
 
 // keyedLocks serializes work per key.
@@ -610,32 +927,40 @@ func (s *Syncer) conditional() (storage.Conditional, bool) {
 
 // fetch downloads and decodes a remote object into plaintext for this device
 // (decrypted, decompressed, paths resolved). It returns the ETag of exactly
-// the version read when the backend reports one.
+// the version read when the backend reports one. On a streaming backend it
+// reads through the stream, up to mergeMemoryLimit.
 func (s *Syncer) fetch(ctx context.Context, npath, key string, repos *repoIndex, home string) ([]byte, string, error) {
 	var (
-		enc  []byte
+		data []byte
 		etag string
 		err  error
 	)
-	if c, ok := s.conditional(); ok {
-		enc, etag, err = c.DownloadWithETag(ctx, key)
-	} else {
-		enc, err = s.storage.Download(ctx, key)
-	}
-	if err != nil {
-		return nil, "", err
-	}
-	data, err := s.encryptor.Decrypt(enc)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to decrypt: %w", err)
-	}
-	if isGzipped(data) {
-		if data, err = gzipDecompress(data); err != nil {
-			return nil, "", fmt.Errorf("failed to decompress: %w", err)
+	if _, ok := s.streamer(); ok {
+		if data, etag, err = s.fetchStream(ctx, key); err != nil {
+			return nil, "", err
 		}
-	}
-	if data, err = unbindKey(data, key); err != nil {
-		return nil, "", err
+	} else {
+		var enc []byte
+		if c, ok := s.conditional(); ok {
+			enc, etag, err = c.DownloadWithETag(ctx, key)
+		} else {
+			enc, err = s.storage.Download(ctx, key)
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		data, err = s.encryptor.Decrypt(enc)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to decrypt: %w", err)
+		}
+		if isGzipped(data) {
+			if data, err = gzipDecompress(data); err != nil {
+				return nil, "", fmt.Errorf("failed to decompress: %w", err)
+			}
+		}
+		if data, err = unbindKey(data, key); err != nil {
+			return nil, "", err
+		}
 	}
 	if strings.HasPrefix(npath, DesktopPrefix) {
 		data = s.paths.ResolveContent("record.json", data)
@@ -649,6 +974,9 @@ func (s *Syncer) fetch(ctx context.Context, npath, key string, repos *repoIndex,
 // put encodes plaintext for remote storage and uploads it, conditionally when
 // the backend supports compare-and-swap. ifMatch "" means create-only.
 func (s *Syncer) put(ctx context.Context, npath string, plain []byte, ifMatch string) (string, error) {
+	if s.streams(npath, int64(len(plain))) {
+		return s.putStream(ctx, npath, bytes.NewReader(plain), ifMatch)
+	}
 	data := plain
 	if strings.HasPrefix(npath, DesktopPrefix) {
 		data = prepareDesktopUpload(data)
@@ -666,7 +994,7 @@ func (s *Syncer) put(ctx context.Context, npath string, plain []byte, ifMatch st
 		return "", fmt.Errorf("failed to encrypt: %w", err)
 	}
 	if int64(len(enc)) > storage.MaxDownloadSize {
-		return "", fmt.Errorf("too large to sync (%d MB compressed; other devices accept up to %d MB)", len(enc)>>20, storage.MaxDownloadSize>>20)
+		return "", fmt.Errorf("too large to sync with this storage provider (%d MB compressed; it accepts up to %d MB)", len(enc)>>20, storage.MaxDownloadSize>>20)
 	}
 	if c, ok := s.conditional(); ok {
 		return c.UploadIf(ctx, key, enc, ifMatch)
@@ -682,14 +1010,125 @@ func (s *Syncer) put(ctx context.Context, npath string, plain []byte, ifMatch st
 	return "", nil
 }
 
-// --- reconcile actions --------------------------------------------------------
-
-func (s *Syncer) reconcileUpload(ctx context.Context, npath string, lf *localFile, ifMatch string, rm *reportMu, repos *repoIndex, manifest *mtimeBook, home string) error {
-	info, err := os.Stat(lf.abs) // stat before reading: a later append makes the next scan re-hash
+// deleteRemote deletes a remote object only if it is still at version etag.
+// It returns an error wrapping storage.ErrPreconditionFailed when another
+// device changed it since.
+func (s *Syncer) deleteRemote(ctx context.Context, key, etag string) error {
+	if c, ok := s.conditional(); ok && etag != "" {
+		return c.DeleteIf(ctx, key, etag)
+	}
+	// No compare-and-swap: check the version, then delete (a narrow race).
+	info, err := s.storage.Head(ctx, key)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	data, err := os.ReadFile(lf.abs)
+	if etag != "" && info != nil && info.ETag != "" && normETag(info.ETag) != normETag(etag) {
+		return fmt.Errorf("%s: %w", key, storage.ErrPreconditionFailed)
+	}
+	return s.storage.Delete(ctx, key)
+}
+
+// defaultPerm is the mode a file at npath gets when the modes manifest has no
+// entry for it: the root's default (owner-only under ~/.claude, whose files
+// can hold secrets), or read-only for git objects, as git writes them (so a
+// repository's thousands of objects need no entries).
+func defaultPerm(npath string, root *syncRoot) os.FileMode {
+	if root.kind == rootFolder && strings.Contains(npath, ".git/objects/") {
+		return 0444
+	}
+	return root.perm
+}
+
+// permFor returns the mode a file at npath is written with: the modes
+// manifest's entry, else the default.
+func (s *Syncer) permFor(npath string, root *syncRoot) os.FileMode {
+	if root == nil || root.kind == rootDesktop {
+		return 0600
+	}
+	if m, ok := s.modes.get(s.engineRemoteKey(npath)); ok && m&0400 != 0 {
+		return os.FileMode(m).Perm()
+	}
+	return defaultPerm(npath, root)
+}
+
+// noteMode records the mode of a file this pass uploads.
+func (s *Syncer) noteMode(npath string, lf *localFile, info os.FileInfo) {
+	if lf.root == nil || lf.root.kind == rootDesktop || isSymlink(info) {
+		return
+	}
+	s.modes.note(s.engineRemoteKey(npath), npath, uint32(info.Mode().Perm()), uint32(defaultPerm(npath, lf.root)))
+}
+
+// reconcileMode settles the mode of a file whose content is in sync: a chmod
+// here is recorded for the other Macs; one made on another Mac is applied.
+// Before modes were tracked (st.Mode 0) the manifest wins where it has an
+// entry, and this Mac's mode is recorded where it has none.
+func (s *Syncer) reconcileMode(npath string, lf *localFile, st FileState) {
+	if s.modes == nil || !s.modes.ok || lf.root.kind == rootDesktop || isSymlink(lf.info) {
+		return // a chmod on a link would change its target
+	}
+	key := s.engineRemoteKey(npath)
+	cur := uint32(lf.info.Mode().Perm())
+	def := uint32(defaultPerm(npath, lf.root))
+	m, has := s.modes.get(key)
+	switch {
+	case st.Mode != 0 && cur != st.Mode:
+		s.modes.note(key, npath, cur, def)
+		s.state.setMode(npath, cur)
+	case has && m != cur && m&0400 != 0:
+		if os.Chmod(lf.abs, os.FileMode(m).Perm()) == nil {
+			s.state.setMode(npath, m)
+		}
+	case st.Mode == 0:
+		s.modes.note(key, npath, cur, def)
+		s.state.setMode(npath, cur)
+	}
+}
+
+// writeContent writes downloaded content to lf's path with mode perm.
+func (s *Syncer) writeContent(lf *localFile, data []byte, expect os.FileInfo, perm os.FileMode) error {
+	if lf.root.kind == rootFolder {
+		return writeFolderContent(lf.root.dir, lf.abs, data, expect, perm)
+	}
+	return writeLocalPerm(lf.abs, data, expect, perm, s.claudeDir, lf.root.dir)
+}
+
+// restoreMtime gives a downloaded file the modification time it had on the
+// device that wrote it (links keep their own: setting it would touch the
+// target).
+func (s *Syncer) restoreMtime(npath string, lf *localFile, manifest *mtimeBook) {
+	if mt := s.clampMtime(npath, manifest.get(s.engineRemoteKey(npath))); !mt.IsZero() {
+		if fi, err := os.Lstat(lf.abs); err == nil && !isSymlink(fi) {
+			_ = os.Chtimes(lf.abs, mt, mt)
+		}
+	}
+}
+
+// --- reconcile actions --------------------------------------------------------
+
+func (s *Syncer) reconcileUpload(ctx context.Context, npath string, lf *localFile, ifMatch string, rm *reportMu, repos *repoIndex, manifest *mtimeBook, home string) error {
+	info, err := statLocal(lf) // stat before reading: a later append makes the next scan re-hash
+	if err != nil {
+		return err
+	}
+	if s.streams(npath, info.Size()) && !isSymlink(info) {
+		etag, hash, err := s.uploadFileStream(ctx, npath, lf.abs, info, ifMatch)
+		if errors.Is(err, storage.ErrPreconditionFailed) {
+			return s.reconcileBoth(ctx, npath, lf, rm, repos, manifest, home)
+		}
+		if err != nil {
+			return err
+		}
+		s.state.SetReconciled(npath, info, hash, etag)
+		s.recordMtime(manifest, npath, info.ModTime())
+		s.noteMode(npath, lf, info)
+		rm.add(&rm.r.Uploaded, npath)
+		return nil
+	}
+	data, err := readLocalContent(lf.abs, info)
 	if err != nil {
 		return err
 	}
@@ -726,12 +1165,19 @@ func (s *Syncer) reconcileUpload(ctx context.Context, npath string, lf *localFil
 	}
 	s.state.SetReconciled(npath, info, sha256Hex(data), etag)
 	s.recordMtime(manifest, npath, info.ModTime())
+	s.noteMode(npath, lf, info)
 	rm.add(&rm.r.Uploaded, npath)
 	return nil
 }
 
 func (s *Syncer) reconcileDownload(ctx context.Context, npath string, lf *localFile, obj storage.ObjectInfo, expect os.FileInfo, rm *reportMu, repos *repoIndex, manifest *mtimeBook, home string) error {
+	if s.streams(npath, obj.Size) {
+		return s.reconcileDownloadStream(ctx, npath, lf, obj, expect, rm, repos, manifest, home)
+	}
 	data, etag, err := s.fetch(ctx, npath, obj.Key, repos, home)
+	if errors.Is(err, errTooLargeForMemory) {
+		return s.reconcileDownloadStream(ctx, npath, lf, obj, expect, rm, repos, manifest, home)
+	}
 	if err != nil {
 		return err
 	}
@@ -751,13 +1197,11 @@ func (s *Syncer) reconcileDownload(ctx context.Context, npath string, lf *localF
 			}
 		}
 	}
-	if err := writeLocal(lf.abs, data, expect, s.claudeDir, lf.root.dir); err != nil {
+	if err := s.writeContent(lf, data, expect, s.permFor(npath, lf.root)); err != nil {
 		return err
 	}
-	if mt := s.clampMtime(npath, manifest.get(s.engineRemoteKey(npath))); !mt.IsZero() {
-		_ = os.Chtimes(lf.abs, mt, mt)
-	}
-	info, err := os.Stat(lf.abs)
+	s.restoreMtime(npath, lf, manifest)
+	info, err := statLocal(lf)
 	if err != nil {
 		return err
 	}
@@ -766,20 +1210,120 @@ func (s *Syncer) reconcileDownload(ctx context.Context, npath string, lf *localF
 	return nil
 }
 
+// reconcileDownloadStream is reconcileDownload for a file too large to hold
+// in memory: it lands in a temporary file beside the target first.
+func (s *Syncer) reconcileDownloadStream(ctx context.Context, npath string, lf *localFile, obj storage.ObjectInfo, expect os.FileInfo, rm *reportMu, repos *repoIndex, manifest *mtimeBook, home string) error {
+	if err := s.checkWritable(lf); err != nil {
+		return err
+	}
+	perm := s.permFor(npath, lf.root)
+	tmp, hash, size, etag, err := s.fetchToTemp(ctx, npath, obj.Key, filepath.Dir(lf.abs), perm)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp) }()
+	if etag == "" {
+		etag = obj.ETag
+	}
+	if s.transcriptLiveNow(npath) {
+		return errLocalChanged
+	}
+	if expect != nil && IsMergeableJSONL(npath) {
+		// Transcripts only grow (see reconcileDownload).
+		if size < expect.Size() {
+			return s.reconcileBoth(ctx, npath, lf, rm, repos, manifest, home)
+		}
+		if size <= mergeMemoryLimit && expect.Size() <= mergeMemoryLimit {
+			remoteData, rerr := os.ReadFile(tmp)
+			local, lerr := os.ReadFile(lf.abs)
+			if rerr == nil && lerr == nil {
+				if _, localHasMore := MergeJSONL(remoteData, local); localHasMore {
+					return s.reconcileBoth(ctx, npath, lf, rm, repos, manifest, home)
+				}
+			}
+		}
+	}
+	if err := commitTemp(tmp, lf.abs, expect, perm, s.claudeDir, lf.root.dir); err != nil {
+		return err
+	}
+	s.restoreMtime(npath, lf, manifest)
+	info, err := statLocal(lf)
+	if err != nil {
+		return err
+	}
+	s.state.SetReconciled(npath, info, hash, etag)
+	rm.add(&rm.r.Downloaded, npath)
+	return nil
+}
+
+// checkWritable refuses a write outside the sync roots or, in a project
+// folder, through a symbolic link.
+func (s *Syncer) checkWritable(lf *localFile) error {
+	if err := checkInsideRoots(lf.abs, s.claudeDir, lf.root.dir); err != nil {
+		return err
+	}
+	if lf.root.kind == rootFolder {
+		return checkNoSymlinkParents(lf.root.dir, lf.abs)
+	}
+	return nil
+}
+
+// reconcileRemoteDelete deletes the remote copy of a file deleted on this
+// device. When another Mac changed it since this one last synced it, the
+// change wins and the file comes back here instead.
+func (s *Syncer) reconcileRemoteDelete(ctx context.Context, npath string, obj storage.ObjectInfo, root *syncRoot, rel string, rm *reportMu, repos *repoIndex, manifest *mtimeBook, home string) error {
+	err := s.deleteRemote(ctx, obj.Key, obj.ETag)
+	if errors.Is(err, storage.ErrPreconditionFailed) {
+		target := &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel))}
+		return s.reconcileDownload(ctx, npath, target, obj, nil, rm, repos, manifest, home)
+	}
+	if err != nil {
+		return err
+	}
+	s.state.RemoveFile(npath)
+	rm.add(&rm.r.Deleted, npath)
+	return nil
+}
+
+// reconcileTrash moves a file another Mac deleted into the trash, unless it
+// changed since this pass scanned it.
+func (s *Syncer) reconcileTrash(npath string, lf *localFile, rm *reportMu) error {
+	if _, err := s.moveToTrash(lf.abs, lf.info, lf.root.dir); err != nil {
+		return err
+	}
+	s.state.RemoveFile(npath)
+	rm.add(&rm.r.Trashed, npath)
+	return nil
+}
+
 // reconcileBoth resolves a file that changed on both sides (or exists on both
 // sides with no shared history), retrying when another device wins a race.
 func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile, rm *reportMu, repos *repoIndex, manifest *mtimeBook, home string) error {
+	if _, ok := s.streamer(); ok && !strings.HasPrefix(npath, DesktopPrefix) {
+		if info, err := statLocal(lf); err == nil && !isSymlink(info) {
+			limit := streamThreshold
+			if IsMergeableJSONL(npath) {
+				limit = mergeMemoryLimit
+			}
+			if info.Size() > limit {
+				return s.reconcileBothStream(ctx, npath, lf, rm, manifest)
+			}
+		}
+	}
 	key := s.engineRemoteKey(npath)
 	for attempt := 0; attempt < maxRaceRetries; attempt++ {
-		info, err := os.Stat(lf.abs)
+		info, err := statLocal(lf)
 		if err != nil {
 			return err
 		}
-		localData, err := os.ReadFile(lf.abs)
+		localData, err := readLocalContent(lf.abs, info)
 		if err != nil {
 			return err
 		}
 		remoteData, etag, err := s.fetch(ctx, npath, key, repos, home)
+		if errors.Is(err, errTooLargeForMemory) {
+			return s.reconcileBothStream(ctx, npath, lf, rm, manifest)
+		}
 		if errors.Is(err, storage.ErrNotFound) {
 			// Remote copy vanished meanwhile: plain create-only upload.
 			etag, err := s.put(ctx, npath, localData, "")
@@ -790,6 +1334,7 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 				return err
 			}
 			s.state.SetReconciled(npath, info, sha256Hex(localData), etag)
+			s.noteMode(npath, lf, info)
 			rm.add(&rm.r.Uploaded, npath)
 			return nil
 		}
@@ -820,18 +1365,18 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 				result, uploadThere = localData, true
 			}
 		default:
-			// Non-mergeable: newest wins, the other copy is kept beside it.
+			// Non-mergeable: newest wins, the other copy is kept.
 			remoteTime := manifest.get(key)
 			if remoteTime.IsZero() || info.ModTime().After(remoteTime) {
 				result, uploadThere = localData, true
 				conflict = true
-				if err := writeConflictCopy(lf.abs, remoteData, ConflictFromOtherMac); err != nil {
+				if err := s.keepConflict(npath, lf.abs, remoteData, ConflictFromOtherMac); err != nil {
 					return err
 				}
 			} else {
 				result, writeHere = remoteData, true
 				conflict = true
-				if err := writeConflictCopy(lf.abs, localData, ConflictFromThisMac); err != nil {
+				if err := s.keepConflict(npath, lf.abs, localData, ConflictFromThisMac); err != nil {
 					return err
 				}
 			}
@@ -861,13 +1406,14 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 				newETag = etag
 			}
 			s.recordMtime(manifest, npath, info.ModTime())
+			s.noteMode(npath, lf, info)
 		}
 		if writeHere {
-			if err := writeLocal(lf.abs, result, info, s.claudeDir, lf.root.dir); err != nil {
+			if err := s.writeContent(lf, result, info, s.permFor(npath, lf.root)); err != nil {
 				return err
 			}
 		}
-		final, err := os.Stat(lf.abs)
+		final, err := statLocal(lf)
 		if err != nil {
 			return err
 		}
@@ -881,6 +1427,140 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 	return fmt.Errorf("gave up after %d attempts: other devices keep changing it; will retry next sync", maxRaceRetries)
 }
 
+// reconcileBothStream resolves a file changed on both sides that is too large
+// to hold in memory: the newest copy wins and the other is kept as a conflict
+// copy, transcripts included (above mergeMemoryLimit they aren't merged).
+func (s *Syncer) reconcileBothStream(ctx context.Context, npath string, lf *localFile, rm *reportMu, manifest *mtimeBook) error {
+	if err := s.checkWritable(lf); err != nil {
+		return err
+	}
+	key := s.engineRemoteKey(npath)
+	perm := s.permFor(npath, lf.root)
+	for attempt := 0; attempt < maxRaceRetries; attempt++ {
+		info, err := statLocal(lf)
+		if err != nil {
+			return err
+		}
+		tmp, rhash, _, etag, err := s.fetchToTemp(ctx, npath, key, filepath.Dir(lf.abs), perm)
+		if errors.Is(err, storage.ErrNotFound) {
+			etag, hash, err := s.uploadLocal(ctx, npath, lf.abs, info, "")
+			if errors.Is(err, storage.ErrPreconditionFailed) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			s.state.SetReconciled(npath, info, hash, etag)
+			s.noteMode(npath, lf, info)
+			rm.add(&rm.r.Uploaded, npath)
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		done, err := s.settleStreamed(ctx, npath, lf, info, tmp, rhash, etag, perm, rm, manifest)
+		_ = os.Remove(tmp)
+		if err != nil || done {
+			return err
+		}
+	}
+	return fmt.Errorf("gave up after %d attempts: other devices keep changing it; will retry next sync", maxRaceRetries)
+}
+
+// settleStreamed finishes reconcileBothStream for one downloaded remote copy.
+// done is false when the upload lost a race and the caller should try again.
+func (s *Syncer) settleStreamed(ctx context.Context, npath string, lf *localFile, info os.FileInfo, tmp, rhash, etag string, perm os.FileMode, rm *reportMu, manifest *mtimeBook) (done bool, err error) {
+	lhash, err := hashLocal(lf.abs, info)
+	if err != nil {
+		return true, err
+	}
+	if lhash == rhash {
+		s.state.SetReconciled(npath, info, lhash, etag)
+		return true, nil
+	}
+	key := s.engineRemoteKey(npath)
+	if remoteTime := manifest.get(key); remoteTime.IsZero() || info.ModTime().After(remoteTime) {
+		newETag, hash, err := s.uploadLocal(ctx, npath, lf.abs, info, etag)
+		if errors.Is(err, storage.ErrPreconditionFailed) {
+			return false, nil
+		}
+		if err != nil {
+			return true, err
+		}
+		if err := s.keepConflictFile(npath, lf.abs, tmp, ConflictFromOtherMac, true); err != nil {
+			return true, err
+		}
+		s.recordMtime(manifest, npath, info.ModTime())
+		s.noteMode(npath, lf, info)
+		s.state.SetReconciled(npath, info, hash, newETag)
+	} else {
+		if s.transcriptLiveNow(npath) {
+			return true, errLocalChanged
+		}
+		if isSymlink(info) {
+			data, err := readLocalContent(lf.abs, info)
+			if err == nil {
+				err = s.keepConflict(npath, lf.abs, data, ConflictFromThisMac)
+			}
+			if err != nil {
+				return true, err
+			}
+		} else if err := s.keepConflictFile(npath, lf.abs, lf.abs, ConflictFromThisMac, false); err != nil {
+			return true, err
+		}
+		if err := commitTemp(tmp, lf.abs, info, perm, s.claudeDir, lf.root.dir); err != nil {
+			return true, err
+		}
+		final, err := statLocal(lf)
+		if err != nil {
+			return true, err
+		}
+		s.state.SetReconciled(npath, final, rhash, etag)
+	}
+	rm.add(&rm.r.Conflicts, npath)
+	rm.add(&rm.r.Merged, npath)
+	return true, nil
+}
+
+// uploadLocal uploads a local file of any size (streaming it) or a symbolic
+// link, returning the new ETag and the hash of what was sent.
+func (s *Syncer) uploadLocal(ctx context.Context, npath, abs string, info os.FileInfo, ifMatch string) (etag, hash string, err error) {
+	if !isSymlink(info) {
+		return s.uploadFileStream(ctx, npath, abs, info, ifMatch)
+	}
+	data, err := readLocalContent(abs, info)
+	if err != nil {
+		return "", "", err
+	}
+	etag, err = s.put(ctx, npath, data, ifMatch)
+	return etag, sha256Hex(data), err
+}
+
+// markFolders uploads the marker of each project folder that has files here
+// and none in remote storage yet, so the other Macs learn the folder.
+func (s *Syncer) markFolders(ctx context.Context, roots []*syncRoot, local map[string]*localFile, objects []storage.ObjectInfo) {
+	present := make(map[string]bool)
+	for _, rel := range remoteFolderMarkers(objects) {
+		present[rel] = true
+	}
+	hasFiles := make(map[*syncRoot]bool)
+	for _, lf := range local {
+		hasFiles[lf.root] = true
+	}
+	for _, r := range roots {
+		if r.kind != rootFolder || r.deferred || !hasFiles[r] {
+			continue
+		}
+		rel := strings.TrimSuffix(strings.TrimPrefix(r.prefix, FoldersPrefix), "/")
+		if present[rel] {
+			continue
+		}
+		if _, err := s.put(ctx, FoldersPrefix+rel+"/"+folderMarker, []byte("{}\n"), ""); err != nil && !errors.Is(err, storage.ErrPreconditionFailed) {
+			s.log("Warning: failed to mark folder %s: %v", r.label, err)
+		}
+	}
+}
+
 // --- local file helpers -------------------------------------------------------
 
 func sha256Hex(b []byte) string {
@@ -892,37 +1572,62 @@ func sha256Hex(b []byte) string {
 // scanned; the next sync picks the change up.
 var errLocalChanged = errors.New("local file changed during sync; will retry")
 
+// checkInsideRoots refuses a path outside every sync root.
+func checkInsideRoots(abs string, roots ...string) error {
+	clean := filepath.Clean(abs)
+	for _, r := range roots {
+		if r != "" && strings.HasPrefix(clean, filepath.Clean(r)+string(filepath.Separator)) {
+			return nil
+		}
+	}
+	return fmt.Errorf("refusing to write outside the sync roots: %s", abs)
+}
+
+// dirPermFor is the mode of folders created for a file with mode perm:
+// readable by others when the file is.
+func dirPermFor(perm os.FileMode) os.FileMode {
+	if perm&0044 != 0 {
+		return 0755
+	}
+	return 0700
+}
+
 // writeLocal replaces abs with data without ever exposing a half-written
 // file. When expect is set and the file no longer matches it, the write is
 // abandoned. When data merely extends the current file (the common case for a
 // transcript another device continued) only the new tail is appended, which
 // is safe for readers tailing the file.
 func writeLocal(abs string, data []byte, expect os.FileInfo, roots ...string) error {
-	clean := filepath.Clean(abs)
-	inside := false
-	for _, r := range roots {
-		if r != "" && strings.HasPrefix(clean, filepath.Clean(r)+string(filepath.Separator)) {
-			inside = true
-		}
+	return writeLocalPerm(abs, data, expect, 0600, roots...)
+}
+
+// writeLocalPerm is writeLocal leaving the file with mode perm.
+func writeLocalPerm(abs string, data []byte, expect os.FileInfo, perm os.FileMode, roots ...string) error {
+	if err := checkInsideRoots(abs, roots...); err != nil {
+		return err
 	}
-	if !inside {
-		return fmt.Errorf("refusing to write outside the sync roots: %s", abs)
-	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(abs), dirPermFor(perm)); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
+	// Appending through a symbolic link would write to its target; a link is
+	// replaced instead.
+	lcur, lerr := os.Lstat(abs)
+	link := lerr == nil && isSymlink(lcur)
 	if cur, err := os.Stat(abs); err == nil {
 		if expect != nil && (cur.Size() != expect.Size() || !cur.ModTime().Equal(expect.ModTime())) {
 			return errLocalChanged
 		}
-		if cur.Size() > 0 && cur.Size() < int64(len(data)) {
+		if !link && cur.Size() > 0 && cur.Size() < int64(len(data)) {
 			if existing, err := os.ReadFile(abs); err == nil && bytes.HasPrefix(data, existing) {
 				f, err := os.OpenFile(abs, os.O_WRONLY|os.O_APPEND, 0600)
 				if err == nil {
 					_, werr := f.Write(data[len(existing):])
 					cerr := f.Close()
 					if werr == nil && cerr == nil {
+						if cur.Mode().Perm() != perm {
+							_ = os.Chmod(abs, perm)
+						}
 						return nil
 					}
 				}
@@ -940,7 +1645,7 @@ func writeLocal(abs string, data []byte, expect os.FileInfo, roots ...string) er
 		_ = tmp.Close()
 		return fmt.Errorf("failed to write: %w", err)
 	}
-	if err := tmp.Chmod(0600); err != nil {
+	if err := tmp.Chmod(perm); err != nil {
 		_ = tmp.Close()
 		return err
 	}
@@ -992,7 +1697,15 @@ func (b *mtimeBook) snapshot() map[string]time.Time {
 	return out
 }
 
+// recordMtime notes a file's modification time in the shared manifest. Files
+// inside .git are left out: git doesn't care about their times, objects never
+// conflict (their names are their content), and a repository holds thousands,
+// which every sync would download again. A .git file changed on two Macs
+// keeps this Mac's copy (the other goes to ~/.stradl/conflicts).
 func (s *Syncer) recordMtime(manifest *mtimeBook, npath string, t time.Time) {
+	if hasGitSegment(npath) {
+		return
+	}
 	manifest.mu.Lock()
 	manifest.m[s.engineRemoteKey(npath)] = t
 	manifest.mu.Unlock()
@@ -1000,30 +1713,62 @@ func (s *Syncer) recordMtime(manifest *mtimeBook, npath string, t time.Time) {
 
 func (s *Syncer) loadMtimes(ctx context.Context) (map[string]time.Time, string) {
 	m := make(map[string]time.Time)
+	data, etag, err := s.downloadMeta(ctx, MtimeManifestKey)
+	if err != nil {
+		return m, ""
+	}
+	_ = json.Unmarshal(data, &m)
+	return m, etag
+}
+
+// downloadMeta reads and decrypts one of the shared manifests.
+func (s *Syncer) downloadMeta(ctx context.Context, key string) ([]byte, string, error) {
 	var (
 		enc  []byte
 		etag string
 		err  error
 	)
 	if c, ok := s.conditional(); ok {
-		enc, etag, err = c.DownloadWithETag(ctx, MtimeManifestKey)
+		enc, etag, err = c.DownloadWithETag(ctx, key)
 	} else {
-		enc, err = s.storage.Download(ctx, MtimeManifestKey)
+		enc, err = s.storage.Download(ctx, key)
 	}
 	if err != nil {
-		return m, ""
+		return nil, "", err
 	}
 	data, err := s.encryptor.Decrypt(enc)
 	if err != nil {
-		return m, ""
+		return nil, "", err
 	}
 	if isGzipped(data) {
 		if data, err = gzipDecompress(data); err != nil {
-			return m, ""
+			return nil, "", err
 		}
 	}
-	_ = json.Unmarshal(data, &m)
-	return m, etag
+	return data, etag, nil
+}
+
+// uploadMeta encrypts and writes one of the shared manifests, conditionally
+// on etag when the backend supports compare-and-swap.
+func (s *Syncer) uploadMeta(ctx context.Context, key string, v any, etag string) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	compressed, err := gzipCompress(data)
+	if err != nil {
+		return err
+	}
+	enc, err := s.encryptor.Encrypt(compressed)
+	if err != nil {
+		return err
+	}
+	c, ok := s.conditional()
+	if !ok {
+		return s.storage.Upload(ctx, key, enc)
+	}
+	_, err = c.UploadIf(ctx, key, enc, etag)
+	return err
 }
 
 // saveMtimes merges this sync's entries into the shared manifest with
@@ -1039,26 +1784,126 @@ func (s *Syncer) saveMtimes(ctx context.Context, mine map[string]time.Time, etag
 			}
 			etag = newETag
 		}
-		data, err := json.Marshal(mine)
-		if err != nil {
-			return err
-		}
-		compressed, err := gzipCompress(data)
-		if err != nil {
-			return err
-		}
-		enc, err := s.encryptor.Encrypt(compressed)
-		if err != nil {
-			return err
-		}
-		c, ok := s.conditional()
-		if !ok {
-			return s.storage.Upload(ctx, MtimeManifestKey, enc)
-		}
-		if _, err = c.UploadIf(ctx, MtimeManifestKey, enc, etag); errors.Is(err, storage.ErrPreconditionFailed) {
+		if err := s.uploadMeta(ctx, MtimeManifestKey, mine, etag); errors.Is(err, storage.ErrPreconditionFailed) {
 			continue
+		} else {
+			return err
 		}
-		return err
 	}
 	return fmt.Errorf("manifest kept changing; will retry next sync")
+}
+
+// --- modes manifest ------------------------------------------------------------
+
+// modeBook is the shared modes manifest for one pass. Entries are written
+// only for modes that differ from what the manifest (or, lacking an entry,
+// the root's default) already says, and once written stay explicit, so a
+// chmod back to the default reaches the other Macs too.
+type modeBook struct {
+	mu      gosync.Mutex
+	ok      bool              // loaded, or absent; false (unreadable) leaves modes alone this pass
+	m       map[string]uint32 // remote key -> permission bits, as loaded
+	etag    string
+	pending map[string]uint32 // this pass's changes
+	npaths  map[string]string // remote key -> sync path, for pending entries
+}
+
+func (b *modeBook) get(key string) (uint32, bool) {
+	if b == nil {
+		return 0, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if v, ok := b.pending[key]; ok {
+		return v, true
+	}
+	v, ok := b.m[key]
+	return v, ok
+}
+
+// note records perm for key unless the manifest already implies it.
+func (b *modeBook) note(key, npath string, perm, def uint32) {
+	if b == nil || !b.ok {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	cur, has := b.pending[key]
+	if !has {
+		cur, has = b.m[key]
+	}
+	if (has && cur == perm) || (!has && perm == def) {
+		return
+	}
+	b.pending[key] = perm
+	b.npaths[key] = npath
+}
+
+func (b *modeBook) pendingPaths() []string {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, 0, len(b.npaths))
+	for _, np := range b.npaths {
+		out = append(out, np)
+	}
+	return out
+}
+
+// loadModes reads the modes manifest when the listing shows one.
+func (s *Syncer) loadModes(ctx context.Context, present bool) *modeBook {
+	b := &modeBook{m: make(map[string]uint32), pending: make(map[string]uint32), npaths: make(map[string]string)}
+	if !present {
+		b.ok = true
+		return b
+	}
+	data, etag, err := s.downloadMeta(ctx, ModesManifestKey)
+	if err != nil {
+		b.ok = errors.Is(err, storage.ErrNotFound)
+		return b
+	}
+	if json.Unmarshal(data, &b.m) != nil {
+		b.m = make(map[string]uint32)
+		return b
+	}
+	b.ok, b.etag = true, etag
+	return b
+}
+
+// saveModes merges this pass's mode changes into the shared manifest with
+// compare-and-swap.
+func (s *Syncer) saveModes(ctx context.Context, b *modeBook) error {
+	if b == nil || !b.ok || len(b.pending) == 0 {
+		return nil
+	}
+	theirs, etag := b.m, b.etag
+	for attempt := 0; attempt < maxRaceRetries; attempt++ {
+		if attempt > 0 {
+			data, newETag, err := s.downloadMeta(ctx, ModesManifestKey)
+			theirs, etag = make(map[string]uint32), newETag
+			switch {
+			case errors.Is(err, storage.ErrNotFound):
+				etag = ""
+			case err != nil:
+				return err
+			case json.Unmarshal(data, &theirs) != nil:
+				return fmt.Errorf("modes manifest is unreadable")
+			}
+		}
+		merged := make(map[string]uint32, len(theirs)+len(b.pending))
+		for k, v := range theirs {
+			merged[k] = v
+		}
+		for k, v := range b.pending {
+			merged[k] = v
+		}
+		if err := s.uploadMeta(ctx, ModesManifestKey, merged, etag); errors.Is(err, storage.ErrPreconditionFailed) {
+			continue
+		} else {
+			return err
+		}
+	}
+	return fmt.Errorf("modes manifest kept changing; will retry next sync")
 }

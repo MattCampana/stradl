@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -20,16 +21,33 @@ const (
 	LockFile   = "sync.lock"
 	StatusFile = "status.json"
 
+	// FoldersFile lists the project folders the last sync covered, so the
+	// background agent's cheap local probe watches them too.
+	FoldersFile = "folders.json"
+
 	// MCPRemoteKey is the remote storage key for synced MCP server configs.
 	// The _external/ prefix separates it from ~/.claude/-relative files.
 	MCPRemoteKey = "_external/mcp-servers.json"
 
-	// Sync scopes control which subset of ~/.claude is synced.
-	// ScopeFull (default) syncs everything in SyncPaths; ScopeSessions limits
-	// syncing to portable conversation data only.
-	ScopeFull     = "full"
-	ScopeSessions = "sessions"
+	// Sync scopes control what is synced. ScopeEverything (the default)
+	// syncs all of ~/.claude except per-Mac state, plus every project folder
+	// sessions work in; ScopeFull syncs the ~/.claude folders in SyncPaths;
+	// ScopeSessions limits syncing to portable conversation data only.
+	ScopeEverything = "everything"
+	ScopeFull       = "full"
+	ScopeSessions   = "sessions"
 )
+
+// BuildArtifacts are names of files and folders a Mac builds or caches for
+// itself. They are left out of every sync root by default
+// (sync_build_artifacts: true includes them): each Mac regenerates them, and
+// they are large and often platform-specific. An entry starting with "*"
+// matches a name suffix.
+var BuildArtifacts = []string{
+	"node_modules", ".venv", "venv", "__pycache__", "*.pyc", ".pytest_cache",
+	".mypy_cache", ".next", ".nuxt", ".gradle", ".DS_Store", ".Spotlight-V100",
+	".Trashes",
+}
 
 type Config struct {
 	// New storage configuration (preferred)
@@ -48,9 +66,14 @@ type Config struct {
 	// Exclude patterns (glob-style) for paths to skip during sync
 	Exclude []string `yaml:"exclude,omitempty"`
 
-	// Scope selects which subset of ~/.claude to sync: "full" (default, empty)
-	// or "sessions" (portable conversation data only). See ScopedSyncPaths.
+	// Scope selects what to sync: "everything" (the default), "full" or
+	// "sessions" (portable conversation data only). See ScopedSyncPaths.
 	Scope string `yaml:"scope,omitempty"`
+
+	// ScopeExplicit records that the user chose Scope (init --scope, paths
+	// add/remove). A scope nobody chose moves to the current default when the
+	// config loads.
+	ScopeExplicit bool `yaml:"scope_explicit,omitempty"`
 
 	// SyncPaths overrides the scope-based default paths when non-empty.
 	// Use GetEffectiveSyncPaths() to get the actual paths to sync.
@@ -83,6 +106,29 @@ type Config struct {
 	// remote storage when nothing changed locally (default 300).
 	SyncIntervalSeconds int `yaml:"sync_interval_seconds,omitempty"`
 
+	// FolderSync syncs the project folders sessions work in (the working
+	// folders of desktop sidebar sessions and transcripts, ExtraFolders, and
+	// folders other Macs sync), git history included, under the "everything"
+	// scope. Nil (unset) means enabled.
+	FolderSync *bool `yaml:"folder_sync,omitempty"`
+
+	// ExtraFolders are more folders under the home directory to sync (~ is
+	// expanded).
+	ExtraFolders []string `yaml:"extra_folders,omitempty"`
+
+	// FolderExclude adds glob patterns for files to leave out of folder sync,
+	// matched against the path inside each project folder (same syntax as
+	// exclude).
+	FolderExclude []string `yaml:"folder_exclude,omitempty"`
+
+	// SyncBuildArtifacts includes the BuildArtifacts names, which are
+	// otherwise left out of every sync root.
+	SyncBuildArtifacts bool `yaml:"sync_build_artifacts,omitempty"`
+
+	// AllowMassDelete lets one sync delete more than half of a folder's files
+	// on every Mac (stradl sync --allow-mass-delete). Never saved.
+	AllowMassDelete bool `yaml:"-"`
+
 	// ClaudeDirOverride allows overriding the default ~/.claude path (for testing)
 	ClaudeDirOverride string `yaml:"-"`
 
@@ -94,6 +140,10 @@ type Config struct {
 
 	// ClaudeJSONOverride allows overriding the ~/.claude.json path (for testing)
 	ClaudeJSONOverride string `yaml:"-"`
+
+	// HomeDirOverride allows overriding the home directory used for path
+	// mapping and project folders (for testing)
+	HomeDirOverride string `yaml:"-"`
 }
 
 // SyncPaths defines which paths under ~/.claude to sync in the default "full" scope.
@@ -126,11 +176,20 @@ var SessionSyncPaths = []string{
 	"paste-cache", // content-addressed large pastes that history.jsonl refers to
 }
 
-// ScopedSyncPaths returns the sync path set for the given scope. "sessions"
-// limits syncing to SessionSyncPaths; "full", empty, or any unrecognized value
-// returns the complete SyncPaths so existing configs keep their behavior.
+// EverythingSyncPaths is the "everything" scope: all of ~/.claude, minus the
+// per-Mac state the sync engine leaves out (credentials, running-process
+// records, caches, logs).
+var EverythingSyncPaths = []string{"."}
+
+// ScopedSyncPaths returns the sync path set for the given scope. "everything"
+// covers all of ~/.claude; "sessions" limits syncing to SessionSyncPaths;
+// "full", empty, or any unrecognized value returns the complete SyncPaths so
+// existing configs keep their behavior.
 func ScopedSyncPaths(scope string) []string {
-	if scope == ScopeSessions {
+	switch scope {
+	case ScopeEverything:
+		return EverythingSyncPaths
+	case ScopeSessions:
 		return SessionSyncPaths
 	}
 	return SyncPaths
@@ -234,12 +293,42 @@ func Load() (*Config, error) {
 		cfg.PathMap = expanded
 	}
 
+	// Expand ~ in extra_folders
+	for i, p := range cfg.ExtraFolders {
+		if p == "~" || strings.HasPrefix(p, "~/") {
+			home, _ := os.UserHomeDir()
+			cfg.ExtraFolders[i] = filepath.Join(home, p[1:])
+		}
+	}
+
 	// Set default endpoint for Cloudflare R2
 	if cfg.Endpoint == "" && cfg.AccountID != "" {
 		cfg.Endpoint = fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.AccountID)
 	}
 
+	if cfg.migrateScope() {
+		scopeNote.Do(func() {
+			fmt.Fprintf(os.Stderr, "Note: Stradl now syncs everything: all of ~/.claude, your MCP servers and the project folders your sessions use. To sync less, set scope in %s.\n", configPath)
+		})
+	}
+
 	return &cfg, nil
+}
+
+// scopeNote prints the scope migration note once per process.
+var scopeNote sync.Once
+
+// migrateScope moves "sessions", which init wrote by default before
+// "everything" existed, to the "everything" default with MCP server sync on,
+// unless the user chose it. The change lives in memory until the next Save
+// writes it. It reports whether anything changed.
+func (c *Config) migrateScope() bool {
+	if c.ScopeExplicit || c.Scope != ScopeSessions {
+		return false
+	}
+	c.Scope = ScopeEverything
+	c.SetMCPSync(true)
+	return true
 }
 
 func Save(cfg *Config) error {
@@ -308,7 +397,8 @@ func (c *Config) IsLegacyConfig() bool {
 // defaults are used instead.
 func (c *Config) GetEffectiveSyncPaths() []string {
 	scoped := ScopedSyncPaths(c.Scope)
-	if len(c.SyncPaths) == 0 {
+	if len(c.SyncPaths) == 0 || c.Scope == ScopeEverything {
+		// "everything" already covers any custom path.
 		return scoped
 	}
 
@@ -356,6 +446,51 @@ func (c *Config) EffectiveDesktopDir() string {
 		return c.DesktopDirOverride
 	}
 	return DesktopSessionsDir()
+}
+
+// IsEverything reports whether the "everything" scope is in effect.
+func (c *Config) IsEverything() bool {
+	return c.Scope == ScopeEverything
+}
+
+// IsFolderSyncEnabled reports whether project folders sync: under the
+// "everything" scope unless folder_sync is false.
+func (c *Config) IsFolderSyncEnabled() bool {
+	return c.IsEverything() && (c.FolderSync == nil || *c.FolderSync)
+}
+
+// HomeDir returns the home directory sync paths are relative to.
+func (c *Config) HomeDir() string {
+	if c.HomeDirOverride != "" {
+		return c.HomeDirOverride
+	}
+	home, _ := os.UserHomeDir()
+	return home
+}
+
+// IsBuildArtifact reports whether any segment of the slash path rel names a
+// build artifact (see BuildArtifacts), unless sync_build_artifacts is on.
+func (c *Config) IsBuildArtifact(rel string) bool {
+	if c.SyncBuildArtifacts {
+		return false
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		for _, name := range BuildArtifacts {
+			if seg == name || (strings.HasPrefix(name, "*") && strings.HasSuffix(seg, name[1:])) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsFolderExcluded reports whether rel (relative to a project folder)
+// matches a folder_exclude pattern.
+func (c *Config) IsFolderExcluded(rel string) bool {
+	if len(c.FolderExclude) == 0 {
+		return false
+	}
+	return (&Config{Exclude: c.FolderExclude}).IsExcluded(rel)
 }
 
 // EffectiveSyncInterval returns the background reconcile interval.

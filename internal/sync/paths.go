@@ -413,20 +413,37 @@ func canonicalizeTail(tail []byte, kind pathContentKind, windows bool) []byte {
 }
 
 // IsPortableContentPath reports whether content path translation applies to
-// this relative path: text formats under projects/ plus the prompt history.
-// Conflict copies (path.conflict.<timestamp>) inherit the base path's rule.
+// this relative path (under ~/.claude): text formats under projects/, the
+// prompt history, and the text configs that name paths (settings*.json,
+// CLAUDE.md, agents, commands and skills markdown, the plugin registries in
+// plugins/*.json, and YAML anywhere). Project folder files and other
+// namespaces starting with "_" are never rewritten. Conflict copies
+// (path.conflict.<timestamp>) inherit the base path's rule.
 func IsPortableContentPath(relPath string) bool {
 	if i := strings.Index(relPath, ".conflict."); i >= 0 {
 		relPath = relPath[:i]
 	}
-	if relPath == "history.jsonl" {
+	if relPath == "history.jsonl" || relPath == "CLAUDE.md" {
 		return true
 	}
-	if !strings.HasPrefix(relPath, "projects/") {
+	if strings.HasPrefix(relPath, "_") {
 		return false
 	}
-	switch path.Ext(relPath) {
-	case ".jsonl", ".json", ".md", ".txt":
+	ext := path.Ext(relPath)
+	dir, base := path.Split(relPath)
+	switch {
+	case strings.HasPrefix(relPath, "projects/"):
+		switch ext {
+		case ".jsonl", ".json", ".md", ".txt":
+			return true
+		}
+	case ext == ".yaml" || ext == ".yml":
+		return true
+	case dir == "" && strings.HasPrefix(base, "settings") && ext == ".json":
+		return true
+	case dir == "plugins/" && ext == ".json":
+		return true
+	case ext == ".md" && (strings.HasPrefix(relPath, "agents/") || strings.HasPrefix(relPath, "commands/") || strings.HasPrefix(relPath, "skills/")):
 		return true
 	}
 	return false

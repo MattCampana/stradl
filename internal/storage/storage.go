@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -75,6 +76,27 @@ type Conditional interface {
 	// DownloadWithETag retrieves data together with the ETag of exactly the
 	// version that was read, or an error wrapping ErrNotFound.
 	DownloadWithETag(ctx context.Context, key string) ([]byte, string, error)
+
+	// DeleteIf removes the object only if its current ETag equals ifMatch,
+	// so a delete never removes a version another device uploaded since the
+	// caller last saw it. It returns an error wrapping ErrPreconditionFailed
+	// when the object changed, and nil when it no longer exists.
+	DeleteIf(ctx context.Context, key, ifMatch string) error
+}
+
+// Streaming is implemented by backends that can move an object of any size
+// without holding it in memory. Without it, objects stay under
+// MaxDownloadSize.
+type Streaming interface {
+	// UploadStream stores everything read from r, conditionally as
+	// Conditional.UploadIf does (ifMatch "" means create-only), and returns
+	// the new ETag. A read error aborts the upload without committing it.
+	UploadStream(ctx context.Context, key string, r io.Reader, ifMatch string) (string, error)
+
+	// DownloadStream opens the object for reading and returns the ETag of the
+	// version being read, or an error wrapping ErrNotFound. Reads never
+	// splice in a newer version written meanwhile; they fail instead.
+	DownloadStream(ctx context.Context, key string) (io.ReadCloser, string, error)
 }
 
 // New creates a new Storage instance based on the provided configuration
