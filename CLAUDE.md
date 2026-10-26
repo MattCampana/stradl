@@ -12,11 +12,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 make build            # bin/stradl for this Mac (cgo on darwin, for the menu bar)
 make test             # go test ./...
 make check            # gofmt -l, go vet, go test -short
+make lint             # golangci-lint (.golangci.yml) + shellcheck on install.sh and scripts/
+make vulncheck        # govulncheck, as CI runs it
 make release VERSION=0.1.0 RELEASE_REPO=owner/stradl   # 4 archives + checksums.txt in dist/
 
 go test -v -run TestSync ./internal/sync/            # multi-device engine tests (in-memory CAS store)
 go test ./internal/storage/azure/                    # needs Azurite on 127.0.0.1:10000 (azurite-blob --loose); skipped otherwise
 scripts/test-install.sh dist                          # end-to-end installer test against a local HTTP server
+scripts/test-azure-setup.sh                           # azure-setup.sh against a fake az CLI
 ```
 
 Version and release repo are injected at build time: `-ldflags "-X main.version=<semver> -X main.releaseRepo=<owner>/stradl"`.
@@ -33,9 +36,10 @@ Version and release repo are injected at build time: `-ldflags "-X main.version=
 
 ## Distribution
 
-- `.github/workflows/release.yml`: on `v*` tags, a macos-14 runner tests, runs `scripts/build-release.sh` (darwin arm64/amd64 with cgo, linux arm64/amd64 without), and publishes `stradl_<os>_<arch>.tar.gz` + `checksums.txt` with `gh release create`.
-- `install.sh` (curl one-liner) installs to `~/.local/bin` with checksum verification, then runs `stradl init` and `stradl agent install`. `scripts/azure-setup.sh` provisions Azure from Cloud Shell.
-- Placeholders `REPLACE_OWNER/stradl` in `install.sh`, `release.go`, README and docs are replaced with the real GitHub owner when publishing (release builds inject it via ldflags anyway).
+- `.github/workflows/release.yml`: on `v*` tags, a macos-15 runner checks it got the go.mod `toolchain` Go, tests, runs govulncheck and `scripts/build-release.sh` (darwin arm64/amd64 with cgo and `MACOSX_DEPLOYMENT_TARGET=13.0`, linux arm64/amd64 without), and publishes `stradl_<os>_<arch>.tar.gz` + `checksums.txt` + `install.sh` + `azure-setup.sh` with `gh release create`.
+- go.mod's `toolchain` line is the Go release binaries are built with (setup-go reads it); bump it for Go security releases.
+- `install.sh` (curl one-liner from `.../releases/latest/download/install.sh`) installs to `~/.local/bin` with checksum verification and adds the PATH line (`~/.zprofile`; `~/.bash_profile` for a bash login shell; `~/.profile` on Linux). On a new machine with a TTY it runs `stradl init` and `stradl agent install`; on a Mac with the agent plist it reruns `stradl agent install` without needing a TTY, retrying while the old agent finishes a sync. `scripts/azure-setup.sh` provisions Azure from Cloud Shell, including a lifecycle rule that deletes previous blob versions after 30 days.
+- `install.sh` on main keeps the `REPLACE_OWNER/stradl` placeholder: release.yml rewrites the copy it attaches to each release, which is the one the README links. Only README, docs and the `release.go` default get the real owner when publishing (release builds inject it via ldflags anyway).
 
 ## Gotchas
 

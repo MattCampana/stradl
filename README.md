@@ -20,7 +20,7 @@ Stradl keeps every Claude Code session on every one of your Macs. Start a conver
 - **Every session, everywhere.** Three sessions on one Mac, two on another and four on a third become nine on all three. Nothing is overwritten, and nothing is left behind.
 - **Built for the Claude desktop app.** Sessions show up in the Code tab's sidebar on every Mac, not just in the terminal.
 - **Different usernames are fine.** `/Users/matt` on one Mac and `/Users/breakpoint` on another just work.
-- **Your projects can live anywhere.** Stradl finds each project on each Mac by its git remote, so `~/code/app` here and `~/Projects/app` there are the same project.
+- **Projects can live in different folders on each Mac.** Stradl finds each project on each Mac by its git remote, so `~/code/app` here and `~/Projects/app` there are the same project.
 - **Conversations never fork silently.** Continue the same session on two Macs before they sync and Stradl merges both sides, so every turn survives.
 - **Your storage, your keys.** Sessions are compressed and encrypted on your Mac with [age](https://age-encryption.org) before they leave it. Azure (or R2, S3, GCS, WebDAV) only ever sees ciphertext.
 - **Set and forget.** A small menu bar app syncs in the background, at login, after you wake your Mac, and whenever a session changes.
@@ -34,16 +34,16 @@ You need about ten minutes: two for Azure, then a couple per Mac.
 Open [Azure Cloud Shell](https://shell.azure.com) (Bash) and run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/REPLACE_OWNER/stradl/main/scripts/azure-setup.sh | bash -s -- \
+curl -fsSL https://github.com/REPLACE_OWNER/stradl/releases/latest/download/azure-setup.sh | bash -s -- \
   --resource-group rg-stradl --location eastus --account <yourname>stradl
 ```
 
-Pick a storage account name of 3 to 24 lowercase letters and digits. The script creates a private container with versioning and 30-day soft delete, then prints a **SAS token** scoped to that one container. Save the account name, the container name and the token in your password manager. Details are in [docs/azure.md](docs/azure.md).
+Pick a storage account name of 3 to 24 lowercase letters and digits. The script creates a private container with versioning, 30-day soft delete and a rule that clears out old versions after 30 days, then prints a **SAS token** scoped to that one container. Save the account name, the container name and the token in your password manager. Details are in [docs/azure.md](docs/azure.md).
 
 ### 2. Install on each Mac
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/REPLACE_OWNER/stradl/main/install.sh)"
+/bin/bash -c "$(curl -fsSL https://github.com/REPLACE_OWNER/stradl/releases/latest/download/install.sh)"
 ```
 
 The installer needs no admin rights, no Homebrew and no Go. It downloads the release for your Mac, verifies its checksum, installs `stradl` into `~/.local/bin`, then walks you through setup:
@@ -104,12 +104,12 @@ Remote changes are detected by version tags, not timestamps, so a Mac with a wro
 - The SAS token can reach exactly one container. Revoke it at any time by deleting its stored access policy in the Azure portal.
 - Your passphrase derives the encryption key on each Mac and is never stored or uploaded. Lose it and the synced copies can't be decrypted (your local sessions are unaffected).
 - Config lives in `~/.stradl/config.yaml` with permissions `0600`. Tokens are redacted from logs.
-- Blob versioning and 30-day soft delete give you an undo for anything that goes wrong.
+- Blob versioning and 30-day soft delete give you an undo for anything that goes wrong: whatever is overwritten or deleted stays recoverable for at least 30 days.
 
 ## Limitations
 
 - **macOS only** for the menu bar app. Linux builds run the same sync engine headless (`stradl agent run --headless`).
-- **A project you haven't cloned on a Mac** can't be opened there; the session still syncs, and the Claude app tells you the folder is missing. Clone the repo anywhere under your home folder and Stradl will find it.
+- **A project you haven't cloned on a Mac** can't be opened there; the session still syncs, and the Claude app tells you the folder is missing. Stradl looks for clones in `~/code`, `~/Code`, `~/src`, `~/dev`, `~/Developer`, `~/Projects`, `~/projects`, `~/repos`, `~/git`, `~/GitHub`, `~/github`, `~/work`, `~/Work`, `~/workspace`, `~/Documents` and `~/Desktop`, up to four levels deep, and matches them by git remote. Clone the repo into one of those folders, or map the folder you use with `path_map` in `~/.stradl/config.yaml` (see [How it works](docs/how-it-works.md#different-usernames-different-folders)).
 - **Terminal sessions expire after 30 days of inactivity** under Claude Code's default `cleanupPeriodDays`, on every Mac. Sessions started in the Claude desktop app are exempt by default, and the exemption travels with the transcript. To keep terminal sessions longer, raise `cleanupPeriodDays` in `~/.claude/settings.json` on each Mac.
 - The binaries aren't notarized by Apple. The curl installer doesn't trigger Gatekeeper; a browser download would.
 

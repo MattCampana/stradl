@@ -63,9 +63,9 @@ A downloaded file replaces the local one with a rename, so nothing ever sees hal
 
 Paths are stored portably. `/Users/matt` becomes `${HOME}` in both file paths and file contents on upload, and turns back into the local home folder on download. Claude Code files transcripts under a folder named after the project's absolute path (`-Users-matt-code-app`), and that name is rewritten the same way.
 
-Projects can also live in different places on different Macs. When a sidebar entry is uploaded, Stradl records the git remote of the session's folder. On a Mac where that folder doesn't exist, it looks for a clone of the same repository in the usual places under your home folder (`~/code`, `~/Projects`, `~/Developer`, `~/src`, `~/Documents`, and similar, a few levels deep) and points the session there. A missing folder that isn't a repository, such as one of the desktop app's scratch folders, is created empty so the session still opens.
+Projects can also live in different places on different Macs. When a sidebar entry is uploaded, Stradl records the git remote of the session's folder. On a Mac where that folder doesn't exist, it looks for a clone of the same repository in `~/code`, `~/Code`, `~/src`, `~/dev`, `~/Developer`, `~/Projects`, `~/projects`, `~/repos`, `~/git`, `~/GitHub`, `~/github`, `~/work`, `~/Work`, `~/workspace`, `~/Documents` and `~/Desktop`, up to four levels deep, and points the session there. A missing folder that isn't a repository, such as one of the desktop app's scratch folders, is created empty so the session still opens.
 
-You can also map folders explicitly with `path_map` in `~/.stradl/config.yaml`:
+Clones kept anywhere else aren't found that way. Map those folders explicitly with `path_map` in `~/.stradl/config.yaml`:
 
 ```yaml
 path_map:

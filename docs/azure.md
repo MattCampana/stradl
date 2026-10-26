@@ -5,7 +5,7 @@ title: Azure Setup
 
 # Azure Setup
 
-[Home](./index) | [Architecture](./architecture) | [How It Works](./how-it-works) | [Security](./security)
+[Home](./index) | [How It Works](./how-it-works) | [Security](./security)
 
 ---
 
@@ -18,11 +18,11 @@ Stradl keeps your Claude Code sessions in a storage container that you own. One 
 3. Run the script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/REPLACE_OWNER/stradl/main/scripts/azure-setup.sh | bash -s -- \
+curl -fsSL https://github.com/REPLACE_OWNER/stradl/releases/latest/download/azure-setup.sh | bash -s -- \
   --resource-group rg-stradl --location eastus --account bpstradl
 ```
 
-The script shows a plan and asks before it changes anything. Running it again is safe: it reuses whatever already exists and creates only what is missing.
+The script comes with each Stradl release, so the link above always runs the copy from the latest one. It shows a plan and asks before it changes anything. Running it again is safe: it reuses whatever already exists and creates only what is missing.
 
 | Flag | Default | Purpose |
 |------|---------|---------|
@@ -54,16 +54,17 @@ Use the same encryption passphrase on every Mac. Azure can take up to 30 seconds
 | Resource | Settings |
 |----------|----------|
 | Resource group | Tagged `app=stradl`, so one command removes everything |
-| Storage account | StorageV2, Standard_LRS, Hot tier, HTTPS only, TLS 1.2 minimum, public blob access off, tagged `app=stradl` |
+| Storage account | StorageV2, Standard_LRS, Hot tier, HTTPS only, TLS 1.2 minimum, public blob access off, shared key access on, tagged `app=stradl` |
 | Blob versioning | On: every overwrite keeps the previous version |
 | Soft delete | 30 days for deleted blobs, 30 days for deleted containers |
+| Lifecycle rule `stradloldversions` | Deletes previous versions of the container's blobs 30 days after they were written. Named after the container (`<container>oldversions`); added next to any rules the account already has |
 | Container | Private: no anonymous access |
 | Stored access policy `stradl` | Read, add, create, write, delete and list; expires `--years` from now |
 | SAS token | Bound to the policy, HTTPS only |
 
 Standard_LRS keeps three copies inside one datacenter. That is plenty here, because every Mac holds a full copy of its sessions too.
 
-Shared key access stays on because Azure signs SAS tokens with the account key. The key itself stays in Azure: the script reads it to sign the token, never prints it, and never writes it to disk. Your Macs only ever see the token.
+Shared key access stays on because Azure signs SAS tokens with the account key, so generating the token needs it. When the script reuses an existing account it says so explicitly, and if that account had shared key access turned off, the plan warns you before turning it back on; stop there if your organization turned it off on purpose. The key itself stays in Azure: the script reads it to sign the token, never prints it, and never writes it to disk. Your Macs only ever see the token.
 
 ## What it costs
 
@@ -78,13 +79,9 @@ Expect well under a dollar a month. Storage is nearly free at this size; most of
 
 A longer sync interval lowers the request charge in proportion.
 
-Versioning adds a slow trickle of storage: Stradl uploads a whole compressed, encrypted transcript each time it changes, and Azure keeps the version it replaced. To cap that growth, add a lifecycle rule that deletes previous versions after 90 days. Lifecycle rules are free, and this command replaces any lifecycle policy already on the account:
+Versioning adds a trickle of storage: Stradl uploads a whole compressed, encrypted transcript each time it changes, and Azure keeps the version it replaced. Left alone, that history grows forever, so the script adds a lifecycle rule that deletes previous versions 30 days after they were written. Azure ages a previous version from when its content was written, not from when it was replaced, so an old version can go at the first daily run after it is replaced; soft delete then keeps it recoverable for another 30 days. Storage holds at most about two months of history as a result. Lifecycle rules and the deletes they make are free, and a new rule can take up to 24 hours to start working.
 
-```bash
-az storage account management-policy create \
-  --account-name bpstradl --resource-group rg-stradl \
-  --policy '{"rules":[{"enabled":true,"name":"expire-old-versions","type":"Lifecycle","definition":{"actions":{"version":{"delete":{"daysAfterCreationGreaterThan":90}}},"filters":{"blobTypes":["blockBlob"]}}}]}'
-```
+The script adds its rule next to any lifecycle rules the account already has, and leaves the rule as it is on later runs. To keep history longer, change the rule's day count in the Azure portal under **Data management** > **Lifecycle management**; the next run of the script keeps your change.
 
 ## Security model
 
@@ -94,7 +91,7 @@ Two independent layers protect your sessions: the token controls access, and enc
 
 **Encryption protects content.** Before anything leaves a Mac, Stradl compresses each file and encrypts it with [age](https://github.com/FiloSottile/age) (X25519 and ChaCha20-Poly1305), using a key derived from your passphrase. Azure stores only ciphertext. Without the passphrase, which never leaves your Macs, neither Microsoft nor a token holder can read a single session. Azure does see blob names, which mirror file paths under `~/.claude` (project folder names and session IDs), along with sizes and timestamps.
 
-**Versioning and soft delete are the undo button.** The token lacks the two permissions that destroy history: deleting previous versions and permanent delete. A blob that gets overwritten or deleted, whether by a sync bug, a slip of the hand or a leaked token, leaves its previous version behind, and soft delete holds deleted blobs for 30 days. To recover a file, open the container in the Azure portal, turn on **Show deleted blobs**, and restore the blob or promote an earlier entry on its **Versions** tab.
+**Versioning and soft delete are the undo button.** The token lacks the two permissions that destroy history: deleting previous versions and permanent delete. A blob that gets overwritten or deleted, whether by a sync bug, a slip of the hand or a leaked token, leaves its previous version behind, and soft delete holds deleted blobs for 30 days. The lifecycle rule removes a previous version once its content is 30 days old, and soft delete holds that version for 30 more days, so anything overwritten or deleted stays recoverable for at least 30 days. To recover a file, open the container in the Azure portal, turn on **Show deleted blobs**, and restore the blob or promote an earlier entry on its **Versions** tab.
 
 ## Extend, revoke, replace
 
@@ -103,7 +100,7 @@ The token carries no expiry of its own. It names the stored access policy, and t
 **Extend the expiry without touching the token.** Before the date the script printed, run the script again with `--rotate`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/REPLACE_OWNER/stradl/main/scripts/azure-setup.sh | bash -s -- \
+curl -fsSL https://github.com/REPLACE_OWNER/stradl/releases/latest/download/azure-setup.sh | bash -s -- \
   --resource-group rg-stradl --account bpstradl --rotate
 ```
 

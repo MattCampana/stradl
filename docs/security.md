@@ -32,13 +32,13 @@ Object names are visible to anyone who can list the container: they are the file
 
 ## Undo
 
-The setup script turns on blob versioning and 30-day soft delete for blobs and containers. Every overwritten or deleted object can be restored from the Azure portal for at least 30 days.
+The setup script turns on blob versioning and 30-day soft delete for blobs and containers. Every overwritten or deleted object can be restored from the Azure portal for at least 30 days. A lifecycle rule deletes previous versions once their content is 30 days old (soft delete keeps each one for 30 more days), so the history doesn't grow without bound; see [Azure Setup](./azure#what-it-costs).
 
 ## Installing and updating
 
 - Release archives are built by GitHub Actions from tagged commits and published with a `checksums.txt`. The installer and `stradl update` download over HTTPS and refuse any archive whose SHA-256 doesn't match.
 - The checksums come from the same release as the archives, so they protect against corrupted or tampered downloads in transit, not against a compromised GitHub account. Protect the account that owns the repository with two-factor authentication.
-- The installer needs no administrator rights and writes only to `~/.local/bin`, `~/.stradl`, `~/Library/LaunchAgents/com.breakpointdata.stradl.plist` and one `PATH` line in your shell profile.
+- The installer needs no administrator rights and writes only to `~/.local/bin`, `~/.stradl`, `~/Library/LaunchAgents/com.breakpointdata.stradl.plist` and one `PATH` line in your shell profile. If bash is your login shell and you have no `~/.bash_profile`, it creates one that first sources the `~/.profile` (or `~/.bash_login`) bash was reading.
 - Binaries are ad-hoc signed, not notarized. The curl installer doesn't attach the quarantine flag, so Gatekeeper doesn't block them.
 
 ## One person per storage container
