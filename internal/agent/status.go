@@ -28,6 +28,13 @@ type Status struct {
 	Merged     int `json:"merged"`
 	Deferred   int `json:"deferred"`
 	Conflicts  int `json:"conflicts"`
+	// Deleted counts files deleted here whose delete reached every Mac;
+	// Trashed counts files other Macs deleted, moved into ~/.stradl/trash.
+	Deleted int `json:"deleted,omitempty"`
+	Trashed int `json:"trashed,omitempty"`
+	// Warnings are problems that held part of the last sync back without
+	// failing it (deletions the mass-delete guard stopped, a stale git lock).
+	Warnings []string `json:"warnings,omitempty"`
 
 	// SessionsTotal counts transcripts (projects/<dir>/<id>.jsonl) on this
 	// device after the sync.

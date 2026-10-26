@@ -117,6 +117,7 @@ type Runner struct {
 	lastLoop    time.Time
 	failures    int
 	lastNotify  map[ErrorKind]time.Time
+	lastWarned  map[string]time.Time // per warning text
 }
 
 // NewRunner returns a Runner with defaults filled in. It carries over the
@@ -158,7 +159,7 @@ func NewRunner(o Options) *Runner {
 	def(&o.DeferredRetry, DefaultDeferredRetry)
 	def(&o.MaxDebounce, DefaultMaxDebounce)
 
-	r := &Runner{o: o, trigger: make(chan struct{}, 1), nudge: make(chan struct{}, 1), lastNotify: map[ErrorKind]time.Time{}}
+	r := &Runner{o: o, trigger: make(chan struct{}, 1), nudge: make(chan struct{}, 1), lastNotify: map[ErrorKind]time.Time{}, lastWarned: map[string]time.Time{}}
 	if prev, err := ReadStatus(o.Paths.Status); err == nil {
 		r.status = *prev // keep the last result on display until the first sync
 		r.status.recount()
@@ -458,6 +459,9 @@ func (r *Runner) finish(ctx context.Context, start, end time.Time, cfg *config.C
 			st.Merged = len(report.Merged)
 			st.Deferred = len(report.Deferred)
 			st.Conflicts = len(report.Conflicts)
+			st.Deleted = len(report.Deleted)
+			st.Trashed = len(report.Trashed)
+			st.Warnings = report.Warnings
 			newDesktop = len(report.NewDesktopSessions)
 			st.addPending(end, newDesktop)
 			if report.SidebarPending {
@@ -479,6 +483,9 @@ func (r *Runner) finish(ctx context.Context, start, end time.Time, cfg *config.C
 		}
 	}
 	r.notify(end, errMsg, kind, newDesktop)
+	if report != nil {
+		r.notifyWarnings(end, report.Warnings)
+	}
 }
 
 // reschedule restarts every timer from t after a sync attempt.
@@ -544,6 +551,22 @@ func (r *Runner) notify(now time.Time, errMsg string, kind ErrorKind, newDesktop
 		r.o.Notify("Stradl", kind.Summary()+". To resume syncing, run 'stradl init' in Terminal with new storage credentials.")
 	default:
 		r.o.Notify("Stradl", "Sync keeps failing: "+truncate(errMsg, 120)+" (see the log)")
+	}
+}
+
+// notifyWarnings tells the user about problems that held part of a sync back
+// (deletions the mass-delete guard stopped, a stale git lock), each at most
+// once per errorNotifyGap.
+func (r *Runner) notifyWarnings(now time.Time, warnings []string) {
+	if r.o.Notify == nil {
+		return
+	}
+	for _, w := range warnings {
+		if last, ok := r.lastWarned[w]; ok && wallSince(now, last) < errorNotifyGap {
+			continue
+		}
+		r.lastWarned[w] = now
+		r.o.Notify("Stradl", truncate(w, 240))
 	}
 }
 
@@ -622,11 +645,18 @@ func (r *Runner) logSync(reason string, took time.Duration, rep *sync.SyncReport
 		r.o.Log.Printf("sync failed (%s) after %s: %v", reason, took.Round(time.Millisecond), err)
 		return
 	}
-	r.o.Log.Printf("sync ok (%s) %s: up=%d down=%d merged=%d restored=%d deferred=%d conflicts=%d skipped=%d new-desktop=%d errors=%d",
+	r.o.Log.Printf("sync ok (%s) %s: up=%d down=%d merged=%d restored=%d deleted=%d trashed=%d deferred=%d conflicts=%d skipped=%d new-desktop=%d remote-control=%d errors=%d",
 		reason, took.Round(time.Millisecond), len(rep.Uploaded), len(rep.Downloaded), len(rep.Merged), len(rep.Restored),
-		len(rep.Deferred), len(rep.Conflicts), len(rep.Skipped), len(rep.NewDesktopSessions), len(rep.Errors))
+		len(rep.Deleted), len(rep.Trashed), len(rep.Deferred), len(rep.Conflicts), len(rep.Skipped), len(rep.NewDesktopSessions),
+		len(rep.RemoteControlled), len(rep.Errors))
 	for _, e := range rep.Errors {
 		r.o.Log.Printf("  error: %v", e)
+	}
+	for _, w := range rep.Warnings {
+		r.o.Log.Printf("  warning: %s", w)
+	}
+	for _, t := range rep.Trashed {
+		r.o.Log.Printf("  trashed: %s (deleted on another Mac; kept in ~/.stradl/trash for 30 days)", t)
 	}
 	for _, c := range rep.Conflicts {
 		r.o.Log.Printf("  conflict: %s (other version kept as .conflict copy)", c)

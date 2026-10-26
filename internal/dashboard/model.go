@@ -77,6 +77,8 @@ type Pending struct {
 	Download  int           `json:"download"`
 	Merge     int           `json:"merge"`
 	Deferred  int           `json:"deferred"` // held while a session is open in Claude
+	Delete    int           `json:"delete"`   // deleted here, to delete on every Mac
+	Trash     int           `json:"trash"`    // deleted on another Mac, to move to ~/.stradl/trash
 	Conflicts int           `json:"conflicts"`
 	Files     []PendingFile `json:"files"` // at most 200
 }
@@ -84,7 +86,7 @@ type Pending struct {
 // PendingFile is one file the next sync would touch.
 type PendingFile struct {
 	Path   string `json:"path"`
-	Action string `json:"action"` // upload | download | merge | restore | deferred
+	Action string `json:"action"` // upload | download | merge | restore | deferred | delete | trash
 }
 
 // Session is one Claude Code conversation on this Mac.

@@ -540,7 +540,7 @@ th[aria-sort="ascending"] .sort-ico { transform: rotate(-90deg); }
 
 /* Pending */
 
-.pending-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
+.pending-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 10px; }
 .pcount {
   display: flex; align-items: center; gap: 11px; padding: 12px 14px;
 }

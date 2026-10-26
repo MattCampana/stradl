@@ -46,6 +46,8 @@
     { key: 'download', label: 'To download', icon: 'i-down' },
     { key: 'merge', label: 'To merge', icon: 'i-merge' },
     { key: 'deferred', label: 'Held for Claude', icon: 'i-clock', cls: 'held' },
+    { key: 'delete', label: 'To delete everywhere', icon: 'i-x' },
+    { key: 'trash', label: 'To trash here', icon: 'i-archive' },
     { key: 'conflicts', label: 'Conflicts', icon: 'i-alert', cls: 'bad' },
   ];
 
@@ -55,6 +57,8 @@
     merge: { label: 'Merge', cls: 'st-pending', icon: 'i-merge' },
     restore: { label: 'Restore', cls: 'st-pending', icon: 'i-up' },
     deferred: { label: 'Held', cls: 'st-held', icon: 'i-clock' },
+    delete: { label: 'Delete', cls: 'st-pending', icon: 'i-x' },
+    trash: { label: 'To trash', cls: 'st-pending', icon: 'i-archive' },
   };
 
   const S = {
@@ -850,7 +854,7 @@
     if (p.files.length) {
       // Conflicts are .conflict copies already on disk, not files the
       // next sync touches, so they are not in the list.
-      const total = (p.upload || 0) + (p.download || 0) + (p.merge || 0) + (p.deferred || 0);
+      const total = (p.upload || 0) + (p.download || 0) + (p.merge || 0) + (p.deferred || 0) + (p.delete || 0) + (p.trash || 0);
       const det = h('details', { class: 'pfiles' },
         h('summary', { 'data-fk': 'pfiles' }, icon('i-chevron'), 'Show ' + plural(p.files.length, 'file')),
         h('ul', { class: 'plist card' }, p.files.map((f) => {

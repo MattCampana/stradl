@@ -211,6 +211,8 @@ type syncView struct {
 	download  map[string]bool
 	merge     map[string]bool
 	deferred  map[string]bool
+	del       map[string]bool
+	trash     map[string]bool
 	scope     *sync.ScopeSummary
 }
 
@@ -230,12 +232,14 @@ func newSyncView(scope *sync.ScopeSummary, preview *sync.SyncReport, previewAt t
 		v.download = set(preview.Downloaded)
 		v.merge = set(preview.Merged)
 		v.deferred = set(preview.Deferred)
+		v.del = set(preview.Deleted)
+		v.trash = set(preview.Trashed)
 	}
 	return v
 }
 
 func (v *syncView) pending(np string) bool {
-	return v.upload[np] || v.restore[np] || v.download[np] || v.merge[np] || v.deferred[np]
+	return v.upload[np] || v.restore[np] || v.download[np] || v.merge[np] || v.deferred[np] || v.del[np] || v.trash[np]
 }
 
 // localChange reports a local change the preview doesn't know about: the
@@ -329,12 +333,16 @@ func (v *syncView) pendingSummary() Pending {
 	pd.Download = len(v.download)
 	pd.Merge = len(v.merge)
 	pd.Deferred = len(v.deferred)
+	pd.Delete = len(v.del)
+	pd.Trash = len(v.trash)
 	add(v.merge, "merge")
 	add(v.download, "download")
 	add(v.upload, "upload")
 	add(local, "upload")
 	add(v.restore, "restore")
 	add(v.deferred, "deferred")
+	add(v.del, "delete")
+	add(v.trash, "trash")
 	return pd
 }
 
