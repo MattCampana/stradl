@@ -19,7 +19,7 @@ import (
 )
 
 func gsRun(dir string, env []string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-c", "user.name=Test", "-c", "user.email=t@example.com", "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false", "-c", "protocol.file.allow=always"}, args...)...)
+	cmd := exec.Command("git", append([]string{"-c", "user.name=Test", "-c", "user.email=t@example.com", "-c", "init.defaultBranch=main", "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "protocol.file.allow=always"}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = append(append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "HOME="+dir), env...)
 	out, err := cmd.CombinedOutput()
