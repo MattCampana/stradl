@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -350,4 +351,36 @@ func (r *repoIndex) scan(dir string, depth int, seen map[string]bool) {
 		}
 		r.scan(filepath.Join(dir, name), depth+1, seen)
 	}
+}
+
+// errRemoteControlled comes with a sidebar record whose session another Mac
+// is serving over Remote Control (see remoteControlled).
+var errRemoteControlled = errors.New("session is served over Remote Control from another Mac")
+
+// remoteControlled reports a record (as uploaded, runtime fields intact)
+// whose session its Mac currently serves over Remote Control. Every Claude
+// app signed in to the account lists such a session already, through the
+// bridge, so a synced copy of the record would show it twice.
+func remoteControlled(data []byte) bool {
+	m, ok := decodeRecord(data)
+	if !ok {
+		return false
+	}
+	on, _ := m["remoteControlUserEnabled"].(bool)
+	ids, _ := m["bridgeSessionIds"].([]any)
+	return on && len(ids) > 0
+}
+
+// holdRemoteControlled keeps a remote-controlled record off this Mac: a copy
+// already here moves to the trash (the app drops it at its next launch) and
+// the record counts as deleted here until its remote copy changes, when it is
+// looked at again.
+func (s *Syncer) holdRemoteControlled(npath string, lf *localFile, expect os.FileInfo, etag string) error {
+	if expect != nil {
+		if _, err := s.moveToTrash(lf.abs, expect, filepath.Dir(lf.abs)); err != nil { // keep the app's folders
+			return err
+		}
+	}
+	s.state.MarkHeldBack(npath, etag)
+	return errRemoteControlled
 }

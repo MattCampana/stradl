@@ -97,6 +97,12 @@ type SyncReport struct {
 	SidebarPending bool
 	SidebarChanged int
 
+	// RemoteControlled lists sidebar records left off this Mac because another
+	// Mac serves the session over Remote Control right now: the Claude app
+	// already lists it there, so a copy here would show twice. They arrive
+	// once Remote Control is off.
+	RemoteControlled []string
+
 	// NewDesktopSessions lists desktop sidebar records that did not exist on
 	// this device before. The desktop app loads its sidebar at launch, so they
 	// show up after it restarts.
@@ -685,6 +691,8 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 				defer locks.lock(s.physicalKey(roots, j.npath))()
 				if err := j.run(); errors.Is(err, errLocalChanged) {
 					rm.add(&report.Deferred, j.npath)
+				} else if errors.Is(err, errRemoteControlled) {
+					rm.add(&report.RemoteControlled, j.npath)
 				} else if err != nil {
 					rm.fail(j.npath, err)
 				}
@@ -978,8 +986,12 @@ func (s *Syncer) fetch(ctx context.Context, npath, key string, repos *repoIndex,
 		}
 	}
 	if strings.HasPrefix(npath, DesktopPrefix) {
+		held := remoteControlled(data)
 		data = s.paths.ResolveContent("record.json", data)
 		data = finishDesktopDownload(data, home, repos)
+		if held {
+			return data, etag, errRemoteControlled
+		}
 	} else if IsPortableContentPath(npath) {
 		data = s.paths.ResolveContent(npath, data)
 	}
@@ -1154,6 +1166,17 @@ func (s *Syncer) reconcileUpload(ctx context.Context, npath string, lf *localFil
 		// activity stamp never replaces the remote record; a rename, archive
 		// or pin made here keeps the stamp equal and still uploads.
 		remoteData, etag, ferr := s.fetch(ctx, npath, s.engineRemoteKey(npath), repos, home)
+		if errors.Is(ferr, errRemoteControlled) {
+			if st := s.state.GetFile(npath); st != nil && st.LocalDeleted && !remoteControlled(data) {
+				// Held back for Remote Control, and the app re-saved its
+				// in-memory copy: keep it off the remote and the sidebar.
+				if etag == "" {
+					etag = ifMatch
+				}
+				return s.holdRemoteControlled(npath, lf, info, etag)
+			}
+			ferr = nil
+		}
 		if ferr == nil && desktopMetaStamp(remoteData) > desktopMetaStamp(data) {
 			if etag == "" {
 				etag = ifMatch
@@ -1193,11 +1216,14 @@ func (s *Syncer) reconcileDownload(ctx context.Context, npath string, lf *localF
 	if errors.Is(err, errTooLargeForMemory) {
 		return s.reconcileDownloadStream(ctx, npath, lf, obj, expect, rm, repos, manifest, home)
 	}
-	if err != nil {
-		return err
-	}
 	if etag == "" {
 		etag = obj.ETag
+	}
+	if errors.Is(err, errRemoteControlled) {
+		return s.holdRemoteControlled(npath, lf, expect, etag)
+	}
+	if err != nil {
+		return err
 	}
 	if s.transcriptLiveNow(npath) {
 		return errLocalChanged
@@ -1336,6 +1362,9 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 			return err
 		}
 		remoteData, etag, err := s.fetch(ctx, npath, key, repos, home)
+		if errors.Is(err, errRemoteControlled) {
+			err = nil // already on this Mac: merge as usual
+		}
 		if errors.Is(err, errTooLargeForMemory) {
 			return s.reconcileBothStream(ctx, npath, lf, rm, manifest)
 		}

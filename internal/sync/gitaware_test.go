@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -277,5 +278,65 @@ func TestGitMetadata(t *testing.T) {
 		if got := gitMetadata(p); got != want {
 			t.Errorf("gitMetadata(%q) = %v, want %v", p, got, want)
 		}
+	}
+}
+
+func TestRemoteControlledRecordStaysOffOtherMacs(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	b := newDevice(t, root, "matthew", store)
+	now := time.Now()
+	cwd := filepath.Join(a.home, "code")
+	record := func(rc bool, at time.Time) string {
+		return fmt.Sprintf(`{"sessionId":"local_s1","cwd":%q,"title":"phone","lastActivityAt":%d,"remoteControlUserEnabled":%v,"bridgeSessionIds":["bridge-1"]}`, cwd, at.UnixMilli(), rc)
+	}
+	write := func(d *device, content string) {
+		if err := os.WriteFile(d.recordPath("s1"), []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exists := func(d *device) bool { _, err := os.Stat(d.recordPath("s1")); return err == nil }
+
+	// Alice serves the session to her phone: bob's app already lists it.
+	write(a, record(true, now))
+	a.sync()
+	r := b.sync()
+	if exists(b) || len(r.NewDesktopSessions) != 0 || len(r.RemoteControlled) != 1 {
+		t.Fatalf("a remote-controlled record must stay off bob: %+v", r)
+	}
+	if r := b.sync(); len(r.Downloaded)+len(r.RemoteControlled) != 0 {
+		t.Fatalf("an unchanged held record isn't looked at again: %+v", r)
+	}
+
+	// Remote Control off: the record arrives, without alice's bridge.
+	write(a, record(false, now.Add(time.Minute)))
+	a.sync()
+	r = b.sync()
+	if !exists(b) || len(r.NewDesktopSessions) != 1 {
+		t.Fatalf("the record should arrive once Remote Control is off: %+v", r)
+	}
+	if data, _ := os.ReadFile(b.recordPath("s1")); strings.Contains(string(data), "bridge-1") {
+		t.Fatalf("alice's bridge reached bob: %s", data)
+	}
+
+	// On again: bob's copy goes to the trash rather than showing twice.
+	write(a, record(true, now.Add(2*time.Minute)))
+	a.sync()
+	if r := b.sync(); exists(b) || len(r.RemoteControlled) != 1 {
+		t.Fatalf("bob's copy should be set aside: %+v", r)
+	}
+	// Bob's app re-saves the copy it holds in memory: it must not replace
+	// alice's live record.
+	write(b, record(false, now.Add(-time.Hour)))
+	b.sync()
+	if exists(b) {
+		t.Fatal("the re-saved copy should be set aside again")
+	}
+	if r := a.sync(); len(r.Downloaded) != 0 {
+		t.Fatalf("bob's stale copy reached alice: %+v", r)
+	}
+	if data, _ := os.ReadFile(a.recordPath("s1")); !strings.Contains(string(data), `"remoteControlUserEnabled":true`) {
+		t.Fatalf("alice's record changed: %s", data)
 	}
 }

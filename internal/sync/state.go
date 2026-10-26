@@ -143,6 +143,20 @@ func (s *SyncState) MarkLocalDeleted(npath, etag string) {
 	}
 }
 
+// MarkHeldBack records that the remote copy of npath (etag) is kept off this
+// device, whether or not it was ever here, until that copy changes.
+func (s *SyncState) MarkHeldBack(npath, etag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	f, ok := s.Files[npath]
+	if !ok {
+		f = &FileState{}
+		s.Files[npath] = f
+	}
+	f.LocalDeleted = true
+	f.RemoteETag = etag
+}
+
 // Snapshot returns a copy of the tracked file states keyed by path.
 func (s *SyncState) Snapshot() map[string]FileState {
 	s.mu.Lock()
