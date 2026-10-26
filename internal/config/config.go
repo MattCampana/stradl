@@ -47,6 +47,8 @@ var BuildArtifacts = []string{
 	"node_modules", ".venv", "venv", "__pycache__", "*.pyc", ".pytest_cache",
 	".mypy_cache", ".next", ".nuxt", ".gradle", ".DS_Store", ".Spotlight-V100",
 	".Trashes",
+	// Swift Package Manager and Xcode build folders; framework caches.
+	".build", "DerivedData", ".astro", ".svelte-kit", ".turbo", ".parcel-cache",
 }
 
 type Config struct {
