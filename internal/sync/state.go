@@ -33,6 +33,26 @@ type FileState struct {
 	LocalDeleted bool `json:"local_deleted,omitempty"`
 }
 
+// adoptStorage ties the state to storage target id. When the state belonged
+// to a different target its file states are dropped: their ETags would make
+// every file look changed remotely, and stale copies from the new target
+// would overwrite newer local files. With no state, files present on both
+// sides merge instead. It reports whether anything was dropped.
+func (s *SyncState) adoptStorage(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.StorageID == id {
+		return false
+	}
+	dropped := s.StorageID != "" && len(s.Files) > 0
+	if dropped {
+		s.Files = make(map[string]*FileState)
+		s.MCPBaseline = nil
+	}
+	s.StorageID = id
+	return dropped
+}
+
 // SetReconciled records that npath's local copy (described by info and hash)
 // now matches the remote version etag.
 func (s *SyncState) SetReconciled(npath string, info os.FileInfo, hash, etag string) {
@@ -81,6 +101,11 @@ type SyncState struct {
 
 	// MCPBaseline stores the last-synced normalized MCP server configs for three-way merge.
 	MCPBaseline json.RawMessage `json:"mcp_baseline,omitempty"`
+
+	// StorageID identifies the storage target these file states belong to.
+	// Their ETags and hashes mean nothing against another container, so the
+	// file states are dropped when the target changes (see NewSyncer).
+	StorageID string `json:"storage_id,omitempty"`
 
 	// savePath is the custom path to save state to (if set)
 	savePath string     `json:"-"`

@@ -64,7 +64,7 @@ func prepareDesktopUpload(data []byte) []byte {
 	if repo == "" {
 		return data
 	}
-	remote := gitOriginURL(repo)
+	remote := stripURLCredentials(gitOriginURL(repo))
 	if remote == "" {
 		return data
 	}
@@ -240,6 +240,27 @@ func gitOriginURL(repo string) string {
 		}
 	}
 	return ""
+}
+
+// stripURLCredentials removes a user:token@ part from an https remote URL, so
+// a token embedded in a clone URL never leaves the Mac (scp-like git@host:
+// remotes carry no secret and are left alone).
+func stripURLCredentials(u string) string {
+	i := strings.Index(u, "://")
+	if i < 0 {
+		return u
+	}
+	rest := u[i+3:]
+	slash := strings.IndexByte(rest, '/')
+	authority := rest
+	if slash >= 0 {
+		authority = rest[:slash]
+	}
+	at := strings.LastIndexByte(authority, '@')
+	if at < 0 {
+		return u
+	}
+	return u[:i+3] + rest[at+1:]
 }
 
 // canonicalRemote reduces the spellings of one repository's URL (https, ssh,

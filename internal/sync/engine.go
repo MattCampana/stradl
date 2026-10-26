@@ -160,6 +160,9 @@ func (s *Syncer) npathForKey(key string) (npath string, ok bool, unknownToken bo
 		return "", false, false
 	}
 	k := strings.TrimSuffix(key, ".age")
+	if !isCanonicalRel(k) {
+		return "", false, false // crafted key: "..", ".", empty segment or backslash
+	}
 	if strings.HasPrefix(k, "_external/") || strings.HasPrefix(k, "_metadata/") {
 		return "", false, false
 	}
@@ -173,7 +176,26 @@ func (s *Syncer) npathForKey(key string) (npath string, ok bool, unknownToken bo
 	if !ok {
 		return "", false, true
 	}
+	if !isCanonicalRel(lp) {
+		return "", false, false
+	}
 	return lp, true, false
+}
+
+// isCanonicalRel reports whether p is a clean relative slash path that cannot
+// step outside the directory it is joined to. Remote keys are untrusted: the
+// storage token alone (no passphrase) is enough to rename blobs, and age does
+// not bind a ciphertext to its name.
+func isCanonicalRel(p string) bool {
+	if p == "" || strings.ContainsRune(p, '\\') || strings.HasPrefix(p, "/") {
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // Sync reconciles this device with remote storage in both directions under
@@ -214,6 +236,9 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	objects, err := s.storage.List(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list remote objects: %w", err)
+	}
+	if err := s.checkKey(ctx, objects, dryRun); err != nil {
+		return nil, err
 	}
 	remote := make(map[string]storage.ObjectInfo, len(objects))
 	for _, obj := range objects {
@@ -293,6 +318,19 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		lf := local[np]
 		robj, hasRemote := remote[np]
 		st, hasState := known[np]
+
+		if lf == nil && hasRemote {
+			// On a case-insensitive volume another Mac's spelling of a folder
+			// (~/Code vs ~/code) names a file the scan listed under this Mac's
+			// spelling. Treat it as present so it merges instead of being
+			// overwritten by a blind download.
+			if root, rel := s.rootFor(roots, np); root != nil {
+				abs := filepath.Join(root.dir, filepath.FromSlash(rel))
+				if info, err := os.Stat(abs); err == nil && info.Mode().IsRegular() {
+					lf = &localFile{root: root, rel: rel, abs: abs, info: info}
+				}
+			}
+		}
 
 		var lhash string
 		if lf != nil {
@@ -431,6 +469,10 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			transcripts = append(transcripts, j)
 		}
 	}
+	// Jobs that touch the same physical file (two remote spellings of one
+	// path on a case-insensitive volume) run one at a time: the second then
+	// sees the first's write and merges or defers instead of renaming over it.
+	locks := &keyedLocks{m: make(map[string]*gosync.Mutex)}
 	for _, batch := range [][]job{transcripts, records} {
 		sem := make(chan struct{}, defaultWorkers)
 		var wg gosync.WaitGroup
@@ -440,6 +482,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
+				defer locks.lock(s.physicalKey(roots, j.npath))()
 				if err := j.run(); errors.Is(err, errLocalChanged) {
 					rm.add(&report.Deferred, j.npath)
 				} else if err != nil {
@@ -469,6 +512,33 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		return report, fmt.Errorf("failed to save state: %w", err)
 	}
 	return report, nil
+}
+
+// keyedLocks serializes work per key.
+type keyedLocks struct {
+	mu gosync.Mutex
+	m  map[string]*gosync.Mutex
+}
+
+func (k *keyedLocks) lock(key string) func() {
+	k.mu.Lock()
+	l, ok := k.m[key]
+	if !ok {
+		l = &gosync.Mutex{}
+		k.m[key] = l
+	}
+	k.mu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
+
+// physicalKey identifies the file an npath lands on, folding case because
+// macOS volumes are case-insensitive by default.
+func (s *Syncer) physicalKey(roots []*syncRoot, npath string) string {
+	if root, rel := s.rootFor(roots, npath); root != nil {
+		return strings.ToLower(filepath.Join(root.dir, filepath.FromSlash(rel)))
+	}
+	return strings.ToLower(npath)
 }
 
 // recentWriteWindow treats a transcript written this recently as live.
@@ -564,6 +634,9 @@ func (s *Syncer) fetch(ctx context.Context, npath, key string, repos *repoIndex,
 			return nil, "", fmt.Errorf("failed to decompress: %w", err)
 		}
 	}
+	if data, err = unbindKey(data, key); err != nil {
+		return nil, "", err
+	}
 	if strings.HasPrefix(npath, DesktopPrefix) {
 		data = s.paths.ResolveContent("record.json", data)
 		data = finishDesktopDownload(data, home, repos)
@@ -583,7 +656,8 @@ func (s *Syncer) put(ctx context.Context, npath string, plain []byte, ifMatch st
 	} else if IsPortableContentPath(npath) {
 		data = s.paths.NormalizeContent(npath, data)
 	}
-	compressed, err := gzipCompress(data)
+	key := s.engineRemoteKey(npath)
+	compressed, err := gzipCompress(bindKey(data, key))
 	if err != nil {
 		return "", fmt.Errorf("failed to compress: %w", err)
 	}
@@ -594,7 +668,6 @@ func (s *Syncer) put(ctx context.Context, npath string, plain []byte, ifMatch st
 	if int64(len(enc)) > storage.MaxDownloadSize {
 		return "", fmt.Errorf("too large to sync (%d MB compressed; other devices accept up to %d MB)", len(enc)>>20, storage.MaxDownloadSize>>20)
 	}
-	key := s.engineRemoteKey(npath)
 	if c, ok := s.conditional(); ok {
 		return c.UploadIf(ctx, key, enc, ifMatch)
 	}
@@ -620,6 +693,29 @@ func (s *Syncer) reconcileUpload(ctx context.Context, npath string, lf *localFil
 	if err != nil {
 		return err
 	}
+	if ifMatch != "" && strings.HasPrefix(npath, DesktopPrefix) {
+		// The desktop app loads records only at launch and re-saves its
+		// in-memory copy (lastFocusedAt on a click, say), so a record another
+		// Mac updated, and this Mac downloaded, can come back older. A lower
+		// activity stamp never replaces the remote record; a rename, archive
+		// or pin made here keeps the stamp equal and still uploads.
+		remoteData, etag, ferr := s.fetch(ctx, npath, s.engineRemoteKey(npath), repos, home)
+		if ferr == nil && desktopMetaStamp(remoteData) > desktopMetaStamp(data) {
+			if etag == "" {
+				etag = ifMatch
+			}
+			if err := writeLocal(lf.abs, remoteData, info, s.claudeDir, lf.root.dir); err != nil {
+				return err
+			}
+			final, err := os.Stat(lf.abs)
+			if err != nil {
+				return err
+			}
+			s.state.SetReconciled(npath, final, sha256Hex(remoteData), etag)
+			rm.add(&rm.r.Downloaded, npath)
+			return nil
+		}
+	}
 	etag, err := s.put(ctx, npath, data, ifMatch)
 	if errors.Is(err, storage.ErrPreconditionFailed) {
 		// Another device got there first: merge with its version instead.
@@ -644,6 +740,16 @@ func (s *Syncer) reconcileDownload(ctx context.Context, npath string, lf *localF
 	}
 	if s.transcriptLiveNow(npath) {
 		return errLocalChanged
+	}
+	if expect != nil && IsMergeableJSONL(npath) {
+		// Transcripts only grow. A remote copy missing lines this Mac has (an
+		// older version restored or replayed, or a truncated upload) must never
+		// replace them: merge instead, which keeps the union on both sides.
+		if local, err := os.ReadFile(lf.abs); err == nil {
+			if _, localHasMore := MergeJSONL(data, local); localHasMore {
+				return s.reconcileBoth(ctx, npath, lf, rm, repos, manifest, home)
+			}
+		}
 	}
 	if err := writeLocal(lf.abs, data, expect, s.claudeDir, lf.root.dir); err != nil {
 		return err
@@ -719,13 +825,13 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 			if remoteTime.IsZero() || info.ModTime().After(remoteTime) {
 				result, uploadThere = localData, true
 				conflict = true
-				if err := writeConflictCopy(lf.abs, remoteData); err != nil {
+				if err := writeConflictCopy(lf.abs, remoteData, ConflictFromOtherMac); err != nil {
 					return err
 				}
 			} else {
 				result, writeHere = remoteData, true
 				conflict = true
-				if err := writeConflictCopy(lf.abs, localData); err != nil {
+				if err := writeConflictCopy(lf.abs, localData, ConflictFromThisMac); err != nil {
 					return err
 				}
 			}
@@ -850,8 +956,15 @@ func writeLocal(abs string, data []byte, expect os.FileInfo, roots ...string) er
 
 // writeConflictCopy keeps the losing side of a non-mergeable conflict next to
 // the file. Conflict copies are never synced.
-func writeConflictCopy(abs string, data []byte) error {
-	p := abs + ".conflict." + time.Now().Format("20060102-150405")
+// Conflict copy origins, the last segment of <file>.conflict.<time>.<origin>:
+// which device wrote the version that lost.
+const (
+	ConflictFromThisMac  = "this-mac"
+	ConflictFromOtherMac = "other-mac"
+)
+
+func writeConflictCopy(abs string, data []byte, origin string) error {
+	p := abs + ".conflict." + time.Now().Format("20060102-150405") + "." + origin
 	return os.WriteFile(p, data, 0600)
 }
 

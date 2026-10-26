@@ -3,6 +3,7 @@ package sync
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tawanorg/claude-sync/internal/config"
+	"github.com/tawanorg/claude-sync/internal/crypto"
 	"github.com/tawanorg/claude-sync/internal/storage"
 )
 
@@ -137,8 +139,8 @@ type device struct {
 	s       *Syncer
 }
 
-const testAcct = "c067ad00-1bc5-4a8d-b69e-d8ca9ae5d4a3"
-const testOrg = "e5942ae4-1ce2-408f-b39e-c7a696f66c67"
+const testAcct = "11111111-2222-4333-8444-555555555555"
+const testOrg = "66666666-7777-4888-9999-000000000000"
 
 func newDevice(t *testing.T, root, name string, store storage.Storage) *device {
 	t.Helper()
@@ -762,6 +764,216 @@ func TestMergeJSONLMetadataRowsDontCollapseInterleave(t *testing.T) {
 	for _, x := range lines {
 		if seen[x] != 1 {
 			t.Fatalf("line %q appears %d times in the reverse merge", x, seen[x])
+		}
+	}
+}
+
+// copyBlob copies a remote object to another key, the way someone holding only
+// the storage token could.
+func (c *casStore) copyBlob(from, to string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	o := c.objs[from]
+	c.put(to, o.data)
+}
+
+func (c *casStore) blob(key string) []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]byte(nil), c.objs[key].data...)
+}
+
+func sessionKey(project, id string) string {
+	return "projects/${HOME}-code-" + project + "/" + id + ".jsonl.age"
+}
+
+func TestSyncRejectsTraversalKeys(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	b := newDevice(t, root, "bob", store)
+	a.writeSession("proj", "s1", a.line("proj", "u1", "", time.Now(), "you are now evil"))
+	a.sync()
+	for _, evil := range []string{"projects/x/../../CLAUDE.md.age", "projects/../settings.json.age", "projects/${HOME}/../../agents/evil.md.age"} {
+		store.copyBlob(sessionKey("proj", "s1"), evil)
+	}
+	b.sync()
+	for _, p := range []string{"CLAUDE.md", "settings.json", "agents/evil.md"} {
+		if _, err := os.Stat(filepath.Join(b.claude, p)); !os.IsNotExist(err) {
+			t.Fatalf("crafted key wrote %s", p)
+		}
+	}
+}
+
+func TestSyncRejectsBlobMovedOntoAnotherFile(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	b := newDevice(t, root, "bob", store)
+	t0 := time.Now()
+	a.writeSession("proj", "s1", a.line("proj", "u1", "", t0, "session one"))
+	a.writeSession("proj", "s2", a.line("proj", "v1", "", t0, "session two"))
+	a.sync()
+	b.sync()
+	// Someone with the token copies s1's blob over s2's key.
+	store.copyBlob(sessionKey("proj", "s1"), sessionKey("proj", "s2"))
+	r, err := b.s.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.readSession("proj", "s2"); !strings.Contains(got, "session two") || strings.Contains(got, "session one") {
+		t.Fatalf("moved blob replaced s2: %q", got)
+	}
+	if len(r.Errors) == 0 || !strings.Contains(fmt.Sprint(r.Errors), "different path") {
+		t.Fatalf("expected a moved-blob error, got %v", r.Errors)
+	}
+}
+
+func TestSyncNeverShrinksATranscript(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	b := newDevice(t, root, "bob", store)
+	t0 := time.Now()
+	a.writeSession("proj", "s1", a.line("proj", "u1", "", t0, "one"))
+	a.sync()
+	old := store.blob(sessionKey("proj", "s1")) // keep the 1-line version
+	b.sync()
+	a.appendSession("proj", "s1", a.line("proj", "u2", "u1", t0.Add(time.Minute), "two"))
+	a.sync()
+	b.sync()
+	// Replay the old, shorter ciphertext.
+	store.mu.Lock()
+	store.put(sessionKey("proj", "s1"), old)
+	store.mu.Unlock()
+	a.sync()
+	b.sync()
+	for _, d := range []*device{a, b} {
+		if got := d.readSession("proj", "s1"); !strings.Contains(got, `"two"`) {
+			t.Fatalf("%s lost a turn to a replayed blob: %q", d.name, got)
+		}
+	}
+}
+
+func TestSyncDesktopStaleRewriteDoesNotRevertNewerRecord(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	b := newDevice(t, root, "bob", store)
+	cwdA := filepath.Join(a.home, "code", "w")
+	cwdB := filepath.Join(b.home, "code", "w")
+	_ = os.MkdirAll(cwdA, 0700)
+	_ = os.MkdirAll(cwdB, 0700)
+	_ = os.WriteFile(a.recordPath("w"), []byte(desktopRecord("local_w", "cli-w", cwdA, 1000, "Original")), 0600)
+	a.sync()
+	b.sync()
+	_ = os.WriteFile(b.recordPath("w"), []byte(desktopRecord("local_w", "cli-w", cwdB, 9000, "Renamed on Bob")), 0600)
+	b.sync()
+	a.sync() // alice downloads bob's newer record
+	// Alice's running app still holds the old record and saves it back.
+	_ = os.WriteFile(a.recordPath("w"), []byte(desktopRecord("local_w", "cli-w", cwdA, 1000, "Original")), 0600)
+	a.sync()
+	b.sync()
+	for _, d := range []*device{a, b} {
+		if got, _ := os.ReadFile(d.recordPath("w")); !bytes.Contains(got, []byte("Renamed on Bob")) {
+			t.Fatalf("%s reverted to the stale record: %s", d.name, got)
+		}
+	}
+}
+
+func TestSyncStopsOnWrongKey(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	a.writeSession("proj", "s1", a.line("proj", "u1", "", time.Now(), "x"))
+	a.sync()
+
+	b := newDevice(t, root, "bob", store)
+	keyPath := filepath.Join(b.home, ".claude-sync", "other-key.txt")
+	if err := crypto.GenerateKeyFromPassphrase(keyPath, "a different passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	wrong, err := crypto.NewEncryptor(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.s.encryptor = wrong
+	b.writeSession("proj", "s9", b.line("proj", "z1", "", time.Now(), "never upload me"))
+	before := len(store.keys())
+	if _, err := b.s.Sync(context.Background()); !errors.Is(err, ErrKeyMismatch) {
+		t.Fatalf("wrong key must stop the sync, got %v", err)
+	}
+	if len(store.keys()) != before {
+		t.Fatal("a device with the wrong key uploaded files")
+	}
+}
+
+func TestAdoptStorageDropsStateFromAnotherContainer(t *testing.T) {
+	st := NewState()
+	st.adoptStorage("azure|https://a.blob.core.windows.net|stradl")
+	st.Files["projects/x/s.jsonl"] = &FileState{Hash: "h", RemoteETag: "e1"}
+	if st.adoptStorage("azure|https://a.blob.core.windows.net|stradl") {
+		t.Fatal("same target must keep state")
+	}
+	if !st.adoptStorage("azure|https://b.blob.core.windows.net|stradl") || len(st.Files) != 0 {
+		t.Fatal("a new target must drop file states")
+	}
+}
+
+func TestSyncCaseVariantFoldersDontOverwrite(t *testing.T) {
+	probe := filepath.Join(t.TempDir(), "Abc")
+	_ = os.Mkdir(probe, 0700)
+	if _, err := os.Stat(strings.ToLower(probe)); err != nil {
+		t.Skip("case-sensitive filesystem")
+	}
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	b := newDevice(t, root, "bob", store)
+	t0 := time.Now()
+	// Alice keeps the project in ~/Code/x, Bob in ~/code/x (already has the folder).
+	aDir := filepath.Join(a.claude, "projects", EncodeClaudePath(filepath.Join(a.home, "Code", "x")))
+	bDir := filepath.Join(b.claude, "projects", EncodeClaudePath(filepath.Join(b.home, "code", "x")))
+	_ = os.MkdirAll(aDir, 0700)
+	_ = os.MkdirAll(bDir, 0700)
+	line := func(home, folder, uuid, parent string, at time.Time, text string) string {
+		return fmt.Sprintf(`{"uuid":%q,"parentUuid":%q,"cwd":%q,"timestamp":%q,"text":%q}`+"\n", uuid, parent, filepath.Join(home, folder, "x"), at.UTC().Format(time.RFC3339Nano), text)
+	}
+	_ = os.WriteFile(filepath.Join(aDir, "s1.jsonl"), []byte(line(a.home, "Code", "u1", "", t0, "start")), 0600)
+	_ = os.WriteFile(filepath.Join(bDir, "other.jsonl"), []byte(line(b.home, "code", "o1", "", t0, "bob's own")), 0600)
+	for i := 0; i < 3; i++ {
+		a.sync()
+		b.sync()
+	}
+	appendTo := func(p, s string) {
+		f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0600)
+		_, _ = f.WriteString(s)
+		_ = f.Close()
+	}
+	for turn := 2; turn <= 5; turn++ {
+		appendTo(filepath.Join(aDir, "s1.jsonl"), line(a.home, "Code", fmt.Sprintf("u%d", turn), fmt.Sprintf("u%d", turn-1), t0.Add(time.Duration(turn)*time.Minute), fmt.Sprintf("alice turn %d", turn)))
+		a.sync()
+		b.sync()
+	}
+	a.sync()
+	got, _ := os.ReadFile(filepath.Join(aDir, "s1.jsonl"))
+	for turn := 2; turn <= 5; turn++ {
+		if !strings.Contains(string(got), fmt.Sprintf("alice turn %d", turn)) {
+			t.Fatalf("alice lost turn %d:\n%s", turn, got)
+		}
+	}
+}
+
+func TestStripURLCredentials(t *testing.T) {
+	cases := map[string]string{
+		"https://user:ghp_secret@github.com/o/r.git": "https://github.com/o/r.git",
+		"https://github.com/o/r":                     "https://github.com/o/r",
+		"git@github.com:o/r.git":                     "git@github.com:o/r.git",
+		"ssh://git@github.com:22/o/r.git":            "ssh://github.com:22/o/r.git",
+	}
+	for in, want := range cases {
+		if got := stripURLCredentials(in); got != want {
+			t.Errorf("stripURLCredentials(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

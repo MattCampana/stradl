@@ -102,6 +102,9 @@ func NewSyncer(cfg *config.Config, quiet bool) (*Syncer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to load state: %w", err)
 	}
+	if state.adoptStorage(StorageIdentity(storageCfg)) && !quiet {
+		fmt.Fprintln(os.Stderr, "Storage target changed: starting fresh sync state (files on both sides will be merged)")
+	}
 
 	// Use overridden claude dir if provided, otherwise use default
 	claudeDir := config.ClaudeDir()
@@ -129,6 +132,14 @@ func NewSyncer(cfg *config.Config, quiet bool) (*Syncer, error) {
 }
 
 // NewSyncerWith creates a Syncer with pre-built dependencies (for testing).
+// StorageIdentity names a storage target: provider, endpoint and bucket.
+func StorageIdentity(c *storage.StorageConfig) string {
+	if c == nil {
+		return ""
+	}
+	return strings.Join([]string{string(c.Provider), c.GetEndpoint(), c.Bucket, c.WebDAVURL, c.PathPrefix, c.AzureAccount, c.ProjectID}, "|")
+}
+
 func NewSyncerWith(cfg *config.Config, store storage.Storage, enc *crypto.Encryptor, state *SyncState, claudeDir string, quiet bool) *Syncer {
 	homeDir, _ := os.UserHomeDir()
 	mapper, _ := NewPathMapper(homeDir, cfg.PathMap)
