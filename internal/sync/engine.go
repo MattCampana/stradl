@@ -15,6 +15,7 @@ import (
 	"strings"
 	gosync "sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/tawanorg/claude-sync/internal/storage"
@@ -412,6 +413,11 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		switch {
 		case errors.Is(err, errAwaitingPermission):
 			root.deferred = true // reported once per protected folder below
+			continue
+		case root.kind == rootFolder && errors.Is(err, syscall.EDEADLK):
+			// Part of it is only in iCloud and downloading: sit this pass out.
+			root.deferred = true
+			report.InICloud = append(report.InICloud, root.prefix)
 			continue
 		case errors.Is(err, errFolderMissing):
 			if s.state.hasPrefix(root.prefix) && !s.cfg.AllowMassDelete {

@@ -98,7 +98,7 @@ func printSyncReport(r *sync.SyncReport, took time.Duration) {
 			fmt.Printf("  %s%s%s %d %s\n", color, sym, colorReset, n, what)
 		}
 	}
-	if !r.Changed() && len(r.Deferred)+len(r.Errors)+len(r.Skipped)+len(r.Warnings) == 0 {
+	if !r.Changed() && len(r.Deferred)+len(r.Errors)+len(r.Skipped)+len(r.Warnings)+len(r.InICloud) == 0 {
 		printSuccess(fmt.Sprintf("✓ Everything is in sync (%s)", took.Round(100*time.Millisecond)))
 		return
 	}
@@ -109,6 +109,7 @@ func printSyncReport(r *sync.SyncReport, took time.Duration) {
 	line("✗", colorCyan, len(r.Deleted), "deleted on every Mac (deleted here)")
 	line("⌫", colorCyan, len(r.Trashed), "moved to ~/.stradl/trash (deleted on another Mac)")
 	line("…", colorDim, len(r.Deferred), "waiting for an open session or a git command to finish")
+	line("☁", colorDim, len(r.InICloud), "only in iCloud on this Mac: downloading; the background app syncs them once they arrive")
 	line("!", colorYellow, len(r.Conflicts), "conflicts: the other version kept (.conflict or .from- copy, or ~/.stradl/conflicts)")
 	line("?", colorYellow, len(r.Skipped), "skipped (unknown path token; check path_map)")
 	if n := len(r.NewDesktopSessions); n > 0 {

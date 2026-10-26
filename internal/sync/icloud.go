@@ -54,6 +54,11 @@ func inICloud(err error) (string, bool) {
 		RequestICloudDownload(pe.Path)
 		return pe.Path, true
 	}
+	var le *os.LinkError // a rename of a cloud-only file
+	if errors.As(err, &le) {
+		RequestICloudDownload(le.Old)
+		return le.Old, true
+	}
 	return "", true
 }
 

@@ -30,7 +30,7 @@ func previewSync(ctx context.Context) (*sync.SyncReport, error) {
 
 // pendingWork reports whether a preview found anything to do or report.
 func pendingWork(r *sync.SyncReport) bool {
-	return r.Changed() || len(r.Deferred)+len(r.Skipped)+len(r.Warnings) > 0
+	return r.Changed() || len(r.Deferred)+len(r.Skipped)+len(r.Warnings)+len(r.InICloud) > 0
 }
 
 func statusCmd() *cobra.Command {
@@ -75,6 +75,7 @@ func statusCmd() *cobra.Command {
 			row(len(r.Deleted), "deleted here, to delete on every Mac")
 			row(len(r.Trashed), "deleted on another Mac, to move to ~/.stradl/trash")
 			row(len(r.Deferred), "waiting for an open session or a git command to finish")
+			row(len(r.InICloud), "only in iCloud on this Mac (downloading; they sync once they arrive)")
 			row(len(r.Skipped), "skipped (unknown path token; check path_map)")
 			for _, w := range r.Warnings {
 				printWarning(w)
@@ -117,6 +118,7 @@ func diffCmd() *cobra.Command {
 			list("✗", "Delete on every Mac (deleted here)", r.Deleted)
 			list("⌫", "Move to ~/.stradl/trash (deleted on another Mac)", r.Trashed)
 			list("…", "Waiting for an open session or a git command to finish", r.Deferred)
+			list("☁", "Only in iCloud on this Mac (downloading)", r.InICloud)
 			list("?", "Skipped (unknown path token)", r.Skipped)
 			for _, w := range r.Warnings {
 				printWarning(w)

@@ -8,6 +8,7 @@ package main
 import "C"
 
 import (
+	"os"
 	"runtime"
 	gosync "sync"
 	"syscall"
@@ -80,11 +81,18 @@ func (d *icloudDownloader) work() {
 	C.setiopolicy_np(C.IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES, C.IOPOL_SCOPE_THREAD, C.IOPOL_MATERIALIZE_DATALESS_FILES_ON)
 	var b [1]byte
 	for abs := range d.ch {
-		// Reading one byte downloads the whole file. The syscall package
-		// keeps the open and the read on this thread.
+		// Reading one byte downloads a whole file; listing a folder
+		// downloads the folder. Both stay on this thread: the syscall
+		// package and os.ReadDir run their calls on the calling thread.
 		if fd, err := syscall.Open(abs, syscall.O_RDONLY|syscall.O_CLOEXEC, 0); err == nil {
-			_, _ = syscall.Read(fd, b[:])
-			_ = syscall.Close(fd)
+			var st syscall.Stat_t
+			if syscall.Fstat(fd, &st) == nil && st.Mode&syscall.S_IFMT == syscall.S_IFDIR {
+				_ = syscall.Close(fd)
+				_, _ = os.ReadDir(abs)
+			} else {
+				_, _ = syscall.Read(fd, b[:])
+				_ = syscall.Close(fd)
+			}
 		}
 		d.done(abs)
 	}

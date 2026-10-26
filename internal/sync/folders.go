@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	gosync "sync"
+	"syscall"
 	"time"
 
 	"github.com/tawanorg/claude-sync/internal/config"
@@ -449,6 +450,13 @@ func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 	own := []string{filepath.Clean(s.claudeDir), filepath.Clean(s.stateDir())}
 	err := filepath.WalkDir(root.dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if errors.Is(err, syscall.EDEADLK) {
+				// A folder iCloud keeps only in the cloud: listing it needs
+				// it downloaded. The whole folder waits (skipping just this
+				// part would make its files look deleted).
+				RequestICloudDownload(p)
+				return &ICloudError{Path: p}
+			}
 			return err
 		}
 		rel, rerr := filepath.Rel(root.dir, p)

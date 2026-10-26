@@ -114,3 +114,41 @@ func keysHave(store *casStore, key string) bool {
 	}
 	return false
 }
+
+func TestCloudOnlyFileDeletedElsewhereWaitsToBeTrashed(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	foldersOn("p", a, b)
+	a.write("code/p/keep.txt", "k\n")
+	a.write("code/p/gone.txt", "g\n")
+	syncAll(1, a, b)
+
+	a.remove("code/p/gone.txt")
+	a.sync()
+	bobGone := filepath.Join(b.home, "code", "p", "gone.txt")
+	download, requested := cloudOnly(t, bobGone)
+	r := b.sync()
+	if len(r.InICloud) != 1 || len(r.Trashed) != 0 || !b.exists("code/p/gone.txt") {
+		t.Fatalf("a cloud-only file should wait to be trashed: %+v", r)
+	}
+	if got := requested(); len(got) == 0 || got[0] != bobGone {
+		t.Fatalf("its download wasn't requested: %v", got)
+	}
+	download()
+	if r := b.sync(); len(r.Trashed) != 1 || b.exists("code/p/gone.txt") {
+		t.Fatalf("once downloaded it goes to the trash: %+v", r)
+	}
+}
+
+func TestICloudRenameErrorRequestsDownload(t *testing.T) {
+	_, requested := cloudOnly(t)
+	err := &os.LinkError{Op: "rename", Old: "/Users/m/Desktop/a", New: "/Users/m/.stradl/trash/a", Err: syscall.EDEADLK}
+	if p, ok := inICloud(err); !ok || p != "/Users/m/Desktop/a" {
+		t.Fatalf("rename EDEADLK = %q, %v", p, ok)
+	}
+	if got := requested(); len(got) != 1 || got[0] != "/Users/m/Desktop/a" {
+		t.Fatalf("download not requested: %v", got)
+	}
+}

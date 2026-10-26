@@ -48,6 +48,11 @@ func (s *Syncer) moveToTrash(abs string, expect os.FileInfo, stopAt string) (str
 	if expect != nil && (cur.Size() != expect.Size() || !cur.ModTime().Equal(expect.ModTime())) {
 		return "", errLocalChanged
 	}
+	// Moving a cloud-only file to another folder needs it downloaded first;
+	// trash it once it has arrived.
+	if err := checkInICloud(abs, cur); err != nil {
+		return "", err
+	}
 	dst := filepath.Join(s.trashDir(), time.Now().Format(trashDayLayout), s.keepRel(abs))
 	dst = freeName(dst)
 	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
