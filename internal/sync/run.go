@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -27,5 +28,16 @@ func RunSync(ctx context.Context, cfg *config.Config, quiet, wait bool) (*SyncRe
 	if err != nil {
 		return nil, err
 	}
-	return s.Sync(ctx)
+	report, err := s.Sync(ctx)
+	if err != nil || !cfg.IsMCPSyncEnabled() {
+		return report, err
+	}
+	// MCP server configs live in ~/.claude.json and merge three ways against
+	// the baseline in state.json, so they sync under the same lock.
+	if _, err := s.PullMCP(ctx); err != nil {
+		report.Errors = append(report.Errors, fmt.Errorf("MCP servers: %w", err))
+	} else if _, err := s.PushMCP(ctx); err != nil {
+		report.Errors = append(report.Errors, fmt.Errorf("MCP servers: %w", err))
+	}
+	return report, nil
 }
