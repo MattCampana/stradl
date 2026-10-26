@@ -490,6 +490,12 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			// its state is the folder's, not this repository's. It's
 			// downloaded fresh, and nothing is deleted for it.
 			fresh = append(fresh, root.prefix)
+		case errors.Is(err, errFolderMissing) && claudeWorktree(strings.TrimPrefix(root.prefix, FoldersPrefix)) && s.state.hasPrefix(root.prefix):
+			// A Claude worktree that synced from here and is gone now (its
+			// session ended and the app removed it) sits out quietly; other
+			// Macs keep their copy.
+			root.deferred = true
+			continue
 		case errors.Is(err, errFolderMissing):
 			if s.state.hasPrefix(root.prefix) && !s.cfg.AllowMassDelete {
 				// It synced from here before: a rename, a re-clone in
@@ -567,12 +573,22 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 
 	known := s.state.Snapshot()
 	for np := range known {
+		forget := false
 		for _, p := range fresh {
-			if strings.HasPrefix(np, p) {
-				delete(known, np)
-				if !dryRun {
-					s.state.RemoveFile(np)
-				}
+			forget = forget || strings.HasPrefix(np, p)
+		}
+		if root, _, in := active(np); in && root.kind == rootFolder && root.inherited && !unionPath(np) {
+			// Its state is from when it synced inside the folder holding
+			// it; a file storage no longer has was deleted while this Mac
+			// didn't follow the repository (an older Stradl on another
+			// Mac). It uploads as new rather than going to the trash here.
+			_, stored := remote[np]
+			forget = forget || !stored
+		}
+		if forget {
+			delete(known, np)
+			if !dryRun {
+				s.state.RemoveFile(np)
 			}
 		}
 	}
@@ -930,6 +946,9 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		for _, r := range roots {
 			if r.kind != rootFolder {
 				continue
+			}
+			if r.deferred && !wasRoot[r.prefix] {
+				continue // never scanned as its own folder yet: still new next pass
 			}
 			rel := strings.TrimSuffix(strings.TrimPrefix(r.prefix, FoldersPrefix), "/")
 			folders = append(folders, rel)

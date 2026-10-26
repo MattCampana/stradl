@@ -234,6 +234,13 @@ func viaSymlink(base, abs string) bool {
 // outer one.
 func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []string {
 	remoteRepos := remoteRepoFolders(objects)
+	for _, rel := range remoteFolderMarkers(objects) {
+		// A Claude worktree another Mac syncs is its own folder here too,
+		// though its .git pointer stays on that Mac.
+		if claudeWorktree(path.Dir(rel)) && path.Base(path.Dir(rel)) == "worktrees" {
+			remoteRepos[rel] = true
+		}
+	}
 	var candidates []string
 	seen := make(map[string]bool) // thousands of transcripts share a few folders
 	add := func(abs string) {

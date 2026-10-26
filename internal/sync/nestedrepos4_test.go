@@ -292,3 +292,80 @@ func TestClaudeWorktreesStayPerMac(t *testing.T) {
 		t.Fatalf("an old upload of a worktree came down or was deleted: %v", r.Deleted)
 	}
 }
+
+func TestWorktreeSessionReachesTheOtherMac(t *testing.T) {
+	needGit(t)
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	repo := filepath.Join(a.home, "code", "x")
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "init", "-q", "-b", "main")
+	a.write("code/x/a.txt", "a\n")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "a")
+	a.writeSession("x", "s0", cwdLine("u0", repo))
+	syncAll(2, a, b)
+	wt := filepath.Join(repo, ".claude", "worktrees", "w1")
+	git(t, repo, "worktree", "add", "-q", "-b", "claude/w1", wt)
+	a.write("code/x/.claude/worktrees/w1/wip.txt", "uncommitted\n")
+	a.writeSession("x", "s1", cwdLine("u1", wt))
+	syncAll(3, a, b)
+	if got := b.read("code/x/.claude/worktrees/w1/wip.txt"); got != "uncommitted\n" {
+		t.Fatalf("bob's copy of the worktree session's folder = %q", got)
+	}
+	// The app removes the worktree when the session ends: no warnings, no
+	// deletes on the other Mac.
+	git(t, repo, "worktree", "remove", "--force", wt)
+	r := a.sync()
+	for _, w := range r.Warnings {
+		if strings.Contains(w, "worktrees") {
+			t.Fatalf("warned about a removed worktree: %s", w)
+		}
+	}
+	b.sync()
+	if !b.exists("code/x/.claude/worktrees/w1/wip.txt") {
+		t.Fatal("bob's copy was deleted")
+	}
+}
+
+func TestACloneAnOldMacDeletedIsntTrashedWhenASessionNeedsIt(t *testing.T) {
+	a, _, store := oldVersionNestedRepo(t)
+	a.sync() // lib is a repository no session needs on alice now
+	// bob, still on v2.2.2, deletes his lib: v2.2.2 mirrors that delete.
+	for _, k := range keysWithPrefix(store, FoldersPrefix+"code/work/lib/") {
+		_ = store.Delete(t.Context(), k)
+	}
+	if r := a.sync(); len(r.Trashed) != 0 {
+		t.Fatalf("alice touched her unneeded lib: %v", r.Trashed)
+	}
+	// Weeks later a session on alice works in lib.
+	a.s.cfg.ExtraFolders = append(a.s.cfg.ExtraFolders, filepath.Join(a.home, "code", "work", "lib"))
+	a.sync()
+	if len(a.trashed()) != 0 || !a.exists("code/work/lib/f0.go") {
+		t.Fatalf("the session's clone went to the trash: %v", a.trashed())
+	}
+	if !keysHave(store, FoldersPrefix+"code/work/lib/f0.go") {
+		t.Fatal("lib should upload again")
+	}
+}
+
+func TestACloneAnOldMacDeletedSurvivesAFirstPassThatWaits(t *testing.T) {
+	a, _, store := oldVersionNestedRepo(t)
+	a.sync()
+	for _, k := range keysWithPrefix(store, FoldersPrefix+"code/work/lib/") {
+		_ = store.Delete(t.Context(), k)
+	}
+	a.sync()
+	a.s.cfg.ExtraFolders = append(a.s.cfg.ExtraFolders, filepath.Join(a.home, "code", "work", "lib"))
+	a.write("code/work/lib/.git/index.lock", "") // git is busy as the session starts
+	a.sync()
+	a.remove("code/work/lib/.git/index.lock")
+	a.sync()
+	if len(a.trashed()) != 0 || !a.exists("code/work/lib/f0.go") {
+		t.Fatalf("the session's clone went to the trash: %v", a.trashed())
+	}
+}
