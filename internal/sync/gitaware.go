@@ -160,9 +160,14 @@ func (s *Syncer) keepLosingBranch(ctx context.Context, npath, abs string, winner
 		}
 		if gitSHARe.MatchString(win) {
 			// Exit 0: the losing commit is an ancestor, nothing is lost.
-			if _, err := runGit(filepath.Dir(gitDir), "--git-dir="+gitDir, "merge-base", "--is-ancestor", sha, win); err == nil {
+			if _, err := runGit(gitDir, "--git-dir="+gitDir, "merge-base", "--is-ancestor", sha, win); err == nil {
 				continue
 			}
+		}
+		if _, err := runGit(gitDir, "--git-dir="+gitDir, "cat-file", "-e", sha+"^{commit}"); err != nil && gitBinary() != "" {
+			// Not here (yet): a branch naming it would break git log --all
+			// and gc. Its ref stays in the conflicts folder.
+			continue
 		}
 		p := filepath.Join(headsDir, filepath.FromSlash(keptBranchPrefix+branch+"-"+sha[:7]))
 		if existing, err := os.ReadFile(p); err == nil && bytes.Equal(bytes.TrimSpace(existing), []byte(sha)) {
@@ -324,9 +329,9 @@ func (s *Syncer) chooseSide(npath string, lf *localFile, info os.FileInfo, local
 	if lf.root == nil || lf.root.kind != rootFolder {
 		return newest
 	}
-	if lf.root.stale && !lf.root.syncedHere {
-		// The copy in storage stopped updating long ago (see syncRoot.stale)
-		// and this Mac never synced this repository: this Mac's copy is the
+	if owner := lf.root.gitOwner(lf.rel); owner.stale && s.state.GetFile(npath) == nil && s.staleLeads(owner) {
+		// The stored copy stopped updating (see syncRoot.stale) and this
+		// Mac's checkout already holds its commit: this Mac's copy is the
 		// reference, git's files included, and the stored one goes aside.
 		return sideChoice{local: true, keep: true, aside: true}
 	}
@@ -357,6 +362,70 @@ func (s *Syncer) chooseSide(npath string, lf *localFile, info os.FileInfo, local
 		return sideChoice{keep: true, aside: true}
 	}
 	return sideChoice{keep: true, share: true}
+}
+
+// gitOwner returns the root whose repository rel (inside r) belongs to: for
+// a submodule's git data under .git/modules, that submodule's root.
+func (r *syncRoot) gitOwner(rel string) *syncRoot {
+	if rest, ok := strings.CutPrefix(rel, ".git/modules/"); ok {
+		if m := r.moduleFor(rest); m != "" && r.moduleRoot[m] != nil {
+			return r.moduleRoot[m]
+		}
+	}
+	return r
+}
+
+// staleLeads reports whether this Mac's checkout of the stale repository at
+// root contains the commit the stored copy's HEAD names: the stored copy is
+// behind, frozen. A stored copy that is ahead (another Mac, perhaps still on
+// an older Stradl, kept working) or that can't be compared is not. Worked
+// out once per pass, after the objects batch.
+func (s *Syncer) staleLeads(root *syncRoot) bool {
+	root.leadsOnce.Do(func() {
+		local, err := runGit(root.dir, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+		if err != nil {
+			return
+		}
+		stored := s.storedHead(root)
+		if stored == "" {
+			return
+		}
+		if stored == strings.TrimSpace(string(local)) {
+			root.leads = true
+			return
+		}
+		_, err = runGit(root.dir, "merge-base", "--is-ancestor", stored, strings.TrimSpace(string(local)))
+		root.leads = err == nil
+	})
+	return root.leads
+}
+
+// storedHead returns the commit the stored copy of root's repository has
+// checked out ("" when unknown).
+func (s *Syncer) storedHead(root *syncRoot) string {
+	ctx := context.Background()
+	get := func(np string) string {
+		data, _, err := s.fetch(ctx, np, s.engineRemoteKey(np), nil, s.home)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(data))
+	}
+	head := get(root.gitData + "/HEAD")
+	if gitSHARe.MatchString(head) {
+		return head
+	}
+	ref, ok := strings.CutPrefix(head, "ref: ")
+	if !ok || !strings.HasPrefix(ref, "refs/heads/") {
+		return ""
+	}
+	if sha := get(root.gitData + "/" + ref); gitSHARe.MatchString(sha) {
+		return sha
+	}
+	if packed := get(root.gitData + "/packed-refs"); packed != "" {
+		return packedBranches([]byte(packed))[strings.TrimPrefix(ref, "refs/heads/")]
+	}
+	return ""
 }
 
 // repoSyncedBefore reports whether this Mac had synced the git repository
@@ -427,15 +496,30 @@ func gitUnionPath(npath string) bool {
 	return strings.HasPrefix(inside, "objects/") || strings.HasPrefix(inside, "refs/") || strings.HasPrefix(inside, "logs/refs/")
 }
 
+// gitOperationState is what git keeps while a merge, cherry-pick, revert,
+// rebase or bisect is under way in a checkout. It describes this Mac's
+// checkout (whose index never syncs either); arriving on another Mac it
+// would put that checkout mid-merge.
+var gitOperationState = map[string]bool{
+	"MERGE_HEAD": true, "MERGE_MSG": true, "MERGE_MODE": true, "MERGE_AUTOSTASH": true,
+	"AUTO_MERGE": true, "CHERRY_PICK_HEAD": true, "REVERT_HEAD": true,
+	"rebase-merge": true, "rebase-apply": true, "sequencer": true,
+}
+
 // gitPerMac reports the parts of .git that belong to one Mac and never sync:
 // the index, a cache of this checkout's file stats that git rewrites on every
 // status (it is rebuilt from HEAD when sync moves HEAD, see reindexRepos),
-// and linked worktrees' admin folders, which hold absolute paths into this
+// an operation under way (gitOperationState), and linked worktrees' admin
+// folders, which hold absolute paths into this
 // Mac's home and which `git worktree prune` deletes on any Mac lacking them.
 func gitPerMac(rel string) bool {
 	_, inside, ok := gitDirSplit(rel)
 	if !ok {
 		return false
+	}
+	first, _, _ := strings.Cut(inside, "/")
+	if gitOperationState[first] || strings.HasPrefix(first, "BISECT_") {
+		return true
 	}
 	return inside == "index" || inside == "worktrees" || strings.HasPrefix(inside, "worktrees/")
 }
@@ -496,10 +580,11 @@ func (s *Syncer) reindexRepos(roots []*syncRoot) {
 			if target, err := gitfileTarget(r.dir); err == nil && target != "" {
 				// A submodule: its git data is in the superproject's
 				// .git/modules (only inside home, past the privacy gate).
-				if _, ok := homeRel(s.home, target); !ok || s.folderGate(target) != nil {
+				t, ok := s.underHome(target)
+				if !ok || s.folderGate(t) != nil {
 					continue
 				}
-				gd = target
+				gd = t
 			}
 			if _, err := os.Stat(filepath.Join(gd, reindexMarker)); err == nil {
 				dirs[gd] = true

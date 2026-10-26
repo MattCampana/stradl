@@ -114,11 +114,17 @@ func TestFrozenFilesOnlyTheOldUploadHasStayOut(t *testing.T) {
 	alice.s.cfg.ExtraFolders = []string{lib}
 	alice.sync()
 	alice.sync() // lib has its marker now
-	if alice.exists("code/work/lib/old.go") {
-		t.Fatal("a file the newer clone deleted came back from the frozen copy")
-	}
+	// A file only the frozen copy has arrives (as an untracked file), but
+	// another Mac's merge in progress never does, and alice's history and
+	// files stay hers.
 	if alice.exists("code/work/lib/.git/MERGE_HEAD") {
 		t.Fatal("another Mac's old merge-in-progress state landed in alice's clone")
+	}
+	if alice.read("code/work/lib/lib.go") != "v1\n" || strings.Contains(git(t, lib, "log", "--oneline", "-1"), "v1") {
+		t.Fatalf("alice's clone changed: %s", git(t, lib, "log", "--oneline", "-1"))
+	}
+	if out := git(t, lib, "fsck", "--no-progress"); strings.Contains(out, "error") || strings.Contains(out, "missing") {
+		t.Fatalf("alice's repository is damaged:\n%s", out)
 	}
 }
 
@@ -313,6 +319,12 @@ func TestGitDirSplit(t *testing.T) {
 		{"p/.git/modules/deps/lib/index", "p/.git/modules/deps/lib", "index"},
 		{"p/.git/modules/a/modules/b/HEAD", "p/.git/modules/a/modules/b", "HEAD"},
 		{"p/.git/modules/lib/objects/ab/cd", "p/.git/modules/lib", "objects/ab/cd"},
+		{"p/.git/modules/infra/modules/HEAD", "p/.git/modules/infra/modules", "HEAD"},
+		{"p/.git/modules/app/config/HEAD", "p/.git/modules/app/config", "HEAD"},
+		{"p/.git/modules/app/config/refs/heads/main", "p/.git/modules/app/config", "refs/heads/main"},
+		{"p/.git/modules/lib/logs/refs/heads/main", "p/.git/modules/lib", "logs/refs/heads/main"},
+		{"p/.git/modules/tools/hooks/HEAD", "p/.git/modules/tools/hooks", "HEAD"},
+		{"p/.git/modules/lib/refs/heads/config", "p/.git/modules/lib", "refs/heads/config"},
 	} {
 		dir, inside, ok := gitDirSplit(c.in)
 		if !ok || dir != c.dir || inside != c.inside {

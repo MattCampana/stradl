@@ -152,33 +152,25 @@ func (s *SyncState) pruneCwds(present map[string]bool) {
 	}
 }
 
-// ignore keeps the remote copy etag of npath off this Mac (see Ignored).
-func (s *SyncState) ignore(npath, etag string) {
+// isStaleRoot reports whether the folder root at prefix is marked stale
+// (see syncRoot.stale).
+func (s *SyncState) isStaleRoot(prefix string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.Ignored == nil {
-		s.Ignored = make(map[string]string)
-	}
-	s.Ignored[npath] = etag
+	return s.StaleRoots[prefix]
 }
 
-// isIgnored reports whether the remote copy etag of npath is kept off.
-func (s *SyncState) isIgnored(npath, etag string) bool {
+func (s *SyncState) setStaleRoot(prefix string, stale bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e, ok := s.Ignored[npath]
-	return ok && e == etag
-}
-
-// pruneIgnored forgets ignored files keep reports false for.
-func (s *SyncState) pruneIgnored(keep func(npath string) bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for np := range s.Ignored {
-		if !keep(np) {
-			delete(s.Ignored, np)
-		}
+	if !stale {
+		delete(s.StaleRoots, prefix)
+		return
 	}
+	if s.StaleRoots == nil {
+		s.StaleRoots = make(map[string]bool)
+	}
+	s.StaleRoots[prefix] = true
 }
 
 // MarkLocalDeleted records that npath was deleted on this device while the
@@ -239,10 +231,9 @@ type SyncState struct {
 	// only transcripts it hasn't seen before.
 	TranscriptCwds map[string]cwdEntry `json:"transcript_cwds,omitempty"`
 
-	// Ignored holds remote files kept off this Mac, by ETag: files only the
-	// stale stored copy of a repository has (see syncRoot.stale). One comes
-	// in once its remote copy changes.
-	Ignored map[string]string `json:"ignored,omitempty"`
+	// StaleRoots are folder roots (by prefix) still settling a first
+	// contact with a stale stored copy (see syncRoot.stale).
+	StaleRoots map[string]bool `json:"stale_roots,omitempty"`
 
 	// savePath is the custom path to save state to (if set)
 	savePath string     `json:"-"`

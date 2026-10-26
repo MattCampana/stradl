@@ -78,18 +78,24 @@ type syncRoot struct {
 	modules  map[string]bool
 	moduleOf map[string]string
 	// stale marks a repository inside another folder whose files in storage
-	// an older Stradl uploaded as part of that folder: no Mac syncs it as its
-	// own yet (it has no marker), so they stopped updating when the Macs
-	// upgraded, and this Mac's copy is the reference (see chooseSide).
+	// an older Stradl uploaded as part of that folder: no Mac synced it as
+	// its own when this Mac first met it (it had no marker), so they may
+	// have stopped updating when the Macs upgraded. Where this Mac's
+	// checkout already contains the stored copy's commit (staleLeads), this
+	// Mac's copy is the reference (see chooseSide). It sticks
+	// (SyncState.StaleRoots) until a pass settles the repository.
 	stale bool
 	// inherited marks a repository inside another folder syncing on its own
 	// for the first time with state from when it synced as part of that
 	// folder.
 	inherited bool
-	// populated is set when this pass found files of the root here, and
-	// syncedHere when this Mac's state has any (it synced the root, or the
-	// folder holding it, before).
-	populated, syncedHere bool
+	// gitData is the npath prefix of the root's git data: <prefix>.git, or
+	// for a submodule its .git/modules/<name> in the superproject.
+	gitData string
+	// moduleRoot maps each entry of modules to the child root it belongs to.
+	moduleRoot map[string]*syncRoot
+	leadsOnce  gosync.Once
+	leads      bool
 }
 
 type localFile struct {
@@ -417,6 +423,39 @@ type job struct {
 	run   func() error
 }
 
+// ownsState reports whether this Mac's state holds files the folder root
+// itself owns (not those of a repository inside it).
+func (s *Syncer) ownsState(root *syncRoot) bool {
+	for np := range s.state.Snapshot() {
+		if rel, ok := strings.CutPrefix(np, root.prefix); ok && root.owns(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+// settleStaleRoots forgets the stale mark of each repository this pass
+// settled completely: nothing deferred, waiting for iCloud or failed in it.
+func (s *Syncer) settleStaleRoots(roots []*syncRoot, report *SyncReport) {
+	for _, r := range roots {
+		if r.kind != rootFolder || !s.state.isStaleRoot(r.prefix) || r.deferred {
+			continue
+		}
+		open := false
+		for _, list := range [][]string{report.Deferred, report.InICloud} {
+			for _, np := range list {
+				open = open || strings.HasPrefix(np, r.prefix)
+			}
+		}
+		for _, err := range report.Errors {
+			open = open || strings.HasPrefix(err.Error(), r.prefix) || strings.HasPrefix(err.Error(), r.label+":")
+		}
+		if !open {
+			s.state.setStaleRoot(r.prefix, false)
+		}
+	}
+}
+
 // insideFolder reports whether root lies inside another project folder.
 func insideFolder(roots []*syncRoot, root *syncRoot) bool {
 	for _, r := range roots {
@@ -511,11 +550,15 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		case err != nil:
 			return nil, fmt.Errorf("failed to scan %s: %w", root.dir, err)
 		}
-		if root.kind == rootFolder && err == nil && !wasRoot[root.prefix] && insideFolder(roots, root) && s.state.hasPrefix(root.prefix) {
+		if root.kind == rootFolder && err == nil && !wasRoot[root.prefix] && insideFolder(roots, root) && s.ownsState(root) {
 			root.inherited = true
 		}
-		root.populated = len(files) > 0
-		root.syncedHere = root.kind == rootFolder && s.state.hasPrefix(root.prefix)
+		if root.kind == rootFolder && err == nil && (root.stale || s.state.isStaleRoot(root.prefix)) && isRepoDir(root.dir) {
+			root.stale = true
+			if !dryRun {
+				s.state.setStaleRoot(root.prefix, true)
+			}
+		}
 		for rel, info := range files {
 			local[root.prefix+rel] = &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel)), info: info}
 		}
@@ -702,17 +745,6 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 				return nil
 			}})
 
-		case lf == nil && hasRemote && !hasState && root.kind == rootFolder && ((root.stale && root.populated && !root.syncedHere) || s.state.isIgnored(np, robj.ETag)):
-			// Only the stored copy of a stale repository has it, and this Mac
-			// has its own copy and never synced this one: a file this Mac's
-			// newer clone deleted, or git state from another Mac's old
-			// checkout (a merge in progress). It stays out on this Mac until
-			// someone changes it.
-			if !dryRun {
-				s.state.ignore(np, robj.ETag)
-			}
-			continue
-
 		case lf == nil && hasRemote:
 			if hasState && !remoteChanged {
 				if mirror {
@@ -829,15 +861,6 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		}})
 	}
 
-	if !dryRun {
-		s.state.pruneIgnored(func(np string) bool {
-			if _, _, in := active(np); !in {
-				return true
-			}
-			_, ok := remote[np]
-			return ok
-		})
-	}
 	jobs, report.Warnings = s.guardMassDeletes(jobs, roots, known)
 	report.Warnings = append(report.Warnings, lockWarnings...)
 	report.Warnings = append(report.Warnings, s.tccWarnings()...)
@@ -922,6 +945,9 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		wg.Wait()
 	}
 	stopSaving()
+	if ctx.Err() == nil { // a pass cut short settled nothing for sure
+		s.settleStaleRoots(roots, report)
+	}
 	s.reindexRepos(roots)
 
 	// Downloads in this pass may have delivered the new copy of a moved session.

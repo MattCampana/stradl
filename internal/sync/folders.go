@@ -172,14 +172,8 @@ func (s *Syncer) canonicalFolderIn(abs string, remoteRepos map[string]bool) stri
 	if s.folderGate(abs) != nil {
 		return "" // macOS hasn't let Stradl look there yet
 	}
-	if viaSymlink(s.home, abs) {
-		// A folder reached through a symbolic link syncs where it really
-		// is (inside home), never as the link.
-		real, ok := s.realUnderHome(abs)
-		if !ok {
-			return ""
-		}
-		return s.canonicalFolderIn(real, remoteRepos)
+	if fi, err := os.Lstat(abs); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		return "" // a link itself is never a folder to sync (folders inside one sync as links)
 	}
 	// The nearest enclosing repository below home wins; a dotfiles repository
 	// at home itself never swallows every folder.
@@ -195,33 +189,29 @@ func (s *Syncer) canonicalFolderIn(abs string, remoteRepos map[string]bool) stri
 	return rel
 }
 
-// realUnderHome resolves symbolic links in abs and returns where it really
-// is, spelled under home; false when that is outside home or unresolvable.
-func (s *Syncer) realUnderHome(abs string) (string, bool) {
-	real, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", false
+// enclosing returns the folder (absolute) among the home-relative rels that
+// abs lies in, the innermost; "" when none.
+func enclosing(home string, rels []string, abs string, fold bool) string {
+	best := ""
+	for _, c := range rels {
+		if insideAny(home, []string{c}, abs, fold) && len(c) > len(best) {
+			best = c
+		}
 	}
-	realHome, err := filepath.EvalSymlinks(s.home)
-	if err != nil {
-		return "", false
+	if best == "" {
+		return ""
 	}
-	r, ok := homeRel(realHome, real)
-	if !ok {
-		return "", false
-	}
-	out := filepath.Join(s.home, filepath.FromSlash(r))
-	return out, !viaSymlink(s.home, out)
+	return filepath.Join(home, filepath.FromSlash(best))
 }
 
-// viaSymlink reports whether a folder below home, or one on the way to it,
+// viaSymlink reports whether a folder below base, or one on the way to it,
 // is a symbolic link.
-func viaSymlink(home, abs string) bool {
-	rel, ok := homeRel(home, abs)
+func viaSymlink(base, abs string) bool {
+	rel, ok := homeRel(base, abs)
 	if !ok {
 		return false
 	}
-	p := filepath.Clean(home)
+	p := filepath.Clean(base)
 	for _, seg := range strings.Split(rel, "/") {
 		p = filepath.Join(p, seg)
 		fi, err := os.Lstat(p)
@@ -282,14 +272,10 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 			continue
 		}
 		p = filepath.Clean(p)
-		if viaSymlink(s.home, p) {
-			real, ok := s.realUnderHome(p)
-			if !ok {
-				continue
-			}
-			p = real // judged by where it really is
-		}
-		if insideAny(s.home, primary, p, fold) {
+		// Only inside a folder found above (which passed the privacy gate),
+		// and never through a link inside it (code/app/shared -> ../lib):
+		// that's the link's folder's business.
+		if top := enclosing(s.home, primary, p, fold); top != "" && !viaSymlink(top, p) {
 			add(p)
 		}
 	}
@@ -310,6 +296,9 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	for i := 0; i < len(candidates); i++ {
 		if super := s.superproject(candidates[i]); super != "" {
 			add(super)
+		}
+		if main := s.mainWorktree(candidates[i]); main != "" {
+			add(main)
 		}
 	}
 	candidates = s.dropSkippedNested(candidates, fold)
@@ -379,6 +368,42 @@ func (s *Syncer) dropSkippedNested(candidates []string, fold bool) []string {
 		}
 	}
 	return out
+}
+
+// mainWorktree returns, for a linked worktree (the Claude app's
+// .claude/worktrees/<name>, or `git worktree add`), the folder of the
+// repository holding its git data, when that lies under home.
+func (s *Syncer) mainWorktree(rel string) string {
+	gitdir, err := gitfileTarget(filepath.Join(s.home, filepath.FromSlash(rel)))
+	if err != nil || gitdir == "" {
+		return ""
+	}
+	i := strings.LastIndex(filepath.ToSlash(gitdir), "/.git/worktrees/")
+	if i < 0 {
+		return ""
+	}
+	main, ok := s.underHome(filepath.FromSlash(filepath.ToSlash(gitdir)[:i]))
+	if !ok {
+		return ""
+	}
+	return main
+}
+
+// underHome returns abs spelled under home when it lies there, also when
+// it is spelled through home's real path (git records resolved paths).
+func (s *Syncer) underHome(abs string) (string, bool) {
+	if _, ok := homeRel(s.home, abs); ok {
+		return abs, true
+	}
+	real, err := filepath.EvalSymlinks(s.home)
+	if err != nil || real == filepath.Clean(s.home) {
+		return "", false
+	}
+	r, ok := homeRel(real, abs)
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(s.home, filepath.FromSlash(r)), true
 }
 
 // superproject returns, for a submodule (its .git file points into another
@@ -706,15 +731,17 @@ func (s *Syncer) folderRoot(rel string) *syncRoot {
 		paths:  []string{"."},
 		// A credential folder inside it (~/.config/gh in ~/.config) stays
 		// on each Mac.
-		include:  func(r string) bool { return s.folderInclude(r) && !credentialRel(rel+"/"+r) },
-		skipDir:  func(r string) bool { return s.folderSkipDir(r) || credentialRel(rel+"/"+r) },
-		kind:     rootFolder,
-		label:    "~/" + rel,
-		perm:     0644,
-		children: make(map[string]bool),
-		nested:   make(map[string]bool),
-		modules:  make(map[string]bool),
-		moduleOf: make(map[string]string),
+		include:    func(r string) bool { return s.folderInclude(r) && !credentialRel(rel+"/"+r) },
+		skipDir:    func(r string) bool { return s.folderSkipDir(r) || credentialRel(rel+"/"+r) },
+		kind:       rootFolder,
+		label:      "~/" + rel,
+		perm:       0644,
+		children:   make(map[string]bool),
+		nested:     make(map[string]bool),
+		modules:    make(map[string]bool),
+		moduleOf:   make(map[string]string),
+		moduleRoot: make(map[string]*syncRoot),
+		gitData:    FoldersPrefix + rel + "/.git",
 	}
 }
 
@@ -738,6 +765,12 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 				outer.children[child] = true
 				outer.modules[m] = true
 				outer.moduleOf[child] = m
+				outer.moduleRoot[m] = inner
+				if target, err := gitfileTarget(inner.dir); err == nil && target != "" && filepath.Clean(target) == filepath.Join(outer.dir, ".git", "modules", filepath.FromSlash(m)) {
+					// Its git data syncs in the superproject; the innermost
+					// superproject wins (roots are visited outer first).
+					inner.gitData = outer.prefix + ".git/modules/" + m
+				}
 				if len(s.cfg.FolderExclude) > 0 {
 					// folder_exclude patterns written for the outer folder
 					// ("lib/.env") still apply inside it.
@@ -756,7 +789,10 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 		// A registered submodule never belongs to the repository holding
 		// it, whatever its folder holds here (git tracks nothing under it).
 		for _, p := range submodulePaths(r.dir) {
-			if !r.children[p] {
+			// Not checked out (missing or empty) or checked out: either way
+			// the submodule's, unless it's a plain folder of files (a
+			// submodule converted to files, a source tarball).
+			if abs := filepath.Join(r.dir, filepath.FromSlash(p)); !r.children[p] && !(plainDir(abs) && hasEntries(abs)) {
 				r.nested[p] = true
 			}
 		}
@@ -839,8 +875,7 @@ func (r *syncRoot) owns(rel string) bool {
 	if rest, ok := strings.CutPrefix(rel, ".git/modules/"); ok {
 		// Submodule data syncs only for a submodule a session needs, each
 		// nested submodule's on its own.
-		m := innermostModule(rest)
-		return m != "" && r.modules[m]
+		return r.moduleFor(rest) != ""
 	}
 	if strings.Contains(rel, "/.git/") || strings.HasSuffix(rel, "/.git") {
 		return false // another repository's git data, or a stray .git: never this folder's
@@ -851,6 +886,20 @@ func (r *syncRoot) owns(rel string) bool {
 		}
 	}
 	return true
+}
+
+// moduleFor returns the needed submodule whose git data rest (what follows
+// .git/modules/) lies in: the longest entry of modules it falls under,
+// unless it lies in a nested submodule's data (modules/...) that isn't an
+// entry itself.
+func (r *syncRoot) moduleFor(rest string) string {
+	best := ""
+	for c := range r.modules {
+		if tail, ok := strings.CutPrefix(rest, c+"/"); ok && len(c) > len(best) && tail != "modules" && !strings.HasPrefix(tail, "modules/") {
+			best = c
+		}
+	}
+	return best
 }
 
 // wantsModuleDir reports whether the scan descends into .git/modules/<rest>:
@@ -897,12 +946,13 @@ func plainDir(abs string) bool {
 	}
 	if _, err := os.Lstat(filepath.Join(abs, ".git")); err == nil {
 		return !isRepoDir(abs)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return false
+	} else {
+		return errors.Is(err, fs.ErrNotExist)
 	}
-	// An empty folder isn't plain: it may be a submodule not checked out
-	// (`git submodule deinit`, or placed by placeSubmodules), and it has
-	// nothing of its own to protect.
+}
+
+// hasEntries reports whether the folder at abs holds anything.
+func hasEntries(abs string) bool {
 	f, err := os.Open(abs)
 	if err != nil {
 		return false
@@ -942,9 +992,13 @@ func submodulePaths(dir string) []string {
 // folderTracked reports whether cwd is, or lies in, a project folder this
 // Mac has synced files of.
 func (s *Syncer) folderTracked(cwd string) bool {
+	known := make(map[string]bool)
+	for _, f := range s.knownFolderList() {
+		known[f] = true
+	}
 	rel, ok := homeRel(s.home, cwd)
 	for ok && rel != "." && rel != "" {
-		if s.state != nil && s.state.hasPrefix(FoldersPrefix+rel+"/") {
+		if known[rel] && s.state != nil && s.state.hasPrefix(FoldersPrefix+rel+"/") {
 			return true
 		}
 		rel = path.Dir(rel)
@@ -989,7 +1043,7 @@ func (s *Syncer) folderInclude(rel string) bool {
 		return false
 	case strings.HasSuffix(base, ".lock") && hasGitSegment(path.Dir(rel)):
 		return false
-	case gitPerMac(rel):
+	case gitPerMac(rel), claudeWorktree(rel):
 		return false
 	}
 	return !s.cfg.IsBuildArtifact(rel) && !s.cfg.IsFolderExcluded(rel)
@@ -998,7 +1052,15 @@ func (s *Syncer) folderInclude(rel string) bool {
 // folderSkipDir reports directories inside a project folder that are left out
 // entirely.
 func (s *Syncer) folderSkipDir(rel string) bool {
-	return s.cfg.IsBuildArtifact(rel) || s.cfg.IsFolderExcluded(rel) || gitPerMac(rel)
+	return s.cfg.IsBuildArtifact(rel) || s.cfg.IsFolderExcluded(rel) || gitPerMac(rel) || claudeWorktree(rel)
+}
+
+// claudeWorktree reports the Claude app's worktrees folder inside a project
+// (.claude/worktrees) and what's in it: linked git worktrees of one Mac,
+// whose git data never syncs. A worktree a session works in syncs as its
+// own folder (with the repository holding its git data, see mainWorktree).
+func claudeWorktree(rel string) bool {
+	return strings.Contains("/"+rel+"/", "/.claude/worktrees/")
 }
 
 // scanFolder lists a project folder's files. It returns errGitBusy when git
@@ -1100,7 +1162,8 @@ func (s *Syncer) gitfileBusy(dir string) error {
 	if err != nil || gitdir == "" {
 		return nil
 	}
-	if _, ok := homeRel(s.home, gitdir); !ok {
+	gitdir, ok := s.underHome(gitdir)
+	if !ok {
 		return nil // another volume (whose first read macOS may ask about) or system folder: not checked
 	}
 	if err := s.folderGate(gitdir); err != nil {
