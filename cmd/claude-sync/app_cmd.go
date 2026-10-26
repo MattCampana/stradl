@@ -412,7 +412,6 @@ func absPath(p string) string {
 	return p
 }
 
-
 // --- folders -----------------------------------------------------------------
 
 func foldersCmd() *cobra.Command {
