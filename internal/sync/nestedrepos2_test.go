@@ -284,3 +284,35 @@ func TestProbeIgnoresReposInsideABusyFolder(t *testing.T) {
 		t.Fatal("an edit sync would sit out moved the fingerprint")
 	}
 }
+
+func TestPlaceSubmodulesLeavesSyncedOnesAlone(t *testing.T) {
+	needGit(t)
+	home := t.TempDir()
+	src := filepath.Join(home, "libsrc")
+	parent := filepath.Join(home, "p")
+	for _, d := range []string{src, parent} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+		git(t, d, "init", "-q")
+	}
+	if err := os.WriteFile(filepath.Join(src, "a"), []byte("a\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "add", "-A")
+	git(t, src, "commit", "-q", "-m", "a")
+	git(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", src, "lib")
+	lib := filepath.Join(parent, "lib")
+	if err := os.RemoveAll(lib); err != nil {
+		t.Fatal(err)
+	}
+	// lib syncs on its own (and is missing here): left alone.
+	placeSubmodules(parent, filepath.Join(parent, ".git"), map[string]bool{lib: true})
+	if _, err := os.Lstat(lib); err == nil {
+		t.Fatal("created the folder of a submodule that syncs on its own")
+	}
+	placeSubmodules(parent, filepath.Join(parent, ".git"), nil)
+	if fi, err := os.Stat(lib); err != nil || !fi.IsDir() {
+		t.Fatal("an unsynced submodule's folder should be created")
+	}
+}

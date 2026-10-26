@@ -497,7 +497,11 @@ func (s *Syncer) reindexRepos(roots []*syncRoot) {
 	if dirs == nil {
 		dirs = make(map[string]bool)
 	}
+	rootDirs := make(map[string]bool)
 	for _, r := range roots {
+		if r.kind == rootFolder {
+			rootDirs[filepath.Clean(r.dir)] = true
+		}
 		if r.kind == rootFolder && !r.deferred {
 			gd := filepath.Join(r.dir, ".git")
 			if _, err := os.Stat(filepath.Join(gd, reindexMarker)); err == nil {
@@ -519,15 +523,17 @@ func (s *Syncer) reindexRepos(roots []*syncRoot) {
 		}
 		_, _ = runGit(work, "--git-dir="+gitDir, "--work-tree="+work, "update-index", "-q", "--refresh")
 		_ = os.Remove(filepath.Join(gitDir, reindexMarker))
-		placeSubmodules(work, gitDir)
+		placeSubmodules(work, gitDir, rootDirs)
 	}
 }
 
 // placeSubmodules creates the empty folder of each submodule HEAD records
 // that this Mac doesn't have, as a clone without its submodules has them:
 // a submodule no session works in doesn't sync, and a missing folder makes
-// git show it as deleted, one `git add -A` away from committing that.
-func placeSubmodules(work, gitDir string) {
+// git show it as deleted, one `git add -A` away from committing that. A
+// submodule that syncs on its own (in roots) is left to its own sync: an
+// empty folder there would make its files look deleted.
+func placeSubmodules(work, gitDir string, roots map[string]bool) {
 	out, err := runGit(work, "--git-dir="+gitDir, "--work-tree="+work, "ls-files", "-s", "-z")
 	if err != nil {
 		return
@@ -541,6 +547,9 @@ func placeSubmodules(work, gitDir string) {
 			continue
 		}
 		abs := filepath.Join(work, filepath.FromSlash(p))
+		if roots[filepath.Clean(abs)] {
+			continue
+		}
 		if _, err := os.Lstat(abs); errors.Is(err, fs.ErrNotExist) {
 			_ = os.MkdirAll(abs, 0755)
 		}

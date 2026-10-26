@@ -490,13 +490,13 @@ func TestCwdsRereadAfterAMergeInsertsLinesEarlier(t *testing.T) {
 	if err := os.WriteFile(p, []byte(first+last), 0600); err != nil {
 		t.Fatal(err)
 	}
-	e := updateCwds(p, cwdEntry{}, int64(len(first+last)))
+	e := updateCwds(p, cwdEntry{}, int64(len(first+last)), "/h")
 	// Another Mac's line lands between them, by time.
 	merged := first + cwdLine("u2", "/h/code/work/lib") + last
 	if err := os.WriteFile(p, []byte(merged), 0600); err != nil {
 		t.Fatal(err)
 	}
-	e = updateCwds(p, e, int64(len(merged)))
+	e = updateCwds(p, e, int64(len(merged)), "/h")
 	if !slices.Contains(e.Cwds, "/h/code/work/lib") {
 		t.Fatalf("cwds = %v, missing the merged-in folder", e.Cwds)
 	}
@@ -509,7 +509,7 @@ func TestCwdsRereadAfterAMergeInsertsLinesEarlier(t *testing.T) {
 	_ = f.Close()
 	info, _ := os.Stat(p)
 	before := e.Scanned
-	e = updateCwds(p, e, info.Size())
+	e = updateCwds(p, e, info.Size(), "/h")
 	if !slices.Contains(e.Cwds, "/h/code/other") || e.Scanned <= before {
 		t.Fatalf("append: %+v", e)
 	}

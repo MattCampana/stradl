@@ -65,7 +65,7 @@ var cwdFieldRe = regexp.MustCompile(`"cwd"\s*:\s*("(?:[^"\\]|\\.)*")`)
 var filePathFieldRe = regexp.MustCompile(`"(?:file_path|notebook_path)"\s*:\s*("(?:[^"\\]|\\.)*")`)
 
 // maxTouched bounds the folders of touched files kept per transcript.
-const maxTouched = 2000
+const maxTouched = 500
 
 // homeRel returns abs relative to home as a slash path, when abs lies strictly
 // inside home.
@@ -451,7 +451,7 @@ func (s *Syncer) transcriptCwds(useCache bool) (first, later []string) {
 			e, ok = memCwds.get(np)
 		}
 		if !ok || e.Size != info.Size() || (e.Scanned == 0 && info.Size() > 0) {
-			e = updateCwds(abs, e, info.Size())
+			e = updateCwds(abs, e, info.Size(), s.home)
 			if useCache && s.state != nil {
 				s.state.setCachedCwd(np, e)
 			} else {
@@ -533,7 +533,7 @@ func (c *cwdCache) set(np string, e cwdEntry) {
 // it, say), and each one it worked in is needed. A transcript only grows, so
 // reading resumes where the last read stopped, at the end of the last whole
 // line; one that shrank (replaced) is read again from the start.
-func updateCwds(p string, e cwdEntry, size int64) cwdEntry {
+func updateCwds(p string, e cwdEntry, size int64, home string) cwdEntry {
 	f, err := os.Open(p)
 	if err != nil {
 		return e
@@ -576,6 +576,9 @@ func updateCwds(p string, e cwdEntry, size int64) cwdEntry {
 				var p string
 				if json.Unmarshal(m[1], &p) != nil || !filepath.IsAbs(p) {
 					continue
+				}
+				if _, ok := homeRel(home, filepath.Dir(filepath.Clean(p))); !ok {
+					continue // never a project folder
 				}
 				if dir := filepath.Dir(filepath.Clean(p)); !seen["\x00"+dir] && len(touched) < maxTouched {
 					seen["\x00"+dir] = true
