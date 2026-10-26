@@ -142,7 +142,7 @@ Remote changes are detected by version tags, not timestamps, so a Mac with a wro
 
 ## Limitations
 
-- **Build output isn't synced** (`node_modules`, `.venv`, `__pycache__`, `.next` and the like): each Mac rebuilds its own. Set `sync_build_artifacts: true` in `~/.stradl/config.yaml` to include it, and `folder_exclude` to leave out more.
+- **Build output isn’t synced** (`node_modules`, `.venv`, `__pycache__`, `.next`, Swift’s `.build` and the like): each Mac rebuilds its own. Set `sync_build_artifacts: true` in `~/.stradl/config.yaml` to include it, and `folder_exclude` to leave out more.
 - **Folders in Desktop, Documents or Downloads need your OK once.** macOS asks whether Stradl may read them the first time; click **Allow**. Until then those folders wait (everything else keeps syncing), and if you clicked Don't Allow, turn it on in System Settings → Privacy & Security → Files & Folders.
 - **A folder git is working in waits.** While git holds a lock in a repository (a commit or checkout in progress), that folder sits the sync out and catches up on the next one.
 - **macOS only** for the menu bar app. Linux builds run the same sync engine headless (`stradl agent run --headless`).

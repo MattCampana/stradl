@@ -25,7 +25,7 @@ Some things stay on each Mac:
 
 - Logins: `.credentials.json` and the rest of `~/.claude.json`.
 - Claude Code's per-process and per-Mac folders: `sessions`, `session-env`, `shell-snapshots`, `cache`, `statsig`, `telemetry`, `debug`, `logs`, `ide`, `backups`.
-- Build output: `node_modules`, `.venv`, `venv`, `__pycache__`, `*.pyc`, `.pytest_cache`, `.mypy_cache`, `.next`, `.nuxt`, `.gradle`, `.DS_Store`.
+- Build output: `node_modules`, `.venv`, `venv`, `__pycache__`, `*.pyc`, `.pytest_cache`, `.mypy_cache`, `.next`, `.nuxt`, `.gradle`, `.build` (Swift), `DerivedData` (Xcode), `.astro`, `.svelte-kit`, `.turbo`, `.parcel-cache`, `.DS_Store`.
 - Temporary and lock files.
 - `*.desktop-released.json` markers. The desktop app writes one next to a transcript when you delete or archive the session, and it tells that Mac's Claude Code it may expire the transcript; synced, it would expire the session on every Mac.
 
