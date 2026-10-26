@@ -526,3 +526,15 @@ func (s *SyncState) DetectChanges(claudeDir string, syncPaths []string, excludeF
 
 	return changes, nil
 }
+
+// hasPrefix reports whether any synced file's path starts with prefix.
+func (s *SyncState) hasPrefix(prefix string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for p := range s.Files {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
+}

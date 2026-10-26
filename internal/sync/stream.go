@@ -301,8 +301,8 @@ func commitTemp(tmp, abs string, expect os.FileInfo, perm os.FileMode, roots ...
 		cur, err = os.Stat(abs)
 	}
 	if err == nil {
-		if expect != nil && (cur.Size() != expect.Size() || !cur.ModTime().Equal(expect.ModTime())) {
-			return errLocalChanged
+		if expect == nil || cur.Size() != expect.Size() || !cur.ModTime().Equal(expect.ModTime()) {
+			return errLocalChanged // changed, or created here while the pass ran
 		}
 	} else if expect != nil {
 		return errLocalChanged // deleted meanwhile

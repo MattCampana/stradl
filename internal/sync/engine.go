@@ -213,11 +213,18 @@ func isDeviceLocalFile(rel string) bool {
 }
 
 // unionPath reports paths that keep union semantics: transcripts and
-// everything else under projects/, the prompt history, and desktop sidebar
-// records. A local delete stays local and a vanished remote copy is restored.
-// Every other path mirrors deletes between Macs.
+// everything else under projects/, the prompt history, desktop sidebar
+// records, and git's objects and refs. A local delete stays local and a
+// vanished remote copy is restored. Every other path mirrors deletes between
+// Macs.
+//
+// git deletes objects and loose refs when it packs them (gc, pack-refs) or
+// prunes what it no longer needs itself; mirrored, that would remove commits
+// another Mac still builds on, or empty .git/refs. So a Mac keeps every
+// object and ref another Mac had; each Mac's own gc tidies its copy.
 func unionPath(npath string) bool {
-	return strings.HasPrefix(npath, "projects/") || npath == "history.jsonl" || strings.HasPrefix(npath, DesktopPrefix)
+	return strings.HasPrefix(npath, "projects/") || npath == "history.jsonl" || strings.HasPrefix(npath, DesktopPrefix) ||
+		gitUnionPath(npath)
 }
 
 func (s *Syncer) rootFor(roots []*syncRoot, npath string) (*syncRoot, string) {
@@ -397,6 +404,15 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		files, err := s.scanRoot(root)
 		var busy *gitBusyError
 		switch {
+		case errors.Is(err, errFolderMissing):
+			if s.state.hasPrefix(root.prefix) && !s.cfg.AllowMassDelete {
+				// It synced from here before: a rename, a re-clone in
+				// progress or a deleted folder. Deleting it on every Mac
+				// takes a confirmation.
+				root.deferred = true
+				lockWarnings = append(lockWarnings, fmt.Sprintf("%s synced from this Mac before but is gone now, so it wasn't deleted on your other Macs. If you deleted it on purpose and want it gone everywhere, run 'stradl sync --allow-mass-delete'.", root.label))
+				continue
+			}
 		case errors.As(err, &busy):
 			root.deferred = true
 			report.Deferred = append(report.Deferred, root.prefix)
@@ -445,6 +461,8 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	}
 
 	known := s.state.Snapshot()
+	s.known = known
+	defer func() { s.known = nil }()
 	paths := make(map[string]bool, len(local)+len(remote))
 	for p := range local {
 		paths[p] = true
@@ -462,12 +480,13 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	loaded, manifestETag := s.loadMtimes(ctx)
 	manifest := &mtimeBook{m: loaded}
 	s.modes = s.loadModes(ctx, hasModes)
-	s.repos = &repoVerdicts{m: make(map[string]*repoVerdictEntry)}
-	defer func() { s.modes, s.repos = nil, nil }()
+	defer func() { s.modes = nil }()
 	homeDir := s.home
 	repos := newRepoIndex(homeDir)
 
 	var jobs []job
+	var objectChecks []objectCheck
+	symlinked := make(map[string]bool)
 
 	sorted := make([]string, 0, len(paths))
 	for p := range paths {
@@ -482,6 +501,11 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		st, hasState := known[np]
 		root, rel, _ := active(np)
 
+		if lf == nil && hasRemote && root.kind != rootFolder && s.underSymlink(root, rel, symlinked) {
+			// A symbolic link here (a dotfile kept elsewhere): never write
+			// over it or through it.
+			continue
+		}
 		if lf == nil && hasRemote {
 			// On a case-insensitive volume another Mac's spelling of a folder
 			// (~/Code vs ~/code) names a file the scan listed under this Mac's
@@ -535,7 +559,16 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			if restored {
 				kind = "restore"
 			}
+			looseRef := !hasState && root.kind == rootFolder && gitBranchRefRe.MatchString(np) && !s.repoSyncedBefore(np)
 			jobs = append(jobs, job{np, kind, root, func() error {
+				if looseRef {
+					if settled, err := s.firstContactLooseRef(ctx, np, lf); settled || err != nil {
+						if settled {
+							rm.add(&report.Conflicts, np)
+						}
+						return err
+					}
+				}
 				if err := s.reconcileUpload(ctx, np, lf, "", rm, repos, manifest, homeDir); err != nil {
 					return err
 				}
@@ -555,11 +588,24 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 					}})
 					continue
 				}
-				// Deleted on this device; keep it deleted here only.
-				if !st.LocalDeleted && !dryRun {
-					s.state.MarkLocalDeleted(np, robj.ETag)
+				switch {
+				case root.kind == rootFolder && gitBranchRefRe.MatchString(np):
+					// A branch deleted here (or packed by gc) comes back
+					// while storage has it: another Mac's HEAD may name it,
+					// and a packed copy of it is merged on the way in.
+				case root.kind == rootFolder && gitLooseObject(np):
+					// gc packed it, or pruned it: fetch it again only if
+					// git can't find it here (a commit from another Mac may
+					// build on it).
+					objectChecks = append(objectChecks, objectCheck{np: np, rel: rel, root: root, obj: robj})
+					continue
+				default:
+					// Deleted on this device; keep it deleted here only.
+					if !st.LocalDeleted && !dryRun {
+						s.state.MarkLocalDeleted(np, robj.ETag)
+					}
+					continue
 				}
-				continue
 			}
 			if isLive {
 				rm.add(&report.Deferred, np)
@@ -572,6 +618,22 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			}
 			jobs = append(jobs, job{np, kind, root, func() error {
 				target := &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel))}
+				if root.kind == rootFolder {
+					if packed, ok := shadowsPackedRef(np, target.abs); ok {
+						// This Mac keeps the branch in packed-refs: write
+						// that value as a loose ref and merge it like any
+						// ref the two Macs both moved.
+						if err := writeFolderContent(root.dir, target.abs, []byte(packed+"\n"), nil, 0644); err != nil {
+							return err
+						}
+						info, err := os.Lstat(target.abs)
+						if err != nil {
+							return err
+						}
+						target.info = info
+						return s.reconcileBoth(ctx, np, target, rm, repos, manifest, homeDir)
+					}
+				}
 				if err := s.reconcileDownload(ctx, np, target, robj, nil, rm, repos, manifest, homeDir); err != nil {
 					return err
 				}
@@ -624,6 +686,14 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		}
 	}
 
+	for _, c := range s.missingObjects(objectChecks, dryRun) {
+		c := c
+		jobs = append(jobs, job{c.np, "download", c.root, func() error {
+			target := &localFile{root: c.root, rel: c.rel, abs: filepath.Join(c.root.dir, filepath.FromSlash(c.rel))}
+			return s.reconcileDownload(ctx, c.np, target, c.obj, nil, rm, repos, manifest, homeDir)
+		}})
+	}
+
 	jobs, report.Warnings = s.guardMassDeletes(jobs, roots, known)
 	report.Warnings = append(report.Warnings, lockWarnings...)
 
@@ -656,8 +726,8 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	// folders first, then git's refs and index, then sidebar records, so a
 	// ref never lands on a device before the objects it points to and a
 	// record never before its transcript and its folder.
-	// Conflicts in a working tree wait for the objects too: deciding them
-	// compares this Mac's commit with the other Mac's (repoVerdict).
+	// Conflicts in a working tree run before git's files change: deciding
+	// them asks git whether this Mac's copy is committed (chooseSide).
 	var files, worktree, gitMeta, records []job
 	for _, j := range jobs {
 		switch {
@@ -701,6 +771,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		wg.Wait()
 	}
 	stopSaving()
+	s.reindexRepos(roots)
 
 	// Downloads in this pass may have delivered the new copy of a moved session.
 	report.Moved = append(report.Moved, s.foldMovedSessions(liveSessionIDs(s.claudeDir))...)
@@ -1118,7 +1189,14 @@ func (s *Syncer) reconcileMode(npath string, lf *localFile, st FileState) {
 // writeContent writes downloaded content to lf's path with mode perm.
 func (s *Syncer) writeContent(lf *localFile, data []byte, expect os.FileInfo, perm os.FileMode) error {
 	if lf.root.kind == rootFolder {
-		return writeFolderContent(lf.root.dir, lf.abs, data, expect, perm)
+		if !gitRefsReady(lf.abs, data) {
+			return errLocalChanged // its commits haven't arrived yet: next pass
+		}
+		if err := writeFolderContent(lf.root.dir, lf.abs, data, expect, perm); err != nil {
+			return err
+		}
+		s.wroteGitFile(lf.abs)
+		return nil
 	}
 	return writeLocalPerm(lf.abs, data, expect, perm, s.claudeDir, lf.root.dir)
 }
@@ -1284,6 +1362,7 @@ func (s *Syncer) reconcileDownloadStream(ctx context.Context, npath string, lf *
 			}
 		}
 	}
+	defer s.wroteGitFile(lf.abs)
 	if err := commitTemp(tmp, lf.abs, expect, perm, s.claudeDir, lf.root.dir); err != nil {
 		return err
 	}
@@ -1363,7 +1442,12 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 		}
 		remoteData, etag, err := s.fetch(ctx, npath, key, repos, home)
 		if errors.Is(err, errRemoteControlled) {
-			err = nil // already on this Mac: merge as usual
+			if !remoteControlled(localData) {
+				// Another Mac serves it over Remote Control: never upload
+				// over its live record, nor show it here twice.
+				return s.holdRemoteControlled(npath, lf, info, etag)
+			}
+			err = nil // both serve it: merge as usual
 		}
 		if errors.Is(err, errTooLargeForMemory) {
 			return s.reconcileBothStream(ctx, npath, lf, rm, manifest)
@@ -1410,20 +1494,31 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 			}
 		default:
 			// Non-mergeable: one copy keeps the name, the other is kept.
-			side := s.chooseSide(ctx, npath, lf, info, localData, remoteData, manifest.get(key))
+			side := s.chooseSide(npath, lf, info, localData, remoteData, manifest.get(key))
 			loser, origin := remoteData, ConflictFromOtherMac
 			if side.local {
 				result, uploadThere = localData, true
 			} else {
 				result, writeHere = remoteData, true
 				loser, origin = localData, ConflictFromThisMac
+				if strings.HasSuffix(npath, ".git/packed-refs") && s.state.GetFile(npath) == nil {
+					// First contact: keep the refs only this Mac has.
+					result = mergePackedRefs(remoteData, localData)
+					uploadThere = !bytes.Equal(result, remoteData)
+				}
 			}
 			if side.keep {
 				conflict = true
-				if err := s.keepLoser(npath, lf.abs, loser, origin, side.aside); err != nil {
+				var err error
+				if side.share {
+					err = s.shareCopy(lf, info, "", loser)
+				} else {
+					err = s.keepLoser(npath, lf.abs, loser, origin, side.aside)
+				}
+				if err != nil {
 					return err
 				}
-				keepLosingBranch(npath, lf.abs, result, loser)
+				s.keepLosingBranch(ctx, npath, lf.abs, result, loser, !side.local)
 			}
 		}
 
@@ -1524,16 +1619,17 @@ func (s *Syncer) settleStreamed(ctx context.Context, npath string, lf *localFile
 		return true, nil
 	}
 	key := s.engineRemoteKey(npath)
-	side := s.chooseSide(ctx, npath, lf, info, nil, nil, manifest.get(key))
+	side := s.chooseSide(npath, lf, info, nil, nil, manifest.get(key))
 	if side.local {
+		// Keep the other Mac's copy before replacing it in storage.
+		if err := s.keepConflictFile(npath, lf.abs, tmp, ConflictFromOtherMac, true, false); err != nil {
+			return true, err
+		}
 		newETag, hash, err := s.uploadLocal(ctx, npath, lf.abs, info, etag)
 		if errors.Is(err, storage.ErrPreconditionFailed) {
 			return false, nil
 		}
 		if err != nil {
-			return true, err
-		}
-		if err := s.keepConflictFile(npath, lf.abs, tmp, ConflictFromOtherMac, true, false); err != nil {
 			return true, err
 		}
 		s.recordMtime(manifest, npath, info.ModTime())
@@ -1543,7 +1639,8 @@ func (s *Syncer) settleStreamed(ctx context.Context, npath string, lf *localFile
 		if s.transcriptLiveNow(npath) {
 			return true, errLocalChanged
 		}
-		if isSymlink(info) {
+		switch {
+		case isSymlink(info):
 			data, err := readLocalContent(lf.abs, info)
 			if err == nil {
 				err = s.keepLoser(npath, lf.abs, data, ConflictFromThisMac, side.aside)
@@ -1551,8 +1648,14 @@ func (s *Syncer) settleStreamed(ctx context.Context, npath string, lf *localFile
 			if err != nil {
 				return true, err
 			}
-		} else if err := s.keepConflictFile(npath, lf.abs, lf.abs, ConflictFromThisMac, false, side.aside); err != nil {
-			return true, err
+		case side.share:
+			if err := s.shareCopy(lf, info, lf.abs, nil); err != nil {
+				return true, err
+			}
+		default:
+			if err := s.keepConflictFile(npath, lf.abs, lf.abs, ConflictFromThisMac, false, side.aside); err != nil {
+				return true, err
+			}
 		}
 		if err := commitTemp(tmp, lf.abs, info, perm, s.claudeDir, lf.root.dir); err != nil {
 			return true, err
@@ -1648,9 +1751,23 @@ func writeLocal(abs string, data []byte, expect os.FileInfo, roots ...string) er
 }
 
 // writeLocalPerm is writeLocal leaving the file with mode perm.
+// overwrite, passed as expect to writeLocalPerm, replaces whatever is at the
+// path. A nil expect means the file must not exist yet: a download of a file
+// new to this Mac never replaces one created here while the pass ran.
+var overwrite os.FileInfo = overwriteInfo{}
+
+type overwriteInfo struct{ os.FileInfo }
+
 func writeLocalPerm(abs string, data []byte, expect os.FileInfo, perm os.FileMode, roots ...string) error {
 	if err := checkInsideRoots(abs, roots...); err != nil {
 		return err
+	}
+	mustBeNew := expect == nil
+	if expect == overwrite {
+		expect = nil
+	}
+	if _, err := os.Lstat(abs); err == nil && mustBeNew {
+		return errLocalChanged
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), dirPermFor(perm)); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
@@ -1702,6 +1819,16 @@ func writeLocalPerm(abs string, data []byte, expect os.FileInfo, perm os.FileMod
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if mustBeNew {
+		// Link fails if a file appeared at abs since the check above.
+		if err := os.Link(tmpPath, abs); err != nil {
+			if os.IsExist(err) {
+				return errLocalChanged
+			}
+			return err
+		}
+		return nil
+	}
 	return os.Rename(tmpPath, abs)
 }
 
@@ -1716,7 +1843,7 @@ const (
 
 func writeConflictCopy(abs string, data []byte, origin string) error {
 	p := abs + ".conflict." + time.Now().Format("20060102-150405") + "." + origin
-	return os.WriteFile(p, data, 0600)
+	return os.WriteFile(freeName(p), data, 0600)
 }
 
 // --- mtime manifest ------------------------------------------------------------
@@ -1952,4 +2079,33 @@ func (s *Syncer) saveModes(ctx context.Context, b *modeBook) error {
 		}
 	}
 	return fmt.Errorf("modes manifest kept changing; will retry next sync")
+}
+
+// underSymlink reports whether rel inside root is a symbolic link, or lies
+// below one, on this Mac. cache remembers directories already checked.
+func (s *Syncer) underSymlink(root *syncRoot, rel string, cache map[string]bool) bool {
+	parts := strings.Split(rel, "/")
+	cur := root.dir
+	for i, part := range parts {
+		cur = filepath.Join(cur, part)
+		last := i == len(parts)-1
+		if v, ok := cache[cur]; ok && !last {
+			if v {
+				return true
+			}
+			continue
+		}
+		fi, err := os.Lstat(cur)
+		link := err == nil && isSymlink(fi)
+		if !last {
+			cache[cur] = link
+		}
+		if link {
+			return true
+		}
+		if err != nil {
+			return false // missing from here down
+		}
+	}
+	return false
 }

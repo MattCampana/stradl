@@ -68,9 +68,13 @@ type Syncer struct {
 	// modes is the shared modes manifest during a pass.
 	modes *modeBook
 
-	// repos caches, during a pass, which Mac leads in each git repository
-	// that exists on both sides (see repoVerdict).
-	repos *repoVerdicts
+	// known is the sync state as the pass found it, before any job ran.
+	known map[string]FileState
+
+	// reindex collects the .git folders whose HEAD or refs this pass changed
+	// (see reindexRepos).
+	reindexMu sync.Mutex
+	reindex   map[string]bool
 }
 
 type SyncResult struct {

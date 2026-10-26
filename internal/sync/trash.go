@@ -56,7 +56,10 @@ func (s *Syncer) moveToTrash(abs string, expect os.FileInfo, stopAt string) (str
 	if err := moveFile(abs, dst); err != nil {
 		return "", err
 	}
-	pruneEmptyDirs(filepath.Dir(abs), stopAt)
+	if !strings.Contains(filepath.ToSlash(abs), "/.git/") {
+		// git needs its folders even when empty (refs/heads after pack-refs).
+		pruneEmptyDirs(filepath.Dir(abs), stopAt)
+	}
 	return dst, nil
 }
 
@@ -184,4 +187,33 @@ func (s *Syncer) keepConflictFile(npath, abs, src, origin string, move, aside bo
 
 func conflictSuffix(origin string) string {
 	return ".conflict." + time.Now().Format("20060102-150405") + "." + origin
+}
+
+// shareCopy saves this Mac's copy of a file whose reference copy came from
+// another Mac as <file>.from-<this Mac> beside it, an ordinary file that
+// syncs, so every Mac sees both versions. The copy comes from data, or from
+// the file src when src isn't "".
+func (s *Syncer) shareCopy(lf *localFile, info os.FileInfo, src string, data []byte) error {
+	p := freeName(lf.abs + s.shareSuffix())
+	if err := checkNoSymlinkParents(lf.root.dir, p); err != nil {
+		return err
+	}
+	if src == "" {
+		return writeFileAtomic(p, data, info.Mode().Perm())
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(p)
+		return err
+	}
+	return out.Close()
 }

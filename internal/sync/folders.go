@@ -419,6 +419,8 @@ func (s *Syncer) folderInclude(rel string) bool {
 		return false
 	case strings.HasSuffix(base, ".lock") && hasGitSegment(path.Dir(rel)):
 		return false
+	case gitPerMac(rel):
+		return false
 	}
 	return !s.cfg.IsBuildArtifact(rel) && !s.cfg.IsFolderExcluded(rel)
 }
@@ -426,7 +428,7 @@ func (s *Syncer) folderInclude(rel string) bool {
 // folderSkipDir reports directories inside a project folder that are left out
 // entirely.
 func (s *Syncer) folderSkipDir(rel string) bool {
-	return s.cfg.IsBuildArtifact(rel) || s.cfg.IsFolderExcluded(rel)
+	return s.cfg.IsBuildArtifact(rel) || s.cfg.IsFolderExcluded(rel) || gitPerMac(rel)
 }
 
 // scanFolder lists a project folder's files. It returns errGitBusy when git
@@ -436,7 +438,7 @@ func (s *Syncer) folderSkipDir(rel string) bool {
 func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 	files := make(map[string]os.FileInfo)
 	if _, err := os.Stat(root.dir); os.IsNotExist(err) {
-		return files, nil
+		return files, errFolderMissing
 	}
 	own := []string{filepath.Clean(s.claudeDir), filepath.Clean(s.stateDir())}
 	err := filepath.WalkDir(root.dir, func(p string, d fs.DirEntry, err error) error {
@@ -476,6 +478,9 @@ func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 		if err != nil {
 			return err
 		}
+		if d.Name() == ".git" && worktreeLink(p) {
+			return nil
+		}
 		files[rel] = info
 		return nil
 	})
@@ -483,6 +488,22 @@ func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 		return nil, err
 	}
 	return files, nil
+}
+
+// errFolderMissing reports a project folder that doesn't exist on this Mac.
+var errFolderMissing = errors.New("folder is missing on this Mac")
+
+// worktreeLink reports a .git file (a linked worktree or submodule checkout)
+// that points at its repository by an absolute path: that path names this
+// Mac's home, so on another Mac it would point nowhere, or into a folder of
+// the same name there. A submodule's relative pointer syncs.
+func worktreeLink(p string) bool {
+	data, err := os.ReadFile(p)
+	if err != nil || len(data) > 4096 {
+		return false
+	}
+	dir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir:")
+	return ok && filepath.IsAbs(strings.TrimSpace(dir))
 }
 
 // symlinkPrefix starts the stored content of a symbolic link inside a project
@@ -574,7 +595,7 @@ func writeFolderContent(rootDir, abs string, data []byte, expect os.FileInfo, pe
 		return errLocalChanged
 	}
 	if !link {
-		return writeLocalPerm(abs, data, nil, perm, rootDir) // a file replacing a link
+		return writeLocalPerm(abs, data, overwrite, perm, rootDir) // a file replacing a link
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)

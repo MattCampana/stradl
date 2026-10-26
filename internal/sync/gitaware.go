@@ -3,16 +3,18 @@ package sync
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
-	"strconv"
+	"sort"
 	"strings"
 	gosync "sync"
 	"time"
+
+	"github.com/tawanorg/claude-sync/internal/storage"
 )
 
 // Project folders are often git clones, and a folder can exist on two Macs
@@ -77,19 +79,34 @@ func runGit(dir string, args ...string) ([]byte, error) {
 	return cmd.Output()
 }
 
-// gitUnmodified reports whether git tracks the file at abs and it matches
-// what was last committed or staged, i.e. it holds no work of its own: the
-// copy git would check out again. Anything git can't vouch for (no git, not a
-// repository, untracked, ignored, modified) is treated as real work.
-func gitUnmodified(abs string) bool {
+// gitFile is how git sees one file in a working tree.
+type gitFile int
+
+const (
+	gitWork    gitFile = iota // real work: modified, untracked, or git can't tell
+	gitClean                  // tracked and identical to what was committed or staged
+	gitIgnored                // ignored: build output, caches, local settings
+)
+
+// gitFileState asks git about the file at abs. Anything git can't vouch for
+// (no git, not a repository) counts as work.
+func gitFileState(abs string) gitFile {
 	out, err := runGit(filepath.Dir(abs), "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching", "--", filepath.Base(abs))
-	if err != nil || len(out) != 0 {
-		return false
+	switch {
+	case err != nil:
+		return gitWork
+	case bytes.HasPrefix(out, []byte("!! ")):
+		return gitIgnored
+	case len(out) != 0:
+		return gitWork
 	}
 	// Empty output also covers a path git doesn't know at all on an old git
-	// without --ignored=matching support; make sure it is tracked.
+	// without --ignored=matching; make sure it is tracked.
 	out, err = runGit(filepath.Dir(abs), "ls-files", "-z", "--error-unmatch", "--", filepath.Base(abs))
-	return err == nil && len(out) != 0
+	if err == nil && len(out) != 0 {
+		return gitClean
+	}
+	return gitWork
 }
 
 // loose branch refs: <folder>/.git/refs/heads/<branch>
@@ -101,37 +118,174 @@ var gitSHARe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 // otherwise only be reachable from a branch another Mac moved elsewhere.
 const keptBranchPrefix = "stradl/"
 
-// keepLosingBranch makes sure the commit a branch pointed to on the losing
-// side of a conflict stays reachable: unless git confirms it is already part
-// of the winning commit's history, it is saved as branch
-// stradl/<branch>-<short sha> beside the original. abs is the winning ref
-// file; loser is the losing side's content.
-func keepLosingBranch(npath, abs string, winner, loser []byte) {
-	m := gitBranchRefRe.FindStringSubmatch(npath)
-	if m == nil || strings.HasPrefix(m[2], keptBranchPrefix) {
-		return
+// keepLosingBranch makes sure the commits a branch pointed to on the losing
+// side of a conflict stay reachable. For a loose ref file the losing commit,
+// and for packed-refs each branch in the losing copy, is saved as branch
+// stradl/<branch>-<short sha> unless git confirms the winning side's branch
+// of the same name already contains it. abs is the local file; winner and
+// loser are the two sides' contents, and winnerIsRemote says which side won
+// (a loose ref on that side outranks its packed-refs entry).
+func (s *Syncer) keepLosingBranch(ctx context.Context, npath, abs string, winner, loser []byte, winnerIsRemote bool) {
+	gitDir, gitNP := "", ""
+	var lost, kept map[string]string // branch -> sha
+	if m := gitBranchRefRe.FindStringSubmatch(npath); m != nil {
+		gitDir = refGitDir(abs)
+		lost = map[string]string{m[2]: strings.TrimSpace(string(loser))}
+		kept = map[string]string{m[2]: strings.TrimSpace(string(winner))}
+	} else if strings.HasSuffix(npath, ".git/HEAD") || strings.HasSuffix(npath, ".git/refs/stash") {
+		// A detached HEAD, or the latest stash: commits no branch holds.
+		name := filepath.Base(abs)
+		gitDir = filepath.Dir(abs)
+		if name == "stash" {
+			gitDir = filepath.Dir(gitDir)
+		}
+		lost = map[string]string{name: strings.TrimSpace(string(loser))}
+		kept = map[string]string{name: strings.TrimSpace(string(winner))}
+	} else if strings.HasSuffix(npath, ".git/packed-refs") {
+		gitDir, gitNP = filepath.Dir(abs), strings.TrimSuffix(npath, "packed-refs")
+		lost, kept = packedBranches(loser), packedBranches(winner)
 	}
-	win, lose := strings.TrimSpace(string(winner)), strings.TrimSpace(string(loser))
-	if !gitSHARe.MatchString(lose) || win == lose {
-		return
-	}
-	gitDir := refGitDir(abs)
 	if gitDir == "" {
 		return
 	}
 	headsDir := filepath.Join(gitDir, "refs", "heads")
-	if gitSHARe.MatchString(win) {
-		// Exit 0: the losing commit is an ancestor, nothing is lost.
-		if _, err := runGit(filepath.Dir(gitDir), "--git-dir="+gitDir, "merge-base", "--is-ancestor", lose, win); err == nil {
-			return
+	for branch, sha := range lost {
+		if strings.HasPrefix(branch, keptBranchPrefix) || !gitSHARe.MatchString(sha) {
+			continue
+		}
+		win := kept[branch]
+		if gitNP != "" {
+			if loose := s.looseRef(ctx, gitNP, headsDir, branch, winnerIsRemote); loose != "" {
+				win = loose
+			}
+		}
+		if win == sha {
+			continue
+		}
+		if gitSHARe.MatchString(win) {
+			// Exit 0: the losing commit is an ancestor, nothing is lost.
+			if _, err := runGit(filepath.Dir(gitDir), "--git-dir="+gitDir, "merge-base", "--is-ancestor", sha, win); err == nil {
+				continue
+			}
+		}
+		p := filepath.Join(headsDir, filepath.FromSlash(keptBranchPrefix+branch+"-"+sha[:7]))
+		if existing, err := os.ReadFile(p); err == nil && bytes.Equal(bytes.TrimSpace(existing), []byte(sha)) {
+			continue
+		}
+		_ = writeFileAtomic(freeName(p), []byte(sha+"\n"), 0644)
+	}
+}
+
+// looseRef reads a loose branch ref from storage (remote) or from this Mac,
+// or "" when that side has none. gitNP is the repository's .git/ npath.
+func (s *Syncer) looseRef(ctx context.Context, gitNP, headsDir, branch string, remote bool) string {
+	if !remote {
+		data, _ := os.ReadFile(filepath.Join(headsDir, filepath.FromSlash(branch)))
+		return strings.TrimSpace(string(data))
+	}
+	np := gitNP + "refs/heads/" + branch
+	data, _, err := s.fetch(ctx, np, s.engineRemoteKey(np), nil, s.home)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// firstContactLooseRef settles a loose branch ref this Mac has and storage
+// lacks, in a repository this Mac never synced, when the reference copy keeps
+// that branch in packed-refs: uploaded, the loose ref would override the
+// reference's branch on every Mac. The reference's value wins instead; this
+// Mac's ref goes to the conflicts folder and its commit stays reachable on a
+// stradl/ branch. It reports whether it settled the ref.
+func (s *Syncer) firstContactLooseRef(ctx context.Context, npath string, lf *localFile) (bool, error) {
+	m := gitBranchRefRe.FindStringSubmatch(npath)
+	i := strings.LastIndex(npath, ".git/refs/heads/")
+	if m == nil || i < 0 {
+		return false, nil
+	}
+	packedNP := npath[:i] + ".git/packed-refs"
+	packed, _, err := s.fetch(ctx, packedNP, s.engineRemoteKey(packedNP), nil, s.home)
+	if errors.Is(err, storage.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	ref := packedBranches(packed)[m[2]]
+	local, err := os.ReadFile(lf.abs)
+	if err != nil || ref == "" || strings.TrimSpace(string(local)) == ref {
+		return false, err
+	}
+	s.keepLosingBranch(ctx, npath, lf.abs, []byte(ref), local, true)
+	if err := s.keepLoser(npath, lf.abs, local, ConflictFromThisMac, true); err != nil {
+		return false, err
+	}
+	return true, os.Remove(lf.abs)
+}
+
+// mergePackedRefs returns the reference copy of a packed-refs file with the
+// refs only the other copy has added (remote-tracking branches, tags, local
+// branches), so first contact never drops a ref; a ref in both keeps the
+// reference's value. Lines stay sorted by ref name, as git expects.
+func mergePackedRefs(ref, other []byte) []byte {
+	type entry struct{ lines []string }
+	parse := func(data []byte) (header string, refs map[string]*entry) {
+		refs = make(map[string]*entry)
+		var last *entry
+		for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+			switch {
+			case line == "":
+			case strings.HasPrefix(line, "#"):
+				if header == "" {
+					header = line
+				}
+			case strings.HasPrefix(line, "^"):
+				if last != nil {
+					last.lines = append(last.lines, line)
+				}
+			default:
+				if _, name, ok := strings.Cut(line, " "); ok {
+					last = &entry{lines: []string{line}}
+					refs[name] = last
+				}
+			}
+		}
+		return header, refs
+	}
+	header, merged := parse(ref)
+	_, theirs := parse(other)
+	for name, e := range theirs {
+		if _, ok := merged[name]; !ok {
+			merged[name] = e
 		}
 	}
-	name := keptBranchPrefix + m[2] + "-" + lose[:7]
-	p := filepath.Join(headsDir, filepath.FromSlash(name))
-	if existing, err := os.ReadFile(p); err == nil && bytes.Equal(bytes.TrimSpace(existing), []byte(lose)) {
-		return
+	names := make([]string, 0, len(merged))
+	for name := range merged {
+		names = append(names, name)
 	}
-	_ = writeFileAtomic(freeName(p), []byte(lose+"\n"), 0644)
+	sort.Strings(names)
+	var b strings.Builder
+	if header != "" {
+		b.WriteString(header + "\n")
+	}
+	for _, name := range names {
+		for _, line := range merged[name].lines {
+			b.WriteString(line + "\n")
+		}
+	}
+	return []byte(b.String())
+}
+
+// packedBranches lists the branches in a packed-refs file.
+func packedBranches(data []byte) map[string]string {
+	out := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		sha, ref, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if branch, isBranch := strings.CutPrefix(ref, "refs/heads/"); ok && isBranch && gitSHARe.MatchString(sha) {
+			out[branch] = sha
+		}
+	}
+	return out
 }
 
 // gitMetadata reports whether npath is git's own bookkeeping (refs, HEAD,
@@ -157,6 +311,7 @@ type sideChoice struct {
 	local bool // this Mac's copy wins
 	keep  bool // the losing copy is kept as a conflict copy
 	aside bool // ...in ~/.stradl/conflicts even where it would go beside the file
+	share bool // ...as <file>.from-<this Mac> beside the file, which syncs
 }
 
 // chooseSide picks the winner of a non-mergeable conflict. The newest copy
@@ -165,192 +320,66 @@ type sideChoice struct {
 //     nothing since nothing is lost; refs that diverged keep one side and
 //     save the other commit as a stradl/ branch (keepLosingBranch);
 //   - the first time this Mac meets a file another Mac already synced (the
-//     folder existed on both before), git's own files follow whichever Mac's
-//     checkout leads (repoVerdict), so a ref, the index and HEAD always come
-//     from the same Mac; in the working tree this Mac's copy stays, unless
-//     the other Mac leads and git says this copy is an untouched checkout
-//     file, in which case the other Mac's edit wins and this copy (which git
-//     still holds) goes to the conflicts folder.
+//     folder existed on both before), the synced copy is the reference: it
+//     stays, on every Mac, and this Mac's differing copy is kept. Work git
+//     doesn't already hold (a modified, untracked or non-git file) is saved
+//     as <file>.from-<this Mac>, which syncs so every Mac can see both;
+//     an untouched or ignored file goes to ~/.stradl/conflicts on this Mac.
+//     git's own files follow the reference too, so HEAD, the index and the
+//     refs agree, and this Mac's commits stay reachable on stradl/ branches.
 //
 // localData and remoteData may be nil for files too large to hold in memory.
-func (s *Syncer) chooseSide(ctx context.Context, npath string, lf *localFile, info os.FileInfo, localData, remoteData []byte, remoteTime time.Time) sideChoice {
+func (s *Syncer) chooseSide(npath string, lf *localFile, info os.FileInfo, localData, remoteData []byte, remoteTime time.Time) sideChoice {
 	newest := sideChoice{local: remoteTime.IsZero() || info.ModTime().After(remoteTime), keep: true}
 	if lf.root == nil || lf.root.kind != rootFolder {
 		return newest
 	}
-	first := s.state.GetFile(npath) == nil
-	if gitBranchRefRe.MatchString(npath) && localData != nil && remoteData != nil {
-		if local, ok := gitFastForward(lf.abs, localData, remoteData); ok {
-			return sideChoice{local: local}
-		}
-	}
-	verdict := repoUnknown
-	if first {
-		verdict = s.repoVerdict(ctx, lf)
-	}
 	if hasGitSegment(npath) {
-		switch verdict {
-		case repoLocalLeads:
-			return sideChoice{local: true, keep: true}
-		case repoRemoteLeads:
-			return sideChoice{local: false, keep: true}
+		if !s.repoSyncedBefore(npath) {
+			return sideChoice{keep: true} // aside: conflictsAside covers .git
+		}
+		if gitBranchRefRe.MatchString(npath) && localData != nil && remoteData != nil {
+			if local, ok := gitFastForward(lf.abs, localData, remoteData); ok {
+				return sideChoice{local: local}
+			}
 		}
 		return newest
 	}
-	if !first {
+	if s.state.GetFile(npath) != nil {
 		return newest
 	}
-	if verdict == repoRemoteLeads && gitUnmodified(lf.abs) {
-		return sideChoice{local: false, keep: true, aside: true}
+	if isSymlink(info) {
+		return sideChoice{keep: true, aside: true}
 	}
-	return sideChoice{local: true, keep: true}
+	if st := gitFileState(lf.abs); st == gitClean || st == gitIgnored {
+		return sideChoice{keep: true, aside: true}
+	}
+	return sideChoice{keep: true, share: true}
 }
 
-// repoVerdict says, for a git repository that exists on this Mac and on
-// another Mac, whose checkout leads.
-type repoVerdict int
-
-const (
-	repoUnknown     repoVerdict = iota // not a repository, or git can't tell
-	repoLocalLeads                     // this Mac's HEAD contains the other Mac's
-	repoRemoteLeads                    // the other Mac's HEAD contains this Mac's, or they match
-)
-
-// repoVerdicts caches repoVerdict per repository for one pass.
-type repoVerdicts struct {
-	mu gosync.Mutex
-	m  map[string]*repoVerdictEntry
+// repoSyncedBefore reports whether this Mac had synced the git repository
+// holding the .git path npath before this pass (it knows the repository's
+// HEAD). A repository it never synced takes the reference copy's git files.
+func (s *Syncer) repoSyncedBefore(npath string) bool {
+	i := strings.LastIndex("/"+npath, "/.git/")
+	if i < 0 {
+		return true
+	}
+	_, ok := s.known[npath[:i]+".git/HEAD"]
+	return ok
 }
 
-type repoVerdictEntry struct {
-	once gosync.Once
-	v    repoVerdict
+// shareSuffix names the copy of a file this Mac keeps when another Mac's
+// copy is the reference: <file>.from-<this Mac's name>.
+func (s *Syncer) shareSuffix() string {
+	slug := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(DeviceName(s.cfg)), "-"), "-")
+	if slug == "" {
+		slug = "other-mac"
+	}
+	return ".from-" + slug
 }
 
-// repoVerdict compares this Mac's HEAD with the HEAD the other Mac uploaded
-// for the repository holding lf. It runs after the pass downloaded the other
-// Mac's objects and before it touches any ref, so both commits are on disk
-// and this Mac's refs are still its own. Diverged histories go to the side
-// with the newer commit.
-func (s *Syncer) repoVerdict(ctx context.Context, lf *localFile) repoVerdict {
-	repoDir, prefix := repoOf(lf)
-	if repoDir == "" || s.repos == nil {
-		return repoUnknown
-	}
-	s.repos.mu.Lock()
-	e := s.repos.m[repoDir]
-	if e == nil {
-		e = &repoVerdictEntry{}
-		s.repos.m[repoDir] = e
-	}
-	s.repos.mu.Unlock()
-	e.once.Do(func() { e.v = s.computeRepoVerdict(ctx, repoDir, prefix) })
-	return e.v
-}
-
-func (s *Syncer) computeRepoVerdict(ctx context.Context, repoDir, prefix string) repoVerdict {
-	remote := s.remoteHead(ctx, prefix)
-	if remote == "" {
-		return repoUnknown
-	}
-	out, err := runGit(repoDir, "rev-parse", "--verify", "-q", "HEAD^{commit}")
-	local := strings.TrimSpace(string(out))
-	if err != nil || local == "" {
-		// No commits here yet: the other Mac's history leads.
-		if _, err := runGit(repoDir, "rev-parse", "--git-dir"); err == nil {
-			return repoRemoteLeads
-		}
-		return repoUnknown
-	}
-	if local == remote {
-		return repoRemoteLeads
-	}
-	if _, err := runGit(repoDir, "cat-file", "-e", remote+"^{commit}"); err != nil {
-		return repoUnknown // the other Mac's commit isn't here: can't compare
-	}
-	isAncestor := func(a, b string) bool {
-		_, err := runGit(repoDir, "merge-base", "--is-ancestor", a, b)
-		return err == nil
-	}
-	switch {
-	case isAncestor(local, remote):
-		return repoRemoteLeads
-	case isAncestor(remote, local):
-		return repoLocalLeads
-	}
-	commitTime := func(sha string) int64 {
-		out, err := runGit(repoDir, "show", "-s", "--format=%ct", sha)
-		if err != nil {
-			return 0
-		}
-		n, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-		return n
-	}
-	if commitTime(remote) > commitTime(local) {
-		return repoRemoteLeads
-	}
-	return repoLocalLeads
-}
-
-// remoteHead returns the commit the other Macs' copy of the repository at
-// npath prefix has checked out, read from its uploaded HEAD and refs, or "".
-func (s *Syncer) remoteHead(ctx context.Context, prefix string) string {
-	read := func(rel string) string {
-		np := prefix + rel
-		data, _, err := s.fetch(ctx, np, s.engineRemoteKey(np), nil, s.home)
-		if err != nil {
-			return ""
-		}
-		return string(data)
-	}
-	head := strings.TrimSpace(read(".git/HEAD"))
-	if gitSHARe.MatchString(head) {
-		return head // detached
-	}
-	ref, ok := strings.CutPrefix(head, "ref: ")
-	if !ok || !strings.HasPrefix(ref, "refs/") || strings.Contains(ref, "..") {
-		return ""
-	}
-	if sha := strings.TrimSpace(read(".git/" + ref)); gitSHARe.MatchString(sha) {
-		return sha
-	}
-	for _, line := range strings.Split(read(".git/packed-refs"), "\n") {
-		if sha, name, ok := strings.Cut(strings.TrimSpace(line), " "); ok && name == ref && gitSHARe.MatchString(sha) {
-			return sha
-		}
-	}
-	return ""
-}
-
-// repoOf finds the git repository holding lf: the folder that contains .git
-// on the way up from the file, staying inside the sync root. It returns the
-// repository's local path and its npath prefix.
-func repoOf(lf *localFile) (dir, prefix string) {
-	rel := lf.rel
-	if i := strings.Index("/"+rel, "/.git/"); i >= 0 {
-		rel = strings.TrimSuffix(rel[:i], "/")
-		return filepath.Join(lf.root.dir, filepath.FromSlash(rel)), lf.root.prefix + relPrefix(rel)
-	}
-	for rel = path.Dir(rel); ; rel = path.Dir(rel) {
-		if rel == "." {
-			rel = ""
-		}
-		dir := filepath.Join(lf.root.dir, filepath.FromSlash(rel))
-		if fi, err := os.Stat(filepath.Join(dir, ".git")); err == nil && fi.IsDir() {
-			return dir, lf.root.prefix + relPrefix(rel)
-		}
-		if rel == "" {
-			return "", ""
-		}
-	}
-}
-
-func relPrefix(rel string) string {
-	if rel == "" {
-		return ""
-	}
-	return rel + "/"
-}
+var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 
 // gitFastForward compares two values of the branch ref at abs. When one
 // commit is an ancestor of the other, the descendant wins (local reports
@@ -385,4 +414,233 @@ func refGitDir(abs string) string {
 		return ""
 	}
 	return filepath.FromSlash(slash[:i+len("/.git")])
+}
+
+// gitUnionPath reports git objects and refs (loose refs and the reflogs that
+// go with them), which keep union semantics (see unionPath).
+func gitUnionPath(npath string) bool {
+	i := strings.LastIndex("/"+npath, "/.git/")
+	if i < 0 {
+		return false
+	}
+	inside := npath[i+len(".git/"):]
+	return strings.HasPrefix(inside, "objects/") || strings.HasPrefix(inside, "refs/") || strings.HasPrefix(inside, "logs/refs/")
+}
+
+// gitPerMac reports the parts of .git that belong to one Mac and never sync:
+// the index, a cache of this checkout's file stats that git rewrites on every
+// status (it is rebuilt from HEAD when sync moves HEAD, see reindexRepos),
+// and linked worktrees' admin folders, which hold absolute paths into this
+// Mac's home and which `git worktree prune` deletes on any Mac lacking them.
+func gitPerMac(rel string) bool {
+	i := strings.LastIndex("/"+rel, "/.git/")
+	if i < 0 {
+		return false
+	}
+	inside := rel[i+len(".git/"):]
+	return inside == "index" || inside == "worktrees" || strings.HasPrefix(inside, "worktrees/")
+}
+
+// reindexMarker sits in a .git folder whose index needs rebuilding from HEAD
+// because sync changed HEAD or a ref; Stradl's own files are never synced.
+const reindexMarker = ".stradl-reindex"
+
+// wroteGitFile runs after sync writes the file at abs. Inside a .git folder
+// it makes sure the folders git needs exist (sync carries files, not empty
+// folders, and git refuses a .git without refs/ and objects/), and when the
+// file is HEAD, a ref or packed-refs it marks the index for rebuilding.
+func (s *Syncer) wroteGitFile(abs string) {
+	slash := filepath.ToSlash(abs)
+	i := strings.LastIndex(slash, "/.git/")
+	if i < 0 {
+		return
+	}
+	gitDir := filepath.FromSlash(slash[:i+len("/.git")])
+	for _, d := range []string{"refs/heads", "refs/tags", "objects/info", "objects/pack"} {
+		_ = os.MkdirAll(filepath.Join(gitDir, filepath.FromSlash(d)), 0755)
+	}
+	inside := slash[i+len("/.git/"):]
+	if inside != "HEAD" && inside != "packed-refs" && !strings.HasPrefix(inside, "refs/heads/") {
+		return
+	}
+	if f, err := os.OpenFile(filepath.Join(gitDir, reindexMarker), os.O_CREATE|os.O_WRONLY, 0600); err == nil {
+		_ = f.Close()
+	}
+	s.reindexMu.Lock()
+	if s.reindex == nil {
+		s.reindex = make(map[string]bool)
+	}
+	s.reindex[gitDir] = true
+	s.reindexMu.Unlock()
+}
+
+// reindexRepos rebuilds the index of every repository whose HEAD or refs
+// sync changed, from the commit HEAD now names, leaving the files alone: the
+// index never syncs, and one built for another commit would show changes
+// nobody staged. It runs after a pass, for the folders the pass marked and
+// any marker left by an earlier pass, and skips a repository while git holds
+// a lock in it (the marker stays for next time). Staged-but-uncommitted
+// changes in such a repository go back to unstaged; their content is kept.
+func (s *Syncer) reindexRepos(roots []*syncRoot) {
+	s.reindexMu.Lock()
+	dirs := s.reindex
+	s.reindex = nil
+	s.reindexMu.Unlock()
+	if dirs == nil {
+		dirs = make(map[string]bool)
+	}
+	for _, r := range roots {
+		if r.kind == rootFolder && !r.deferred {
+			gd := filepath.Join(r.dir, ".git")
+			if _, err := os.Stat(filepath.Join(gd, reindexMarker)); err == nil {
+				dirs[gd] = true
+			}
+		}
+	}
+	for gitDir := range dirs {
+		if _, err := os.Stat(filepath.Join(gitDir, "index.lock")); err == nil {
+			continue
+		}
+		work := filepath.Dir(gitDir)
+		if _, err := runGit(work, "--git-dir="+gitDir, "--work-tree="+work, "rev-parse", "--verify", "-q", "HEAD^{commit}"); err != nil {
+			continue // HEAD's commit hasn't arrived yet (or no commits): next pass
+		}
+		if _, err := runGit(work, "--git-dir="+gitDir, "--work-tree="+work, "read-tree", "HEAD"); err != nil {
+			s.log("Warning: couldn't rebuild the git index in %s: %v", work, err)
+			continue
+		}
+		_, _ = runGit(work, "--git-dir="+gitDir, "--work-tree="+work, "update-index", "-q", "--refresh")
+		_ = os.Remove(filepath.Join(gitDir, reindexMarker))
+	}
+}
+
+// packedValue returns the commit a branch has in this Mac's packed-refs, or
+// "". gitDir is the .git folder.
+func packedValue(gitDir, branch string) string {
+	data, err := os.ReadFile(filepath.Join(gitDir, "packed-refs"))
+	if err != nil {
+		return ""
+	}
+	return packedBranches(data)[branch]
+}
+
+// shadowsPackedRef reports a loose branch ref arriving from storage for a
+// branch this Mac keeps, with another commit, only in packed-refs: written
+// as is it would override this Mac's branch. It returns the local value so
+// the caller can merge the two like any ref conflict.
+func shadowsPackedRef(npath, abs string) (string, bool) {
+	m := gitBranchRefRe.FindStringSubmatch(npath)
+	if m == nil {
+		return "", false
+	}
+	if _, err := os.Lstat(abs); err == nil {
+		return "", false
+	}
+	gitDir := refGitDir(abs)
+	if gitDir == "" {
+		return "", false
+	}
+	v := packedValue(gitDir, m[2])
+	return v, v != ""
+}
+
+// loose objects: <folder>/.git/objects/<2 hex>/<38 or 62 hex>
+var gitLooseObjectRe = regexp.MustCompile(`(^|/)\.git/objects/([0-9a-f]{2})/([0-9a-f]{38}|[0-9a-f]{62})$`)
+
+func gitLooseObject(npath string) bool { return gitLooseObjectRe.MatchString(npath) }
+
+// objectCheck is a loose object this Mac deleted that storage still has.
+type objectCheck struct {
+	np, rel string
+	root    *syncRoot
+	obj     storage.ObjectInfo
+}
+
+// missingObjects returns the checks whose object git can't find in this
+// Mac's repository at all, loose or packed: gc pruned it here, yet another
+// Mac's commits may still build on it, so it is fetched again. Objects gc
+// merely packed stay deleted. One git call per repository.
+func (s *Syncer) missingObjects(checks []objectCheck, dryRun bool) []objectCheck {
+	byRepo := make(map[string][]objectCheck)
+	for _, c := range checks {
+		abs := filepath.ToSlash(filepath.Join(c.root.dir, filepath.FromSlash(c.rel)))
+		i := strings.LastIndex(abs, "/.git/objects/")
+		gitDir := filepath.FromSlash(abs[:i+len("/.git")])
+		byRepo[gitDir] = append(byRepo[gitDir], c)
+	}
+	var missing []objectCheck
+	for gitDir, cs := range byRepo {
+		var in strings.Builder
+		for _, c := range cs {
+			m := gitLooseObjectRe.FindStringSubmatch(c.np)
+			in.WriteString(m[2] + m[3] + "\n")
+		}
+		out, err := runGitInput(filepath.Dir(gitDir), in.String(), "--git-dir="+gitDir, "cat-file", "--batch-check=%(objectname)")
+		if err != nil {
+			continue // can't tell: leave them as they are
+		}
+		lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+		for i, c := range cs {
+			if i < len(lines) && strings.HasSuffix(lines[i], " missing") {
+				missing = append(missing, c)
+			} else if !dryRun {
+				s.state.MarkLocalDeleted(c.np, c.obj.ETag)
+			}
+		}
+	}
+	return missing
+}
+
+// runGitInput is runGit with stdin.
+func runGitInput(dir, input string, args ...string) ([]byte, error) {
+	bin := gitBinary()
+	if bin == "" {
+		return nil, exec.ErrNotFound
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(input)
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0")
+	return cmd.Output()
+}
+
+// gitRefsReady reports whether every commit a ref file about to be written
+// at abs names is already in this Mac's repository. A ref read from storage
+// can be newer than the objects this pass listed (another Mac pushed
+// meanwhile), or its objects can have failed to download; written anyway it
+// would leave "bad object HEAD". The write waits for a later pass instead.
+// Files that aren't refs, and Macs without git, always count as ready.
+func gitRefsReady(abs string, data []byte) bool {
+	slash := filepath.ToSlash(abs)
+	i := strings.LastIndex(slash, "/.git/")
+	if i < 0 {
+		return true
+	}
+	gitDir := filepath.FromSlash(slash[:i+len("/.git")])
+	inside := slash[i+len("/.git/"):]
+	var shas []string
+	switch {
+	case inside == "packed-refs":
+		for _, sha := range packedBranches(data) {
+			shas = append(shas, sha)
+		}
+	case inside == "HEAD", strings.HasPrefix(inside, "refs/heads/"), inside == "refs/stash":
+		if sha := strings.TrimSpace(string(data)); gitSHARe.MatchString(sha) {
+			shas = append(shas, sha)
+		}
+	}
+	if len(shas) == 0 || gitBinary() == "" {
+		return true
+	}
+	var in strings.Builder
+	for _, sha := range shas {
+		in.WriteString(sha + "^{commit}\n")
+	}
+	out, err := runGitInput(filepath.Dir(gitDir), in.String(), "--git-dir="+gitDir, "cat-file", "--batch-check=%(objectname)")
+	if err != nil {
+		return true // git couldn't answer (not a repository yet): don't block
+	}
+	return !strings.Contains(string(out), " missing")
 }

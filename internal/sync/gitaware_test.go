@@ -45,39 +45,51 @@ func backdate(t *testing.T, d *device, rel string, by time.Duration) {
 	}
 }
 
-func TestFirstContactKeepsThisMacsCopyInAPlainFolder(t *testing.T) {
+// named gives a test device a display name, which names its .from- copies.
+func named(t *testing.T, d *device) *device {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(d.s.cfg.StateDirOverride, deviceNameFile), []byte(d.name+"'s Mac\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestFirstContactKeepsTheSyncedCopyAndSharesTheOther(t *testing.T) {
 	root := t.TempDir()
 	store := newCASStore()
-	a := newEverythingDevice(t, root, "alice", store)
-	b := newEverythingDevice(t, root, "matthew", store)
+	a := named(t, newEverythingDevice(t, root, "alice", store))
+	b := named(t, newEverythingDevice(t, root, "matthew", store))
 	foldersOn("p", a, b)
 
 	a.write("code/p/notes.txt", "alice's notes\n")
 	a.write("code/p/only-alice.txt", "a\n")
 	a.sync()
-	// Bob had the folder before syncing it, with an older copy of notes.txt:
-	// newest-wins would replace it, first contact must not.
+	// Bob had the folder before syncing it, with a newer copy of notes.txt:
+	// newest-wins would let it replace alice's; first contact keeps the
+	// copy already synced and shares bob's beside it.
 	b.write("code/p/notes.txt", "bob's notes\n")
 	b.write("code/p/only-bob.txt", "b\n")
-	backdate(t, b, "code/p/notes.txt", time.Hour)
+	backdate(t, a, "code/p/notes.txt", time.Hour)
 	b.sync()
 
-	if got := b.read("code/p/notes.txt"); got != "bob's notes\n" {
-		t.Fatalf("bob's own copy was replaced: %q", got)
+	if got := b.read("code/p/notes.txt"); got != "alice's notes\n" {
+		t.Fatalf("the synced copy should stay the reference: %q", got)
 	}
-	copies := conflictCopies(t, filepath.Join(b.home, "code", "p"), "notes.txt")
-	if len(copies) != 1 {
-		t.Fatalf("alice's copy should sit beside bob's: %v", copies)
-	}
-	if data, _ := os.ReadFile(copies[0]); string(data) != "alice's notes\n" {
-		t.Fatalf("conflict copy = %q", data)
+	if got := b.read("code/p/notes.txt.from-matthew-s-mac"); got != "bob's notes\n" {
+		t.Fatalf("bob's copy should sit beside it: %q", got)
 	}
 	if b.read("code/p/only-alice.txt") != "a\n" {
 		t.Fatal("a file only alice had didn't reach bob")
 	}
-	a.sync()
-	if a.read("code/p/notes.txt") != "bob's notes\n" || a.read("code/p/only-bob.txt") != "b\n" {
-		t.Fatal("the Macs didn't converge after first contact")
+	syncAll(1, b, a)
+	if a.read("code/p/notes.txt") != "alice's notes\n" || a.read("code/p/notes.txt.from-matthew-s-mac") != "bob's notes\n" || a.read("code/p/only-bob.txt") != "b\n" {
+		t.Fatal("alice should have both copies and bob's file")
+	}
+	// Deleting the shared copy once it's merged deletes it everywhere.
+	a.remove("code/p/notes.txt.from-matthew-s-mac")
+	syncAll(1, a, b)
+	if b.exists("code/p/notes.txt.from-matthew-s-mac") {
+		t.Fatal("the merged copy should be gone from bob too")
 	}
 }
 
@@ -92,6 +104,7 @@ func twoClones(t *testing.T, a, b *device) (repoA, repoB string) {
 	git(t, repoA, "init", "-q")
 	a.write("code/repo/x.py", "x = 1\n")
 	a.write("code/repo/y.py", "y = 1\n")
+	a.write("code/repo/.gitignore", "dist/\n")
 	git(t, repoA, "add", "-A")
 	git(t, repoA, "commit", "-q", "-m", "first")
 	a.write("code/repo/x.py", "x = 2\n")
@@ -104,92 +117,86 @@ func twoClones(t *testing.T, a, b *device) (repoA, repoB string) {
 	return repoA, repoB
 }
 
-func TestFirstContactCloneTakesTheOtherMacsEdits(t *testing.T) {
+func TestFirstContactCloneTakesTheSyncedEditsAndSharesItsOwn(t *testing.T) {
 	needGit(t)
 	root := t.TempDir()
 	store := newCASStore()
-	a := newEverythingDevice(t, root, "alice", store)
-	b := newEverythingDevice(t, root, "matthew", store)
+	a := named(t, newEverythingDevice(t, root, "alice", store))
+	b := named(t, newEverythingDevice(t, root, "matthew", store))
 	foldersOn("repo", a, b)
 	repoA, repoB := twoClones(t, a, b)
 
 	// Alice has uncommitted work in x.py and syncs first. Bob's clone is
-	// fresh (and newer), with work of his own in y.py.
+	// fresh, with work of his own in y.py and a build of his own.
 	a.write("code/repo/x.py", "x = 3  # alice, not committed\n")
-	backdate(t, a, "code/repo/x.py", time.Hour)
+	a.write("code/repo/dist/app.js", "alice's build\n")
 	a.sync()
 	b.write("code/repo/y.py", "y = 2  # bob, not committed\n")
+	b.write("code/repo/dist/app.js", "bob's build\n")
 	b.sync()
 
 	if got := b.read("code/repo/x.py"); got != "x = 3  # alice, not committed\n" {
 		t.Fatalf("an untouched clone file should take alice's edit: %q", got)
 	}
-	if c := conflictCopies(t, repoB, "x.py"); len(c) != 0 {
-		t.Fatalf("git still holds bob's untouched x.py, no copy belongs in the repo: %v", c)
+	if b.exists("code/repo/x.py.from-matthew-s-mac") || len(asideCopies(b, "code/repo/x.py")) != 1 {
+		t.Fatal("git holds bob's untouched x.py: it goes to the conflicts folder, not the repo")
 	}
-	if c := asideCopies(b, "code/repo/x.py"); len(c) != 1 {
-		t.Fatalf("bob's x.py should be kept in the conflicts folder: %v", c)
+	if got := b.read("code/repo/y.py"); got != "y = 1\n" {
+		t.Fatalf("y.py should be the synced copy: %q", got)
 	}
-	if got := b.read("code/repo/y.py"); got != "y = 2  # bob, not committed\n" {
-		t.Fatalf("bob's own edit was replaced: %q", got)
+	if got := b.read("code/repo/y.py.from-matthew-s-mac"); got != "y = 2  # bob, not committed\n" {
+		t.Fatalf("bob's edit should sit beside it: %q", got)
 	}
-	if c := conflictCopies(t, repoB, "y.py"); len(c) != 1 {
-		t.Fatalf("alice's y.py should sit beside bob's: %v", c)
+	if b.exists("code/repo/dist/app.js.from-matthew-s-mac") || len(asideCopies(b, "code/repo/dist/app.js")) != 1 {
+		t.Fatal("an ignored build file goes to the conflicts folder")
 	}
 	git(t, repoB, "fsck", "--strict")
 
-	a.sync()
-	if got := a.read("code/repo/y.py"); got != "y = 2  # bob, not committed\n" {
-		t.Fatalf("alice didn't get bob's edit: %q", got)
+	syncAll(1, b, a)
+	if got := a.read("code/repo/y.py.from-matthew-s-mac"); got != "y = 2  # bob, not committed\n" {
+		t.Fatalf("alice should see bob's edit: %q", got)
 	}
 	git(t, repoA, "fsck", "--strict")
 	for _, repo := range []string{repoA, repoB} {
-		st := git(t, repo, "status", "--porcelain", "--untracked-files=no")
-		if !strings.Contains(st, " M x.py") || !strings.Contains(st, " M y.py") {
-			t.Fatalf("%s: both edits should show as uncommitted changes: %q", repo, st)
+		if st := git(t, repo, "status", "--porcelain", "--untracked-files=no"); st != " M x.py\n" {
+			t.Fatalf("%s: alice's edit should be the one uncommitted change: %q", repo, st)
 		}
 	}
 }
 
-func TestFirstContactNeverRollsBackAMacThatIsAhead(t *testing.T) {
+func TestFirstContactKeepsTheJoiningMacsCommits(t *testing.T) {
 	needGit(t)
 	root := t.TempDir()
 	store := newCASStore()
-	a := newEverythingDevice(t, root, "alice", store)
-	b := newEverythingDevice(t, root, "matthew", store)
+	a := named(t, newEverythingDevice(t, root, "alice", store))
+	b := named(t, newEverythingDevice(t, root, "matthew", store))
 	foldersOn("repo", a, b)
 	repoA, repoB := twoClones(t, a, b)
 
-	// Bob committed a change alice never saw; alice's copy of the file is the
-	// older commit (untouched on her side) and syncs first.
+	// Bob committed a change alice never saw, then alice's copy syncs first.
 	b.write("code/repo/x.py", "x = 9  # bob's commit\n")
 	git(t, repoB, "commit", "-q", "-am", "third, on bob")
-	backdate(t, b, "code/repo/x.py", time.Hour)
-	for _, rel := range []string{"code/repo/.git/index", "code/repo/.git/refs/heads/main", "code/repo/.git/HEAD"} {
-		backdate(t, b, rel, time.Hour)
-	}
+	bobSHA := strings.TrimSpace(git(t, repoB, "rev-parse", "HEAD"))
 	a.sync()
 	b.sync()
+	syncAll(1, b, a)
 
-	if got := b.read("code/repo/x.py"); got != "x = 9  # bob's commit\n" {
-		t.Fatalf("bob's committed file was rolled back: %q", got)
-	}
-	if log := git(t, repoB, "log", "-1", "--format=%s"); log != "third, on bob\n" {
-		t.Fatalf("bob's branch moved: %q", log)
-	}
-	git(t, repoB, "fsck", "--strict")
-
-	a.sync()
-	git(t, repoA, "fsck", "--strict")
-	if log := git(t, repoA, "log", "-1", "--format=%s"); log != "third, on bob\n" {
-		t.Fatalf("alice should fast-forward to bob's commit: %q", log)
-	}
-	if st := git(t, repoA, "status", "--porcelain", "--untracked-files=no"); st != "" {
-		t.Fatalf("alice's checkout should be clean: %q", st)
+	for _, repo := range []string{repoA, repoB} {
+		git(t, repo, "fsck", "--strict")
+		if log := git(t, repo, "log", "-1", "--format=%s"); log != "second\n" {
+			t.Fatalf("%s: main should follow the synced copy: %q", repo, log)
+		}
+		if st := git(t, repo, "status", "--porcelain", "--untracked-files=no"); st != "" {
+			t.Fatalf("%s: HEAD, index and files should agree: %q", repo, st)
+		}
+		kept := git(t, repo, "branch", "--list", "--format=%(refname:short) %(objectname)", keptBranchPrefix+"*")
+		if kept != keptBranchPrefix+"main-"+bobSHA[:7]+" "+bobSHA+"\n" {
+			t.Fatalf("%s: bob's commit should be on a kept branch: %q", repo, kept)
+		}
 	}
 }
 
-func TestBehindCloneFastForwards(t *testing.T) {
+func TestFirstContactBehindCloneNeedsNoKeptBranch(t *testing.T) {
 	needGit(t)
 	root := t.TempDir()
 	store := newCASStore()
@@ -198,25 +205,22 @@ func TestBehindCloneFastForwards(t *testing.T) {
 	foldersOn("repo", a, b)
 	repoA, repoB := twoClones(t, a, b)
 
-	// Alice moves on after bob cloned; bob's untouched files and refs are
-	// newer on disk but behind in history.
+	// Alice moves on after bob cloned, with git gc packing her refs.
 	a.write("code/repo/y.py", "y = 5\n")
 	git(t, repoA, "commit", "-q", "-am", "third, on alice")
-	for _, rel := range []string{"code/repo/y.py", "code/repo/.git/index", "code/repo/.git/refs/heads/main"} {
-		backdate(t, a, rel, time.Hour)
-	}
+	git(t, repoA, "gc", "-q")
 	a.sync()
-	r := b.sync()
+	b.sync()
 
 	git(t, repoB, "fsck", "--strict")
 	if log := git(t, repoB, "log", "-1", "--format=%s"); log != "third, on alice\n" {
-		t.Fatalf("bob should fast-forward: %q (%+v)", log, r)
+		t.Fatalf("bob should be on alice's commit: %q", log)
 	}
 	if st := git(t, repoB, "status", "--porcelain", "--untracked-files=no"); st != "" {
 		t.Fatalf("bob's checkout should be clean: %q", st)
 	}
 	if branches := git(t, repoB, "branch", "--list", keptBranchPrefix+"*"); branches != "" {
-		t.Fatalf("a fast-forward loses nothing and needs no kept branch: %q", branches)
+		t.Fatalf("bob's commits are all in alice's history: %q", branches)
 	}
 }
 
@@ -338,5 +342,171 @@ func TestRemoteControlledRecordStaysOffOtherMacs(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(a.recordPath("s1")); !strings.Contains(string(data), `"remoteControlUserEnabled":true`) {
 		t.Fatalf("alice's record changed: %s", data)
+	}
+}
+
+func TestCommitAfterGCReachesTheOtherMac(t *testing.T) {
+	needGit(t)
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	foldersOn("repo", a, b)
+	repoA, _ := twoClones(t, a, b)
+	if err := os.RemoveAll(filepath.Join(b.home, "code", "repo")); err != nil {
+		t.Fatal(err)
+	}
+	syncAll(1, a, b)
+	repoB := filepath.Join(b.home, "code", "repo")
+
+	// gc packs main; the next commit writes a loose main that storage has
+	// never seen, while storage's packed-refs still holds the old commit.
+	git(t, repoA, "gc", "-q")
+	syncAll(1, a, b)
+	a.write("code/repo/y.py", "y = 7\n")
+	git(t, repoA, "commit", "-q", "-am", "after gc")
+	syncAll(2, a, b)
+
+	for _, repo := range []string{repoA, repoB} {
+		git(t, repo, "fsck", "--strict")
+		if log := git(t, repo, "log", "-1", "--format=%s"); log != "after gc\n" {
+			t.Fatalf("%s: main should be on the new commit: %q", repo, log)
+		}
+		if branches := git(t, repo, "branch", "--list", keptBranchPrefix+"*"); branches != "" {
+			t.Fatalf("%s: nothing diverged: %q", repo, branches)
+		}
+	}
+}
+
+func TestCommitThenStatusElsewhereKeepsIndexesHonest(t *testing.T) {
+	needGit(t)
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	foldersOn("repo", a, b)
+	repoA, _ := twoClones(t, a, b)
+	if err := os.RemoveAll(filepath.Join(b.home, "code", "repo")); err != nil {
+		t.Fatal(err)
+	}
+	syncAll(2, a, b)
+	repoB := filepath.Join(b.home, "code", "repo")
+
+	a.write("code/repo/x.py", "x = 'c3'\n")
+	git(t, repoA, "commit", "-q", "-am", "c3")
+	git(t, repoB, "status") // a shell prompt rewrites bob's index
+	syncAll(2, a, b)
+	for _, repo := range []string{repoA, repoB} {
+		if st := git(t, repo, "status", "--porcelain"); st != "" {
+			t.Fatalf("%s: index and HEAD disagree: %q", repo, st)
+		}
+	}
+	// Bob's next commit must not revert alice's.
+	b.write("code/repo/z.py", "z = 1\n")
+	git(t, repoB, "add", "z.py")
+	git(t, repoB, "commit", "-q", "-m", "z")
+	if got := git(t, repoB, "show", "HEAD:x.py"); got != "x = 'c3'\n" {
+		t.Fatalf("bob's commit reverted x.py: %q", got)
+	}
+}
+
+func TestVanishedFolderIsNotDeletedEverywhere(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	foldersOn("p", a, b)
+	a.write("code/p/one.txt", "1\n")
+	a.write("code/p/two.txt", "2\n")
+	syncAll(1, a, b)
+
+	if err := os.Rename(filepath.Join(a.home, "code", "p"), filepath.Join(a.home, "code", "p-renamed")); err != nil {
+		t.Fatal(err)
+	}
+	r := a.sync()
+	if len(r.Deleted) != 0 || len(r.Warnings) == 0 {
+		t.Fatalf("a vanished folder must warn, not delete: %+v", r)
+	}
+	b.sync()
+	if b.read("code/p/one.txt") != "1\n" || len(b.trashed()) != 0 {
+		t.Fatal("bob lost the folder")
+	}
+}
+
+func TestSymlinkedDotfileInClaudeIsLeftAlone(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	a.write(".claude/CLAUDE.md", "alice's rules\n")
+	a.write(".claude/skills/s/SKILL.md", "alice's skill\n")
+	a.sync()
+
+	dot := filepath.Join(b.home, "dotfiles")
+	b.write("dotfiles/CLAUDE.md", "bob's rules\n")
+	if err := os.MkdirAll(filepath.Join(dot, "skills"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range [][2]string{{"CLAUDE.md", "CLAUDE.md"}, {"skills", "skills"}} {
+		if err := os.Symlink(filepath.Join(dot, l[0]), filepath.Join(b.claude, l[1])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b.sync()
+	b.sync()
+	if fi, err := os.Lstat(filepath.Join(b.claude, "CLAUDE.md")); err != nil || !isSymlink(fi) {
+		t.Fatal("bob's CLAUDE.md link was replaced")
+	}
+	if b.read("dotfiles/CLAUDE.md") != "bob's rules\n" || b.exists("dotfiles/skills/s/SKILL.md") {
+		t.Fatal("sync wrote through bob's links")
+	}
+	if r := a.sync(); len(r.Trashed) != 0 || a.read(".claude/skills/s/SKILL.md") != "alice's skill\n" {
+		t.Fatalf("alice lost her skill: %+v", r)
+	}
+}
+
+func TestRemoteControlHoldSurvivesAMerge(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newDevice(t, root, "alice", store)
+	b := newDevice(t, root, "matthew", store)
+	now := time.Now()
+	rec := func(rc bool, at time.Time, who string) string {
+		return fmt.Sprintf(`{"sessionId":"local_s1","cwd":%q,"title":%q,"lastActivityAt":%d,"remoteControlUserEnabled":%v,"bridgeSessionIds":["b"]}`, filepath.Join(a.home, "code"), who, at.UnixMilli(), rc)
+	}
+	put := func(d *device, c string) {
+		if err := os.WriteFile(d.recordPath("s1"), []byte(c), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(a, rec(false, now, "alice"))
+	syncAll(1, a, b)
+	put(a, rec(true, now.Add(time.Minute), "alice"))
+	a.sync()
+	b.sync() // bob's copy goes to the trash
+	put(a, rec(true, now.Add(2*time.Minute), "alice"))
+	a.sync()
+	put(b, rec(false, now.Add(time.Hour), "bob re-saved")) // newer stamp than alice's
+	b.sync()
+	a.sync()
+	if data, _ := os.ReadFile(a.recordPath("s1")); !strings.Contains(string(data), `"remoteControlUserEnabled":true`) {
+		t.Fatalf("bob's copy replaced alice's live record: %s", data)
+	}
+	if _, err := os.Stat(b.recordPath("s1")); err == nil {
+		t.Fatal("bob shows the session twice")
+	}
+}
+
+func TestNewFileDownloadNeverReplacesAFileCreatedMeanwhile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "notes.md")
+	if err := os.WriteFile(p, []byte("made here during the pass\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLocalPerm(p, []byte("from the other Mac\n"), nil, 0644, dir); err != errLocalChanged {
+		t.Fatalf("want errLocalChanged, got %v", err)
+	}
+	if data, _ := os.ReadFile(p); string(data) != "made here during the pass\n" {
+		t.Fatalf("file replaced: %q", data)
 	}
 }
