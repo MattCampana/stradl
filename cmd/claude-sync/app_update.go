@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 )
 
 // appAsset is the release asset holding Stradl.app, the Mac app.
@@ -22,9 +23,7 @@ func appPath() (path string, installed bool) {
 			return p, true
 		}
 	}
-	if f, err := os.CreateTemp("/Applications", ".stradl-write-test-"); err == nil {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
+	if syscall.Access("/Applications", 0x2 /* W_OK */) == nil {
 		return "/Applications/Stradl.app", false
 	}
 	return filepath.Join(home, "Applications", "Stradl.app"), false
