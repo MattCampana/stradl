@@ -15,10 +15,11 @@
 
 ---
 
-Stradl keeps every Claude Code session on every one of your Macs. Start a conversation on your desk Mac, sit down at your laptop, and it's already there: in the Claude desktop app's sidebar and in `claude --resume`.
+Stradl keeps every Claude Code session on every one of your Macs, along with everything the sessions worked on. Start a conversation on your desk Mac, sit down at your laptop, and it's already there: in the Claude desktop app's sidebar and in `claude --resume`, with its project folder, git history and files.
 
 - **Every session, everywhere.** Three sessions on one Mac, two on another and four on a third become nine on all three. Nothing is overwritten, and nothing is left behind.
-- **Built for the Claude desktop app.** Sessions show up in the Code tab's sidebar on every Mac, not just in the terminal.
+- **Everything a session touched.** The project folders your sessions work in sync too, git repositories included, plus all of `~/.claude`: settings, skills, agents, commands, plugins, plans. Logins stay on each Mac.
+- **Built for the Claude desktop app.** Sessions show up in the Code tab's sidebar on every Mac, in the same groups and with the same pins, not just in the terminal.
 - **Different usernames are fine.** `/Users/matt` on one Mac and `/Users/breakpoint` on another just work.
 - **Projects can live in different folders on each Mac.** Stradl finds each project on each Mac by its git remote, so `~/code/app` here and `~/Projects/app` there are the same project.
 - **Conversations never fork silently.** Continue the same session on two Macs before they sync and Stradl merges both sides, so every turn survives.
@@ -77,14 +78,18 @@ Look for the Stradl mark in the menu bar:
 
 **Deleting a session only deletes it on that Mac.** The other Macs keep their copy, and so does your storage. If you continue that session elsewhere later, it comes back.
 
+**Deleting a file in a project folder deletes it on every Mac,** the way it would in one folder. Nothing is lost: on the other Macs it moves to `~/.stradl/trash` for 30 days, and storage keeps old versions for 30 days too. If one sync would delete more than half of a folder at once, Stradl stops and asks you to confirm with `stradl sync --allow-mass-delete`.
+
+**Sessions you use from your phone show once.** A session you control from the Claude app on your phone (Remote Control) already appears on every Mac through your Claude account, so Stradl doesn't add a second copy. It syncs normally once Remote Control is off.
+
 ### Commands
 
 | Command | |
 |---------|---|
-| `stradl sync` | Two-way sync now |
+| `stradl sync` | Two-way sync now (`--allow-mass-delete` to confirm a large delete) |
 | `stradl status` | Agent status, last sync, and what's waiting to sync |
 | `stradl dashboard` | Open the dashboard in your browser (`--no-open` prints its address) |
-| `stradl diff` | The files the next sync would upload, download or merge |
+| `stradl diff` | The files the next sync would upload, download, merge, delete or move to the trash |
 | `stradl agent install` / `uninstall` | Start or stop the background app at login |
 | `stradl agent pause` / `resume` | Pause or resume background syncing |
 | `stradl update` | Update to the latest release |
@@ -96,8 +101,9 @@ Every sync compares each file on your Mac with the copy in storage and with the 
 
 - **New on either side:** copied to the other side.
 - **Changed on one side:** that side wins.
-- **Changed on both sides:** transcripts are merged line by line (every message is kept, in time order); sidebar entries keep the most recently active version.
-- **Deleted on this Mac:** stays deleted here; every other copy is kept.
+- **Changed on both sides:** transcripts are merged line by line (every message is kept, in time order); sidebar entries keep the most recently active version; any other file keeps the newer copy and saves the other as a `.conflict` copy.
+- **A project folder that was already on two Macs:** your copy of each file stays put and the other Mac's is saved beside it, except that a file git says you never touched takes the other Mac's edit. In a git repository the Mac that is ahead wins, and a branch two Macs moved apart keeps both commits (the other one as `stradl/<branch>-<commit>`).
+- **Deleted:** sessions, prompt history and sidebar entries stay deleted on that Mac only; every other file is deleted everywhere, into the other Macs' trash.
 - **Missing from storage:** restored from this Mac.
 
 Remote changes are detected by version tags, not timestamps, so a Mac with a wrong clock can't lose data. Uploads are compare-and-swap: if two Macs sync the same file at the same moment, the slower one merges instead of overwriting. Paths inside sessions are stored with a portable `${HOME}` token and rewritten for each Mac on download.
@@ -112,6 +118,8 @@ Remote changes are detected by version tags, not timestamps, so a Mac with a wro
 
 ## Limitations
 
+- **Build output isn't synced** (`node_modules`, `.venv`, `__pycache__`, `.next` and the like): each Mac rebuilds its own. Set `sync_build_artifacts: true` in `~/.stradl/config.yaml` to include it, and `folder_exclude` to leave out more.
+- **A folder git is working in waits.** While git holds a lock in a repository (a commit or checkout in progress), that folder sits the sync out and catches up on the next one.
 - **macOS only** for the menu bar app. Linux builds run the same sync engine headless (`stradl agent run --headless`).
 - **A project you haven't cloned on a Mac** can't be opened there; the session still syncs, and the Claude app tells you the folder is missing. Stradl looks for clones in `~/code`, `~/Code`, `~/src`, `~/dev`, `~/Developer`, `~/Projects`, `~/projects`, `~/repos`, `~/git`, `~/GitHub`, `~/github`, `~/work`, `~/Work`, `~/workspace`, `~/Documents` and `~/Desktop`, up to four levels deep, and matches them by git remote. Clone the repo into one of those folders, or map the folder you use with `path_map` in `~/.stradl/config.yaml` (see [How it works](docs/how-it-works.md#different-usernames-different-folders)).
 - **Terminal sessions expire after 30 days of inactivity** under Claude Code's default `cleanupPeriodDays`, on every Mac. Sessions started in the Claude desktop app are exempt by default, and the exemption travels with the transcript. To keep terminal sessions longer, raise `cleanupPeriodDays` in `~/.claude/settings.json` on each Mac.

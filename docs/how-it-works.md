@@ -11,14 +11,27 @@ title: How It Works
 
 ## What gets synced
 
+Under the default scope (`scope: everything`):
+
 | On your Mac | In storage | Why |
 |-------------|------------|-----|
-| `~/.claude/projects/**` | `projects/${HOME}-…/…` | Session transcripts, subagent transcripts, tool results |
-| `~/.claude/history.jsonl` | `history.jsonl` | Prompt history (up-arrow) |
-| `~/.claude/plans`, `~/.claude/tasks` | same | Plan files and task lists sessions refer to |
+| `~/.claude/**` | same path | Transcripts, prompt history, settings, `CLAUDE.md`, skills, agents, commands, plugins, plans, tasks |
+| MCP servers in `~/.claude.json` | `_external/mcp-servers.json` | The servers you added, merged across Macs |
+| Every project folder a session works in, `.git` included | `_folders/<path under home>/…` | The code, files and git history a session needs |
 | `~/Library/Application Support/Claude/claude-code-sessions/<account>/<org>/local_*.json` | `_desktop/sessions/…` | The Claude desktop app's Code-tab sidebar entries |
+| The sidebar's groups, membership and pins (in `claude_desktop_config.json`) | `_desktop/sidebar.json` | The same sidebar layout on every Mac |
 
-Everything else stays on the Mac: credentials, `~/.claude.json`, settings, plugins, running-process records, the desktop app's private state (tombstones, indexes, scheduled tasks), and `*.desktop-released.json` markers. The desktop app writes one of those next to a transcript when you delete or archive the session, and it tells that Mac's Claude Code it may expire the transcript; synced, it would expire the session on every Mac. Every file is gzip-compressed and age-encrypted before upload, and stored as `<path>.age`.
+Some things stay on each Mac:
+
+- Logins: `.credentials.json` and the rest of `~/.claude.json`.
+- Claude Code's per-process and per-Mac folders: `sessions`, `session-env`, `shell-snapshots`, `cache`, `statsig`, `telemetry`, `debug`, `logs`, `ide`, `backups`.
+- Build output: `node_modules`, `.venv`, `venv`, `__pycache__`, `*.pyc`, `.pytest_cache`, `.mypy_cache`, `.next`, `.nuxt`, `.gradle`, `.DS_Store`.
+- Temporary and lock files.
+- `*.desktop-released.json` markers. The desktop app writes one next to a transcript when you delete or archive the session, and it tells that Mac's Claude Code it may expire the transcript; synced, it would expire the session on every Mac.
+
+Every file is gzip-compressed and age-encrypted before upload and stored as `<path>.age`. Files above 32 MB stream through without being held in memory, so there is no size limit.
+
+`scope: sessions` (what v2.0 used) syncs only transcripts, prompt history, plans, tasks and the sidebar. Upgrading moves a v2.0 install to `everything` unless you chose the scope yourself.
 
 ## The sync pass
 
@@ -31,11 +44,14 @@ Everything else stays on the Mac: credentials, `~/.claude.json`, settings, plugi
 | Changed only here | Uploaded |
 | Changed only in storage | Downloaded |
 | Changed on both sides | Merged (see below) |
-| Deleted on this Mac | Stays deleted here; storage and the other Macs keep it |
+| Session, prompt history or sidebar entry deleted on this Mac | Stays deleted here; storage and the other Macs keep it |
+| Any other file deleted on this Mac | Deleted in storage; the other Macs move it to `~/.stradl/trash` |
 | Deleted here, then changed on another Mac | Comes back with the new content |
 | Missing from storage | Restored from this Mac |
 
-The result is a union: every session any Mac has ever created ends up on every Mac.
+Sessions are a union: every session any Mac has ever created ends up on every Mac. Everything else mirrors, so the Macs stay identical, but no delete ever destroys anything outright: deleted files wait 30 days in the other Macs' trash, and storage keeps old versions for 30 days.
+
+A pass that would delete more than half of the files a folder has synced, or finds most of what this Mac synced gone from storage, deletes nothing and warns you instead (in the menu bar, the log and the dashboard). If that is what you meant, run `stradl sync --allow-mass-delete`.
 
 ### Change detection without clocks
 
@@ -49,7 +65,41 @@ Every upload says "replace the version I last saw" (an `If-Match` precondition).
 
 - **Transcripts and prompt history** are append-only JSONL files. Stradl takes the union of both versions' lines: entries are identified by their `uuid` (or exact content when there is none), the shared history keeps its order, and the two divergent tails are interleaved by timestamp. Claude Code rebuilds the conversation from each entry's `parentUuid`, so turns written on the other Mac survive as a branch, and the newest entry ends the file.
 - **Sidebar entries** keep whichever version was active most recently (`lastActivityAt`).
-- **Anything else** keeps the newer copy and saves the other beside it as `<file>.conflict.<timestamp>`.
+- **Anything else** keeps the newer copy and saves the other beside it as `<file>.conflict.<timestamp>.this-mac` (or `.other-mac`). Inside `.git` and `~/.claude/plugins`, where a stray file would confuse git or Claude Code, the copy goes to `~/.stradl/conflicts/` instead. Conflict copies never sync.
+
+## Project folders
+
+Every folder a session works in syncs, found from the working folder of each sidebar entry and transcript, plus any you list in `extra_folders`. A folder inside a git repository syncs the whole repository. Each folder lands at the same path under home on every Mac (`~/code/app` here is `~/code/app` there), and one that doesn't exist yet is created. Your home folder itself, `~/Library` (where iCloud Drive lives), the Trash and Stradl's and Claude's own folders never sync as project folders.
+
+Set `folder_sync: false` to turn this off, and use `folder_exclude` for patterns to leave out:
+
+```yaml
+folder_exclude:
+  - "*.mov"
+  - "dist/**"
+```
+
+### When a folder was already on two Macs
+
+The first time a Mac syncs a folder that another Mac already synced, nobody knows which copy is right, so Stradl doesn't guess by timestamps:
+
+- **A file only one Mac has** goes to both.
+- **A file both Macs have with different content:** this Mac's copy stays where it is, and the other Mac's is saved beside it as a `.conflict` copy. The one exception is a file git says you never touched (it matches the last commit); then the other Mac's edit wins, and your untouched copy, which git still has, goes to `~/.stradl/conflicts/`.
+- **git's own files** (HEAD, branches, the index) all come from whichever Mac's checkout is ahead, so they always agree with each other. When neither contains the other, the Mac with the newer commit leads.
+
+So a fresh clone on one Mac picks up the uncommitted work another Mac has, and a Mac with new commits is never rolled back by an older copy.
+
+### Git repositories
+
+`.git` syncs like any folder, with a few rules that keep repositories sound:
+
+- **Never mid-command.** While git holds a lock anywhere in `.git` (a commit, checkout or rebase in progress), the folder sits the pass out. A lock left behind for more than 15 minutes, usually by a crashed git, produces a warning.
+- **Objects first.** Within a pass, git's objects sync before its refs, index and HEAD, so a branch never points at a commit that hasn't arrived.
+- **Branches fast-forward.** When two Macs moved a branch and one commit contains the other, the branch takes the newer one. When they diverged, the branch keeps the newer commit and the other is saved as a branch named `stradl/<branch>-<short commit>`, so no commit becomes unreachable. Merge it, or delete it once you don't need it.
+
+## Remote Control
+
+A session you control from your phone (Remote Control) is served by the Mac it runs on, and the Claude app on every Mac signed in to your account lists it already. A synced copy of its sidebar entry would show it twice, so while Remote Control is on for a session, the other Macs don't take its entry (one they already had moves to the trash). Its transcript keeps syncing. When you turn Remote Control off, the entry changes and syncs as usual.
 
 ### Live sessions
 
@@ -117,5 +167,8 @@ Without a running agent, `stradl dashboard` serves the dashboard itself until yo
 ├── status.json     the agent's last result (read by the menu bar and `stradl status`)
 ├── dashboard.json  the running agent's dashboard address and key (0600)
 ├── agent.log       background agent log
+├── trash/          files other Macs deleted, by day, kept 30 days
+├── conflicts/      losing copies of conflicts inside git repositories and plugins
+├── folders.json    the project folders the last sync covered
 └── sync.lock       held while a sync runs
 ```
