@@ -59,7 +59,7 @@ vulncheck:
 build-all: release
 
 release:
-	scripts/build-release.sh "$(VERSION)" "$(or $(RELEASE_REPO),REPLACE_OWNER/stradl)" $(DIST_DIR)
+	scripts/build-release.sh "$(VERSION)" "$(or $(RELEASE_REPO),MattCampana/stradl)" $(DIST_DIR)
 
 # End-to-end test of install.sh against locally served release assets
 test-install:

@@ -8,7 +8,7 @@
 <p align="center"><strong>Musical chairs for your Claude sessions.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/REPLACE_OWNER/stradl/releases/latest"><img src="https://img.shields.io/github/v/release/REPLACE_OWNER/stradl?label=release" alt="Latest release"></a>
+  <a href="https://github.com/MattCampana/stradl/releases/latest"><img src="https://img.shields.io/github/v/release/MattCampana/stradl?label=release" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/macOS-13%2B-black?logo=apple" alt="macOS 13+">
 </p>
@@ -34,7 +34,7 @@ You need about ten minutes: two for Azure, then a couple per Mac.
 Open [Azure Cloud Shell](https://shell.azure.com) (Bash) and run:
 
 ```bash
-curl -fsSL https://github.com/REPLACE_OWNER/stradl/releases/latest/download/azure-setup.sh | bash -s -- \
+curl -fsSL https://github.com/MattCampana/stradl/releases/latest/download/azure-setup.sh | bash -s -- \
   --resource-group rg-stradl --location eastus --account <yourname>stradl
 ```
 
@@ -43,7 +43,7 @@ Pick a storage account name of 3 to 24 lowercase letters and digits. The script 
 ### 2. Install on each Mac
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://github.com/REPLACE_OWNER/stradl/releases/latest/download/install.sh)"
+/bin/bash -c "$(curl -fsSL https://github.com/MattCampana/stradl/releases/latest/download/install.sh)"
 ```
 
 The installer needs no admin rights, no Homebrew and no Go. It downloads the release for your Mac, verifies its checksum, installs `stradl` into `~/.local/bin`, then walks you through setup:

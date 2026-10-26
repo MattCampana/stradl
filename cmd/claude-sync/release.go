@@ -29,7 +29,7 @@ import (
 // releases. Release builds inject it with
 // -ldflags "-X main.releaseRepo=<owner>/stradl"; `update` and `changelog`
 // refuse to run while it still holds the placeholder.
-var releaseRepo = "REPLACE_OWNER/stradl"
+var releaseRepo = "MattCampana/stradl"
 
 // githubAPIBase is the GitHub REST API root. It is a variable so tests can
 // point it at an httptest server.

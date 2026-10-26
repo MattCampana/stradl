@@ -7,7 +7,7 @@ title: Stradl
 
 **Musical chairs for your Claude sessions.**
 
-[How It Works](./how-it-works) | [Azure Setup](./azure) | [Security](./security) | [GitHub](https://github.com/REPLACE_OWNER/stradl)
+[How It Works](./how-it-works) | [Azure Setup](./azure) | [Security](./security) | [GitHub](https://github.com/MattCampana/stradl)
 
 ---
 
@@ -17,4 +17,4 @@ Stradl keeps every Claude Code session on every one of your Macs, in the Claude 
 - **[Azure Setup](./azure):** create the storage container and token in Azure Cloud Shell.
 - **[Security](./security):** what is encrypted, what the token can reach, and how to revoke it.
 
-Install and day-to-day use are covered in the [README](https://github.com/REPLACE_OWNER/stradl#readme).
+Install and day-to-day use are covered in the [README](https://github.com/MattCampana/stradl#readme).
