@@ -49,6 +49,8 @@ type cwdEntry struct {
 	// Scanned bytes (transcripts only grow, so later reads resume there).
 	Cwds    []string `json:"cwds,omitempty"`
 	Scanned int64    `json:"scanned,omitempty"`
+	// Touched are the folders of files its tools read or edited.
+	Touched []string `json:"touched,omitempty"`
 	// Tail checksums the bytes just before Scanned: a merge that inserts
 	// lines earlier in the file shifts them, and the file is read again.
 	Tail uint32 `json:"tail,omitempty"`

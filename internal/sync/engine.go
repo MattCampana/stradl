@@ -409,6 +409,16 @@ type job struct {
 	run   func() error
 }
 
+// insideFolder reports whether root lies inside another project folder.
+func insideFolder(roots []*syncRoot, root *syncRoot) bool {
+	for _, r := range roots {
+		if r != root && r.kind == rootFolder && strings.HasPrefix(root.prefix, r.prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // insideDeferred reports whether root is inside a project folder sitting
 // this pass out.
 func insideDeferred(roots []*syncRoot, root *syncRoot) bool {
@@ -441,6 +451,11 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	// so does every repository inside it (folders before the ones they hold).
 	local := make(map[string]*localFile)
 	var lockWarnings []string
+	var fresh []string // see errFolderMissing below
+	wasRoot := make(map[string]bool)
+	for _, rel := range s.knownFolderList() {
+		wasRoot[FoldersPrefix+rel+"/"] = true
+	}
 	order := append([]*syncRoot(nil), roots...)
 	sort.SliceStable(order, func(i, j int) bool { return order[i].prefix < order[j].prefix })
 	for _, root := range order {
@@ -459,6 +474,12 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			root.deferred = true
 			report.InICloud = append(report.InICloud, root.prefix)
 			continue
+		case errors.Is(err, errFolderMissing) && s.state.hasPrefix(root.prefix) && !wasRoot[root.prefix] && insideFolder(roots, root):
+			// A repository inside another folder that synced only as part of
+			// it (an older Stradl, before each repository synced on its own):
+			// its state is the folder's, not this repository's. It's
+			// downloaded fresh, and nothing is deleted for it.
+			fresh = append(fresh, root.prefix)
 		case errors.Is(err, errFolderMissing):
 			if s.state.hasPrefix(root.prefix) && !s.cfg.AllowMassDelete {
 				// It synced from here before: a rename, a re-clone in
@@ -532,6 +553,16 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	}
 
 	known := s.state.Snapshot()
+	for np := range known {
+		for _, p := range fresh {
+			if strings.HasPrefix(np, p) {
+				delete(known, np)
+				if !dryRun {
+					s.state.RemoveFile(np)
+				}
+			}
+		}
+	}
 	s.known = known
 	defer func() { s.known = nil }()
 	paths := make(map[string]bool, len(local)+len(remote))
@@ -881,12 +912,29 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	}
 	if s.cfg.IsFolderSyncEnabled() {
 		var folders []string
+		nested := make(map[string][]string)
+		before := s.readFolderList().Nested
 		for _, r := range roots {
-			if r.kind == rootFolder {
-				folders = append(folders, strings.TrimSuffix(strings.TrimPrefix(r.prefix, FoldersPrefix), "/"))
+			if r.kind != rootFolder {
+				continue
 			}
+			rel := strings.TrimSuffix(strings.TrimPrefix(r.prefix, FoldersPrefix), "/")
+			folders = append(folders, rel)
+			set := make(map[string]bool)
+			for d := range r.nested {
+				set[d] = true
+			}
+			if r.deferred { // not scanned this pass: keep what the last one found
+				for _, d := range before[rel] {
+					set[d] = true
+				}
+			}
+			for d := range set {
+				nested[rel] = append(nested[rel], d)
+			}
+			sort.Strings(nested[rel])
 		}
-		if err := s.saveFolderList(folders); err != nil {
+		if err := s.saveFolderList(folders, nested); err != nil {
 			s.log("Warning: failed to record project folders: %v", err)
 		}
 	}

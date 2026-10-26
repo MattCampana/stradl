@@ -36,21 +36,25 @@ func FolderStats(cfg *config.Config) ([]FolderStat, error) {
 		return nil, err
 	}
 	snap := state.Snapshot()
-	folders := s.knownFolderList()
-	// A file belongs to the innermost listed folder holding it (a repository
-	// inside another folder is listed, and counted, on its own).
-	owner := func(np string) string {
-		best := ""
-		for _, rel := range folders {
-			if strings.HasPrefix(np, FoldersPrefix+rel+"/") && len(rel) > len(best) {
-				best = rel
-			}
+	list := s.readFolderList()
+	folders := list.Folders
+	roots := make([]*syncRoot, 0, len(folders))
+	for _, rel := range folders {
+		roots = append(roots, s.folderRoot(rel))
+	}
+	s.linkFolderRoots(roots, nil)
+	// Repositories state knows of (they synced once): with the ones on disk,
+	// what a folder holding them leaves out unless they're listed themselves.
+	stateRepo := make(map[string]bool)
+	for np := range snap {
+		if d, ok := strings.CutSuffix(np, "/.git/HEAD"); ok {
+			stateRepo[d] = true
 		}
-		return best
 	}
 	var out []FolderStat
-	for _, rel := range folders {
-		abs := filepath.Join(s.home, filepath.FromSlash(rel))
+	for _, root := range roots {
+		rel := strings.TrimSuffix(strings.TrimPrefix(root.prefix, FoldersPrefix), "/")
+		abs := root.dir
 		st := FolderStat{Path: rel, Abs: abs}
 		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
 			st.Exists = true
@@ -58,42 +62,39 @@ func FolderStats(cfg *config.Config) ([]FolderStat, error) {
 		if fi, err := os.Stat(filepath.Join(abs, ".git")); err == nil && fi.IsDir() {
 			st.Git = true
 		}
-		prefix := FoldersPrefix + rel + "/"
-		hasChild := false
-		for _, other := range folders {
-			hasChild = hasChild || strings.HasPrefix(other, rel+"/")
-		}
 		repoAt := make(map[string]bool)
+		for _, d := range list.Nested[rel] {
+			repoAt[d] = true // the last sync left it out
+		}
 		inNested := func(inner string) bool {
 			for i := 0; i < len(inner); i++ {
 				if inner[i] != '/' {
 					continue
 				}
 				d := inner[:i]
-				if d == ".git" || strings.HasSuffix(d, "/.git") {
+				if hasGitSegment(d) {
 					return false
 				}
 				is, ok := repoAt[d]
 				if !ok {
-					is = isRepoDir(filepath.Join(abs, filepath.FromSlash(d)))
+					is = stateRepo[root.prefix+d] || isRepoDir(filepath.Join(abs, filepath.FromSlash(d)))
 					repoAt[d] = is
 				}
 				if is {
-					return true // a repository no session needs (listed ones own their files)
+					return true
 				}
 			}
 			return false
 		}
 		for np, fs := range snap {
-			if !strings.HasPrefix(np, prefix) || fs.LocalDeleted || owner(np) != rel {
+			if r, _ := s.rootFor(roots, np); r != root || fs.LocalDeleted {
 				continue
 			}
 			// State can still hold files that no longer sync (build output
 			// added to the excluded names later, or a repository inside the
 			// folder that syncs only when needed): count what syncs now.
-			inner := np[len(prefix):]
-			if !s.folderInclude(inner) || cfg.IsBuildArtifact(inner) || inNested(inner) ||
-				(strings.HasPrefix(inner, ".git/modules/") && !hasChild) {
+			inner := np[len(root.prefix):]
+			if !s.folderInclude(inner) || cfg.IsBuildArtifact(inner) || !root.owns(inner) || inNested(inner) {
 				continue
 			}
 			st.Files++

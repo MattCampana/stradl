@@ -35,9 +35,17 @@ func LocalFingerprint(cfg *config.Config) (string, error) {
 // other Macs).
 func (s *Syncer) LocalFingerprint() (string, error) {
 	var lines []string
-	for _, root := range s.syncRoots(nil, false) {
+	roots := s.syncRoots(nil, false)
+	sort.SliceStable(roots, func(i, j int) bool { return roots[i].prefix < roots[j].prefix })
+	for _, root := range roots {
+		if root.kind == rootFolder && insideDeferred(roots, root) {
+			// Sync sits it out with the folder holding it.
+			lines = append(lines, "d\x00"+root.prefix)
+			continue
+		}
 		files, err := s.scanRoot(root)
 		if err != nil && root.kind == rootFolder {
+			root.deferred = true
 			lines = append(lines, "d\x00"+root.prefix+"\x00"+err.Error())
 			continue
 		}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -518,6 +519,31 @@ func (s *Syncer) reindexRepos(roots []*syncRoot) {
 		}
 		_, _ = runGit(work, "--git-dir="+gitDir, "--work-tree="+work, "update-index", "-q", "--refresh")
 		_ = os.Remove(filepath.Join(gitDir, reindexMarker))
+		placeSubmodules(work, gitDir)
+	}
+}
+
+// placeSubmodules creates the empty folder of each submodule HEAD records
+// that this Mac doesn't have, as a clone without its submodules has them:
+// a submodule no session works in doesn't sync, and a missing folder makes
+// git show it as deleted, one `git add -A` away from committing that.
+func placeSubmodules(work, gitDir string) {
+	out, err := runGit(work, "--git-dir="+gitDir, "--work-tree="+work, "ls-files", "-s", "-z")
+	if err != nil {
+		return
+	}
+	for _, entry := range strings.Split(string(out), "\x00") {
+		meta, p, ok := strings.Cut(entry, "\t")
+		if !ok || !strings.HasPrefix(meta, "160000 ") {
+			continue
+		}
+		if p = filepath.ToSlash(filepath.Clean(filepath.FromSlash(p))); p == "." || strings.HasPrefix(p, "../") || filepath.IsAbs(p) || hasGitSegment(p) {
+			continue
+		}
+		abs := filepath.Join(work, filepath.FromSlash(p))
+		if _, err := os.Lstat(abs); errors.Is(err, fs.ErrNotExist) {
+			_ = os.MkdirAll(abs, 0755)
+		}
 	}
 }
 
