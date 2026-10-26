@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"io/fs"
 	"os"
@@ -387,22 +388,24 @@ func (c *cwdCache) set(np string, e cwdEntry) {
 // reading resumes where the last read stopped, at the end of the last whole
 // line; one that shrank (replaced) is read again from the start.
 func updateCwds(p string, e cwdEntry, size int64) cwdEntry {
+	f, err := os.Open(p)
+	if err != nil {
+		return e
+	}
+	defer func() { _ = f.Close() }()
 	from := e.Scanned
 	cwds := e.Cwds
-	if from > size || (from == 0 && len(cwds) == 0) || (from == 0 && e.Cwd != "") {
+	if from > size || from == 0 || e.Tail == 0 || tailSum(f, from) != e.Tail {
+		// New, truncated, or rewritten before where the last read stopped
+		// (MergeJSONL interleaves another Mac's lines by time).
 		from, cwds = 0, nil
 	}
 	seen := make(map[string]bool, len(cwds))
 	for _, c := range cwds {
 		seen[c] = true
 	}
-	f, err := os.Open(p)
-	if err != nil {
-		return cwdEntry{Size: size, Cwds: cwds, Scanned: from}
-	}
-	defer func() { _ = f.Close() }()
 	if _, err := f.Seek(from, io.SeekStart); err != nil {
-		return cwdEntry{Size: size, Cwds: cwds, Scanned: from}
+		return cwdEntry{Size: size, Cwds: cwds, Scanned: from, Tail: e.Tail}
 	}
 	r := bufio.NewReaderSize(f, 256<<10)
 	pos := from
@@ -427,7 +430,21 @@ func updateCwds(p string, e cwdEntry, size int64) cwdEntry {
 	if len(cwds) > 0 {
 		first = cwds[0]
 	}
-	return cwdEntry{Size: size, Cwd: first, Cwds: cwds, Scanned: pos}
+	return cwdEntry{Size: size, Cwd: first, Cwds: cwds, Scanned: pos, Tail: tailSum(f, pos)}
+}
+
+// tailSum checksums up to 64 bytes of f ending at pos (0 when pos is 0 or
+// unreadable).
+func tailSum(f *os.File, pos int64) uint32 {
+	n := min(pos, 64)
+	if n <= 0 {
+		return 0
+	}
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, pos-n); err != nil {
+		return 0
+	}
+	return crc32.ChecksumIEEE(buf)
 }
 
 // folderRoot builds the sync root for a home-relative project folder.
@@ -444,6 +461,7 @@ func (s *Syncer) folderRoot(rel string) *syncRoot {
 		children: make(map[string]bool),
 		nested:   make(map[string]bool),
 		modules:  make(map[string]bool),
+		moduleOf: make(map[string]string),
 	}
 }
 
@@ -463,14 +481,25 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 		for _, inner := range folders {
 			if inner != outer && strings.HasPrefix(inner.prefix, outer.prefix) {
 				child := strings.TrimSuffix(strings.TrimPrefix(inner.prefix, outer.prefix), "/")
+				m := moduleDir(outer.dir, inner.dir, child)
 				outer.children[child] = true
-				outer.modules[moduleDir(outer.dir, inner.dir, child)] = true
+				outer.modules[m] = true
+				outer.moduleOf[child] = m
 			}
 		}
 	}
 	markers := make(map[string]bool)
 	for _, rel := range remoteFolderMarkers(objects) {
 		markers[rel] = true
+	}
+	for _, r := range folders {
+		rel := strings.TrimSuffix(strings.TrimPrefix(r.prefix, FoldersPrefix), "/")
+		for i := 0; i < len(rel) && !markers[rel]; i++ {
+			if rel[i] == '/' && markers[rel[:i]] {
+				r.stale = true
+				break
+			}
+		}
 	}
 	for _, obj := range objects {
 		if !strings.HasPrefix(obj.Key, FoldersPrefix) {
@@ -615,8 +644,8 @@ func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 	if _, err := os.Stat(root.dir); os.IsNotExist(err) {
 		return files, errFolderMissing
 	}
-	if busy := gitfileBusy(root.dir); busy != nil {
-		return nil, busy
+	if err := s.gitfileBusy(root.dir); err != nil {
+		return nil, err
 	}
 	own := []string{filepath.Clean(s.claudeDir), filepath.Clean(s.stateDir())}
 	err := filepath.WalkDir(root.dir, func(p string, d fs.DirEntry, err error) error {
@@ -692,8 +721,10 @@ func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 
 // gitfileBusy checks, for a repository whose .git is a file (a submodule or
 // a linked worktree), the git data that file points to for lock files: git
-// keeps them there, outside the folder the scan walks.
-func gitfileBusy(dir string) *gitBusyError {
+// keeps them there, outside the folder the scan walks. It returns a
+// *gitBusyError, or the folderGate's error when that data lies in a folder
+// macOS hasn't let Stradl read yet.
+func (s *Syncer) gitfileBusy(dir string) error {
 	fi, err := os.Lstat(filepath.Join(dir, ".git"))
 	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 4096 {
 		return nil
@@ -709,6 +740,10 @@ func gitfileBusy(dir string) *gitBusyError {
 	gitdir = strings.TrimSpace(gitdir)
 	if !filepath.IsAbs(gitdir) {
 		gitdir = filepath.Join(dir, gitdir)
+	}
+	gitdir = filepath.Clean(gitdir)
+	if err := s.folderGate(gitdir); err != nil {
+		return err
 	}
 	var busy *gitBusyError
 	_ = filepath.WalkDir(gitdir, func(p string, d fs.DirEntry, err error) error {
@@ -727,6 +762,9 @@ func gitfileBusy(dir string) *gitBusyError {
 		}
 		return nil
 	})
+	if busy == nil {
+		return nil // not a nil *gitBusyError in a non-nil error
+	}
 	return busy
 }
 

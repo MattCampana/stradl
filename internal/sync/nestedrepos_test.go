@@ -2,11 +2,15 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
+	"time"
 )
 
 // Every git repository syncs as its own unit, and only when a session needs
@@ -300,5 +304,208 @@ func TestSubmoduleWaitsForGitInItsDataDir(t *testing.T) {
 	r := a.sync()
 	if len(r.Uploaded) != 0 || !slices.Contains(r.Deferred, FoldersPrefix+"code/p/lib/") {
 		t.Fatalf("uploaded = %v, deferred = %v", r.Uploaded, r.Deferred)
+	}
+}
+
+// uploadAsOldStradl puts every file of the folder at rel (relative to d's
+// home) into storage the way Stradl before v2.3 did for a repository inside
+// a synced folder: as plain files of the outer folder, with no marker of its
+// own.
+func uploadAsOldStradl(t *testing.T, d *device, outer, rel string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := d.s.put(ctx, FoldersPrefix+outer+"/"+folderMarker, []byte("{}\n"), ""); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(d.home, filepath.FromSlash(rel))
+	err := filepath.WalkDir(base, func(p string, e fs.DirEntry, err error) error {
+		if err != nil || e.IsDir() {
+			return err
+		}
+		r, _ := filepath.Rel(d.home, p)
+		r = filepath.ToSlash(r)
+		if gitPerMac(r) {
+			return nil
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		_, err = d.s.put(ctx, FoldersPrefix+r, data, "")
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFrozenOldUploadNeverRollsBackANewerClone(t *testing.T) {
+	needGit(t)
+	root := t.TempDir()
+	store := newCASStore()
+	carol := newEverythingDevice(t, root, "carol", store)
+	alice := newEverythingDevice(t, root, "alice", store)
+	src := filepath.Join(carol.home, "code", "work", "lib")
+	if err := os.MkdirAll(src, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "init", "-q", "-b", "main")
+	carol.write("code/work/lib/lib.go", "v1\n")
+	git(t, src, "add", "-A")
+	git(t, src, "commit", "-q", "-m", "v1")
+	uploadAsOldStradl(t, carol, "code/work", "code/work/lib")
+
+	// alice cloned it, moved on to v2, and now a session works in it.
+	lib := filepath.Join(alice.home, "code", "work", "lib")
+	if err := os.MkdirAll(filepath.Dir(lib), 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, filepath.Dir(lib), "clone", "-q", src, "lib")
+	alice.write("code/work/lib/lib.go", "v2\n")
+	git(t, lib, "commit", "-q", "-am", "v2")
+	v2 := git(t, lib, "rev-parse", "HEAD")
+	alice.s.cfg.ExtraFolders = []string{lib}
+	alice.sync()
+	if got := alice.read("code/work/lib/lib.go"); got != "v2\n" {
+		t.Fatalf("lib.go = %q: the frozen copy rolled alice's clone back", got)
+	}
+	if got := git(t, lib, "rev-parse", "HEAD"); got != v2 {
+		t.Fatalf("HEAD moved from %s to %s", v2, got)
+	}
+	alice.sync()
+	if got := alice.read("code/work/lib/lib.go"); got != "v2\n" {
+		t.Fatalf("second pass: lib.go = %q", got)
+	}
+}
+
+func TestDeferredSubmoduleHoldsBackItsGitData(t *testing.T) {
+	needGit(t)
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	src := filepath.Join(a.home, "code", "libsrc")
+	if err := os.MkdirAll(src, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, src, "init", "-q")
+	a.write("code/libsrc/lib.go", "v1\n")
+	a.write("code/libsrc/dir/x.txt", "x\n")
+	git(t, src, "add", "-A")
+	git(t, src, "commit", "-q", "-m", "v1")
+	parent := filepath.Join(a.home, "code", "p")
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, parent, "init", "-q")
+	git(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", src, "lib")
+	git(t, parent, "commit", "-q", "-m", "sub")
+	for _, d := range []*device{a, b} {
+		d.s.cfg.ExtraFolders = []string{filepath.Join(d.home, "code", "p"), filepath.Join(d.home, "code", "p", "lib")}
+	}
+	a.sync()
+	b.sync()
+	b.sync()
+	bLib := filepath.Join(b.home, "code", "p", "lib")
+	v1 := git(t, bLib, "rev-parse", "HEAD")
+
+	a.write("code/p/lib/lib.go", "v2\n")
+	git(t, filepath.Join(parent, "lib"), "commit", "-q", "-am", "v2")
+	a.sync()
+
+	// bob's submodule can't be read whole this pass.
+	locked := filepath.Join(bLib, "dir")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chmod(locked, 0755) }()
+	r, err := b.s.Sync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r
+	if got := git(t, bLib, "rev-parse", "HEAD"); got != v1 {
+		t.Fatalf("the submodule's HEAD moved to %s while its files waited", got)
+	}
+	if err := os.Chmod(locked, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b.sync()
+	b.sync()
+	if b.read("code/p/lib/lib.go") != "v2\n" || git(t, bLib, "rev-parse", "HEAD") == v1 {
+		t.Fatal("the submodule should catch up once readable")
+	}
+}
+
+func TestWorktreeGitDataWaitsForMacOSPermission(t *testing.T) {
+	needGit(t)
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS privacy prompts")
+	}
+	// git records the worktree's real path; the temp folder sits behind
+	// /var -> /private/var.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := newEverythingDevice(t, root, "alice", newCASStore())
+	repo := filepath.Join(a.home, "Documents", "repo")
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "init", "-q")
+	a.write("Documents/repo/a.txt", "a\n")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "a")
+	if err := os.MkdirAll(filepath.Join(a.home, "code"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "worktree", "add", "-q", filepath.Join(a.home, "code", "wt"))
+	a.write("Documents/repo/.git/worktrees/wt/index.lock", "")
+
+	answer := make(chan error)
+	oldRead, oldWait := tccRead, tccWait
+	tccRead = func(dir string) error { return <-answer }
+	tccWait = 20 * time.Millisecond
+	defer func() { tccRead, tccWait = oldRead, oldWait; close(answer) }()
+	tccMu.Lock()
+	tccProbes = map[string]*tccProbe{}
+	tccMu.Unlock()
+
+	_, err = a.s.scanFolder(a.s.folderRoot("code/wt"))
+	if !errors.Is(err, errAwaitingPermission) {
+		t.Fatalf("scan = %v, want it to wait for macOS before reading Documents", err)
+	}
+}
+
+func TestCwdsRereadAfterAMergeInsertsLinesEarlier(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.jsonl")
+	first := cwdLine("u1", "/h/code/work")
+	last := cwdLine("u3", "/h/code/work")
+	if err := os.WriteFile(p, []byte(first+last), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := updateCwds(p, cwdEntry{}, int64(len(first+last)))
+	// Another Mac's line lands between them, by time.
+	merged := first + cwdLine("u2", "/h/code/work/lib") + last
+	if err := os.WriteFile(p, []byte(merged), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e = updateCwds(p, e, int64(len(merged)))
+	if !slices.Contains(e.Cwds, "/h/code/work/lib") {
+		t.Fatalf("cwds = %v, missing the merged-in folder", e.Cwds)
+	}
+	// Appends still resume where the last read stopped.
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString(cwdLine("u4", "/h/code/other"))
+	_ = f.Close()
+	info, _ := os.Stat(p)
+	before := e.Scanned
+	e = updateCwds(p, e, info.Size())
+	if !slices.Contains(e.Cwds, "/h/code/other") || e.Scanned <= before {
+		t.Fatalf("append: %+v", e)
 	}
 }

@@ -73,8 +73,15 @@ type syncRoot struct {
 	children map[string]bool
 	nested   map[string]bool
 	// modules are where (under this root's .git/modules) git keeps the data
-	// of child repositories that are submodules; only those sync.
-	modules map[string]bool
+	// of child repositories that are submodules; only those sync. moduleOf
+	// maps each child to its entry.
+	modules  map[string]bool
+	moduleOf map[string]string
+	// stale marks a repository inside another folder whose files in storage
+	// an older Stradl uploaded as part of that folder: no Mac syncs it as its
+	// own yet (it has no marker), so they stopped updating when the Macs
+	// upgraded, and this Mac's copy is the reference (see chooseSide).
+	stale bool
 }
 
 type localFile struct {
@@ -477,6 +484,22 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		}
 		for rel, info := range files {
 			local[root.prefix+rel] = &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel)), info: info}
+		}
+	}
+	// A submodule sitting the pass out holds back its git data in the
+	// repository holding it too, so its HEAD never moves without its files.
+	for _, outer := range roots {
+		for child, m := range outer.moduleOf {
+			inner, _ := s.rootFor(roots, outer.prefix+child+"/")
+			if inner == nil || inner.prefix != outer.prefix+child+"/" || !inner.deferred || outer.deferred {
+				continue
+			}
+			delete(outer.modules, m)
+			for np := range local {
+				if strings.HasPrefix(np, outer.prefix+".git/modules/"+m+"/") {
+					delete(local, np)
+				}
+			}
 		}
 	}
 	active := func(np string) (*syncRoot, string, bool) {

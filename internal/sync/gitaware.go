@@ -326,13 +326,20 @@ type sideChoice struct {
 //     as <file>.from-<this Mac>, which syncs so every Mac can see both;
 //     an untouched or ignored file goes to ~/.stradl/conflicts on this Mac.
 //     git's own files follow the reference too, so HEAD, the index and the
-//     refs agree, and this Mac's commits stay reachable on stradl/ branches.
+//     refs agree, and this Mac's commits stay reachable on stradl/ branches;
+//   - except that in a repository whose stored copy an older Stradl left
+//     behind (syncRoot.stale), this Mac's copy is the reference.
 //
 // localData and remoteData may be nil for files too large to hold in memory.
 func (s *Syncer) chooseSide(npath string, lf *localFile, info os.FileInfo, localData, remoteData []byte, remoteTime time.Time) sideChoice {
 	newest := sideChoice{local: remoteTime.IsZero() || info.ModTime().After(remoteTime), keep: true}
 	if lf.root == nil || lf.root.kind != rootFolder {
 		return newest
+	}
+	if lf.root.stale {
+		// The copy in storage stopped updating long ago (see syncRoot.stale):
+		// this Mac's copy is the reference, the stored one goes aside.
+		return sideChoice{local: true, keep: true, aside: true}
 	}
 	if hasGitSegment(npath) {
 		if !s.repoSyncedBefore(npath) {
