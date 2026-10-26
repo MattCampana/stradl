@@ -1,4 +1,4 @@
-.PHONY: all build install clean test fmt lint build-all release test-install run deps setup-hooks check
+.PHONY: all build install clean test fmt lint build-all release test-install test-azure-setup vulncheck run deps setup-hooks check
 
 BINARY_NAME=stradl
 # Release tags are vX.Y.Z; binaries carry the bare semver.
@@ -48,7 +48,11 @@ fmt:
 # Lint code (requires golangci-lint and shellcheck)
 lint:
 	golangci-lint run
-	shellcheck install.sh scripts/build-release.sh scripts/test-install.sh
+	shellcheck install.sh scripts/*.sh
+
+# Report known vulnerabilities the code can reach (CI runs the same check)
+vulncheck:
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 # Build the release tarballs + checksums.txt into ./dist (macOS only; see
 # scripts/build-release.sh). CI runs the same script on tag pushes.
@@ -60,6 +64,10 @@ release:
 # End-to-end test of install.sh against locally served release assets
 test-install:
 	scripts/test-install.sh
+
+# Test scripts/azure-setup.sh against a fake Azure CLI
+test-azure-setup:
+	scripts/test-azure-setup.sh
 
 # Development: build and run
 run: build

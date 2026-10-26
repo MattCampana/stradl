@@ -30,6 +30,11 @@ jobs:
       - name: Run tests
         run: go test -short ./...
 
+      # Fails on vulnerabilities the code can reach (stdlib included, so this
+      # also catches an outdated toolchain line in go.mod).
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
       - name: Run coverage on library packages
         run: |
           go test -short -coverprofile=coverage.out -covermode=atomic \
@@ -69,22 +74,43 @@ jobs:
       - name: Test installer
         run: scripts/test-install.sh
 
+      - name: Test Azure setup script
+        run: scripts/test-azure-setup.sh
+
   macos:
     name: Build & test (macOS, cgo)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
 
+      # setup-go@v6 installs the go.mod toolchain directive when there is one.
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      # Same check as the release workflow: release binaries embed the
+      # standard library, so they must come from the go.mod toolchain.
+      - name: Check Go toolchain
+        run: |
+          want="$(awk '$1 == "toolchain" { print $2 }' go.mod)"
+          got="$(go env GOVERSION)"
+          echo "go.mod toolchain: ${want:-none}; building with: $got"
+          if [ -z "$want" ] || [ "$got" != "$want" ]; then
+            echo "::error::release builds must use the go.mod toolchain (${want:-none}), got $got"
+            exit 1
+          fi
 
       - name: Vet
         run: go vet ./...
 
       - name: Run tests
         run: go test -short ./...
+
+      # The darwin build links the cgo menu bar, which the Linux job never
+      # compiles, so check it here too.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
       # Same script the release workflow runs, so a broken release build
       # shows up on the PR instead of on the tag.
@@ -114,9 +140,11 @@ jobs:
           fi
 
       - name: shellcheck
-        run: shellcheck install.sh scripts/build-release.sh scripts/test-install.sh
+        run: shellcheck install.sh scripts/*.sh
 
+      # Settings live in .golangci.yml. Pinned so a new release can't fail a
+      # PR that changed nothing; bump it deliberately.
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v7
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.15.0

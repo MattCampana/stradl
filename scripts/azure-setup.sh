@@ -5,7 +5,7 @@
 #
 # Built for Azure Cloud Shell (Bash), where az is installed and signed in:
 #
-#   curl -fsSL <raw url>/scripts/azure-setup.sh | bash -s -- \
+#   curl -fsSL <release url>/azure-setup.sh | bash -s -- \
 #     --resource-group rg-stradl --location eastus --account bpstradl
 #
 # Any shell with a signed-in Azure CLI works the same way.
@@ -14,8 +14,12 @@
 #   - the resource group
 #   - a StorageV2 / Standard_LRS account: HTTPS only, TLS 1.2 minimum, no
 #     public blob access, shared key access on (SAS tokens are signed with
-#     the account key)
+#     the account key, so generating one needs it; a reused account that had
+#     it off gets it turned back on, and the plan says so)
 #   - blob versioning, 30-day blob soft delete, 30-day container soft delete
+#   - a lifecycle rule ("<container>oldversions") that deletes previous blob
+#     versions 30 days after they were written, so versioning can't grow the
+#     bill forever; added next to any rules the account already has
 #   - a private container
 #   - a stored access policy ("stradl", racwdl) that holds the token's expiry
 #
@@ -29,6 +33,7 @@ set -Eeuo pipefail
 readonly POLICY_NAME="stradl"
 readonly POLICY_PERMISSIONS="racwdl"
 readonly RETENTION_DAYS=30
+readonly VERSION_DAYS=30
 readonly APP_TAG="app=stradl"
 
 # Options
@@ -49,6 +54,16 @@ CONTAINER_EXISTS=0
 POLICY_EXISTS=0
 POLICY_EXPIRY=""
 POLICY_PERMS=""
+# allowSharedKeyAccess of a reused account: True, False, or None (never set,
+# which Azure treats as on)
+SHARED_KEY=""
+# The lifecycle rule that expires old versions, named after the container
+# (rule names are letters and digits only). LIFECYCLE_STATE is "create" (the
+# account has no lifecycle policy), "add" (it has one without this rule) or
+# "keep" (the rule is there; its settings are left as they are).
+LIFECYCLE_RULE=""
+LIFECYCLE_STATE="create"
+LIFECYCLE_DAYS_FOUND=""
 
 # Results. ACCOUNT_KEY and SAS_TOKEN are secrets: never echo or log them.
 ACCOUNT_KEY=""
@@ -63,6 +78,10 @@ Usage: azure-setup.sh --resource-group NAME --account NAME [--location REGION] [
 
 Create (or reuse) the Azure storage Stradl syncs into, then print the
 container SAS token for the Stradl installer. Safe to re-run.
+
+It turns on blob versioning and soft delete, and adds a lifecycle rule that
+deletes previous blob versions 30 days after they were written. Shared key
+access stays on (or is turned back on) because SAS tokens need it.
 
 Required:
   --resource-group NAME  Resource group to create or reuse
@@ -82,7 +101,7 @@ Options:
   -h, --help             Show this help
 
 Example (Azure Cloud Shell):
-  curl -fsSL <raw url>/scripts/azure-setup.sh | bash -s -- \
+  curl -fsSL <release url>/azure-setup.sh | bash -s -- \
     --resource-group rg-stradl --location eastus --account bpstradl
 EOF
 }
@@ -223,6 +242,7 @@ validate_args() {
 	if ! [[ "$YEARS" =~ $years_re ]]; then
 		die "invalid --years '$YEARS': use a whole number from 1 to 99"
 	fi
+	LIFECYCLE_RULE="${CONTAINER//-/}oldversions"
 }
 
 # --- Azure ----------------------------------------------------------------------
@@ -312,6 +332,37 @@ discover_container() {
 	fi
 }
 
+# discover_lifecycle finds out whether the account's lifecycle management
+# policy already has the rule that expires old versions. An account without
+# any policy makes show fail with a NotFound error; anything else is a real
+# failure, and guessing "no policy" then could replace someone's rules.
+discover_lifecycle() {
+	local out status=0
+	out="$(az_cli storage account management-policy show --account-name "$ACCOUNT" \
+		--resource-group "$RESOURCE_GROUP" --query "policy.rules[].name" -o tsv 2>&1)" || status=$?
+	if [ "$status" -ne 0 ]; then
+		case "$out" in
+		*NotFound*)
+			LIFECYCLE_STATE="create"
+			return 0
+			;;
+		esac
+		printf '%s\n' "$out" >&2
+		die "couldn't read the lifecycle management policy of storage account '$ACCOUNT'. Fix the error above and run the same command again."
+	fi
+	if ! printf '%s\n' "$out" | grep -qxF "$LIFECYCLE_RULE"; then
+		LIFECYCLE_STATE="add"
+		return 0
+	fi
+	LIFECYCLE_STATE="keep"
+	LIFECYCLE_DAYS_FOUND="$(az_cli storage account management-policy show --account-name "$ACCOUNT" \
+		--resource-group "$RESOURCE_GROUP" \
+		--query "policy.rules[?name=='$LIFECYCLE_RULE'] | [0].definition.actions.version.delete.daysAfterCreationGreaterThan" -o tsv)"
+	if [ "$LIFECYCLE_DAYS_FOUND" = "None" ]; then
+		LIFECYCLE_DAYS_FOUND=""
+	fi
+}
+
 # discover records what already exists so the plan, and the run, only touch
 # what is missing. Everything here is read-only.
 discover() {
@@ -341,6 +392,11 @@ discover() {
 	if [ "$ACCOUNT_EXISTS" = 1 ]; then
 		fetch_account_key
 		discover_container
+		if [ "$ROTATE" = 0 ]; then
+			SHARED_KEY="$(az_cli storage account show --name "$ACCOUNT" --resource-group "$RESOURCE_GROUP" \
+				--query allowSharedKeyAccess -o tsv)"
+			discover_lifecycle
+		fi
 	elif [ "$ROTATE" = 1 ]; then
 		die "nothing to rotate: no storage account '$ACCOUNT' in resource group '$RESOURCE_GROUP'."
 	else
@@ -381,10 +437,28 @@ show_plan() {
 
 	if [ "$ACCOUNT_EXISTS" = 1 ]; then
 		plan_line "Storage account" "$ACCOUNT" "reuse; re-apply HTTPS-only, TLS 1.2, no public access"
+		if shared_key_off; then
+			plan_line "Shared key access" "" "turn back on: SAS tokens are signed with the account key"
+		else
+			plan_line "Shared key access" "" "keep on: SAS tokens are signed with the account key"
+		fi
 	else
 		plan_line "Storage account" "$ACCOUNT" "create in $LOCATION: StorageV2, Standard_LRS, HTTPS only"
+		plan_line "Shared key access" "" "on: SAS tokens are signed with the account key"
 	fi
 	plan_line "Data protection" "" "blob versioning, ${RETENTION_DAYS}-day soft delete for blobs and containers"
+	case "$LIFECYCLE_STATE" in
+	keep)
+		if [ -n "$LIFECYCLE_DAYS_FOUND" ]; then
+			action="reuse; deletes previous versions after $LIFECYCLE_DAYS_FOUND days"
+		else
+			action="reuse as it is"
+		fi
+		;;
+	add) action="add to the existing lifecycle policy: delete previous versions after ${VERSION_DAYS} days" ;;
+	*) action="create lifecycle policy: delete previous versions after ${VERSION_DAYS} days" ;;
+	esac
+	plan_line "Version cleanup" "$LIFECYCLE_RULE" "$action"
 
 	if [ "$CONTAINER_EXISTS" = 1 ]; then
 		plan_line "Container" "$CONTAINER" "reuse"
@@ -405,7 +479,16 @@ show_plan() {
 	if [ -n "$POLICY_EXPIRY" ] && is_past "$POLICY_EXPIRY"; then
 		warn "the $POLICY_NAME policy expired on $(display_time "$POLICY_EXPIRY"); add --rotate to extend it"
 	fi
+	if shared_key_off; then
+		warn "shared key access is off on '$ACCOUNT'. This turns it back on, because the SAS token Stradl uses is signed with the account key and stops working without it. Stop here if your organization turned it off on purpose."
+	fi
 	printf '\n'
+}
+
+# shared_key_off reports whether a reused account has shared key access
+# turned off.
+shared_key_off() {
+	[ "$SHARED_KEY" = "False" ] || [ "$SHARED_KEY" = "false" ]
 }
 
 confirm() {
@@ -429,6 +512,34 @@ confirm() {
 }
 
 # --- apply ----------------------------------------------------------------------
+
+# lifecycle_rule_json prints the rule that deletes previous versions of the
+# container's blobs. Azure ages a previous version from when it was written,
+# not from when it was replaced, and soft delete keeps what the rule deletes
+# for another RETENTION_DAYS.
+lifecycle_rule_json() {
+	printf '{"enabled":true,"name":"%s","type":"Lifecycle","definition":{"actions":{"version":{"delete":{"daysAfterCreationGreaterThan":%d}}},"filters":{"blobTypes":["blockBlob"],"prefixMatch":["%s/"]}}}' \
+		"$LIFECYCLE_RULE" "$VERSION_DAYS" "$CONTAINER"
+}
+
+# ensure_lifecycle adds the version cleanup rule, leaving any other rules on
+# the account alone. A rule that already has this name is kept as it is, so
+# a value changed in the portal survives a re-run.
+ensure_lifecycle() {
+	case "$LIFECYCLE_STATE" in
+	keep) ;;
+	add)
+		step "Adding lifecycle rule $LIFECYCLE_RULE: delete previous versions after ${VERSION_DAYS} days"
+		az_cli storage account management-policy update --account-name "$ACCOUNT" \
+			--resource-group "$RESOURCE_GROUP" --add policy.rules "$(lifecycle_rule_json)" -o none
+		;;
+	*)
+		step "Creating lifecycle rule $LIFECYCLE_RULE: delete previous versions after ${VERSION_DAYS} days"
+		az_cli storage account management-policy create --account-name "$ACCOUNT" \
+			--resource-group "$RESOURCE_GROUP" --policy "{\"rules\":[$(lifecycle_rule_json)]}" -o none
+		;;
+	esac
+}
 
 ensure_policy() {
 	if [ "$POLICY_EXISTS" = 0 ]; then
@@ -474,6 +585,11 @@ apply_changes() {
 		az_cli storage account update --name "$ACCOUNT" --resource-group "$RESOURCE_GROUP" \
 			--https-only true --min-tls-version TLS1_2 \
 			--allow-blob-public-access false --allow-shared-key-access true -o none
+		if shared_key_off; then
+			printf '    Shared key access is back on: Azure signs SAS tokens with the account key, so generating the token needs it.\n'
+		else
+			printf '    Shared key access stays on: Azure signs SAS tokens with the account key, so generating the token needs it.\n'
+		fi
 	fi
 
 	if [ "$ROTATE" = 0 ]; then
@@ -483,6 +599,7 @@ apply_changes() {
 			--enable-delete-retention true --delete-retention-days "$RETENTION_DAYS" \
 			--enable-container-delete-retention true --container-delete-retention-days "$RETENTION_DAYS" \
 			-o none
+		ensure_lifecycle
 	fi
 
 	if [ -z "$ACCOUNT_KEY" ]; then

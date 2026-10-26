@@ -8,7 +8,9 @@
 # The assets are served from 127.0.0.1 with python3's http.server and
 # install.sh runs against throwaway HOME directories, so nothing touches the
 # real ~/.local/bin, shell profiles, or ~/.stradl. On macOS the installer runs
-# under /bin/bash to keep it honest about bash 3.2.
+# under /bin/bash to keep it honest about bash 3.2. The agent-restart cases
+# install a stand-in stradl that only logs its arguments, so launchd and the
+# real agent are never touched either.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,7 +20,10 @@ MARKER="# Added by the Stradl installer"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/stradl-installtest.XXXXXX")"
 SERVER_PID=""
 cleanup() {
-  if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; fi
+  if [ -n "$SERVER_PID" ]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -40,6 +45,7 @@ case "$(uname -m)" in
   *) ARCH=amd64 ;;
 esac
 ASSET="stradl_${OS}_${ARCH}.tar.gz"
+PY="$(command -v python3)"
 
 sha() {
   if command -v shasum >/dev/null 2>&1; then
@@ -81,6 +87,32 @@ printf 'x' >>"$WORK/srv/badsum/$ASSET"
 cp "$DIST/$ASSET" "$WORK/srv/noentry/"
 grep -v " $ASSET\$" "$DIST/checksums.txt" >"$WORK/srv/noentry/checksums.txt" || true
 
+# A stand-in stradl for the agent-restart cases. It logs each call (and
+# whether stdin is a terminal) to ~/fake-stradl.log and fails the first N
+# calls, N read from ~/fake-fail-count, the way `stradl agent install` fails
+# while the old agent is still shutting down.
+mkdir -p "$WORK/fake" "$WORK/srv/fake"
+cat >"$WORK/fake/stradl" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  --version)
+    echo "stradl version 0.0.0-fake"
+    exit 0
+    ;;
+esac
+if [ -t 0 ]; then stdin=tty; else stdin=notty; fi
+echo "$* $stdin" >>"$HOME/fake-stradl.log"
+fails=0
+if [ -f "$HOME/fake-fail-count" ]; then fails="$(cat "$HOME/fake-fail-count")"; fi
+if [ "$(grep -c . "$HOME/fake-stradl.log")" -le "$fails" ]; then
+  echo "launchctl bootstrap failed: exit status 5: Bootstrap failed: 5: Input/output error" >&2
+  exit 1
+fi
+EOF
+chmod 755 "$WORK/fake/stradl"
+tar -czf "$WORK/srv/fake/$ASSET" -C "$WORK/fake" stradl
+(cd "$WORK/srv/fake" && sha "$ASSET" >checksums.txt)
+
 # --- server -----------------------------------------------------------------
 
 PORT="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
@@ -96,8 +128,24 @@ curl -fsS -o /dev/null "$URL/good/checksums.txt" || {
   exit 1
 }
 
+# NOTTY runs a command in a new session, without a controlling terminal, so
+# the installer sees "no terminal" whether or not this script runs in one.
+# shellcheck disable=SC2016 # Python source, not shell
+NOTTY='
+import os, sys
+try:
+    os.setsid()
+except OSError:  # already a process group leader: setsid in a child
+    pid = os.fork()
+    if pid:
+        sys.exit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+    os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+'
+
 # run_install HOME BASE_URL [args...] runs install.sh piped into bash, the way
-# `curl ... | bash -s --` does, and leaves output in $OUT and status in $RC.
+# `curl ... | bash -s --` does, without a terminal, and leaves output in $OUT
+# and status in $RC. NO_SETUP=0 lets setup run; RUN_SHELL sets $SHELL.
 OUT=""
 RC=0
 run_install() {
@@ -105,17 +153,19 @@ run_install() {
   shift 2
   mkdir -p "$home"
   set +e
-  OUT="$(env -i HOME="$home" PATH="/usr/bin:/bin:/usr/sbin:/sbin" SHELL="$LOGIN_SHELL" \
-    TMPDIR="$WORK" STRADL_BASE_URL="$base" STRADL_NO_SETUP="${NO_SETUP-1}" \
-    "$SH" -s -- "$@" <"$ROOT/install.sh" 2>&1)"
+  OUT="$("$PY" -I -c "$NOTTY" env -i HOME="$home" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    SHELL="${RUN_SHELL:-$LOGIN_SHELL}" TMPDIR="$WORK" STRADL_BASE_URL="$base" \
+    STRADL_NO_SETUP="${NO_SETUP-1}" "$SH" -s -- "$@" <"$ROOT/install.sh" 2>&1)"
   RC=$?
   set -e
 }
 
-marker_count() {
-  local f="$1"
-  if [ -f "$f" ]; then grep -cF "$MARKER" "$f" || true; else echo 0; fi
+count_lines() {
+  local pattern="$1" f="$2"
+  if [ -f "$f" ]; then grep -cF -- "$pattern" "$f" || true; else echo 0; fi
 }
+
+marker_count() { count_lines "$MARKER" "$1"; }
 
 # --- cases ------------------------------------------------------------------
 
@@ -160,12 +210,13 @@ else
   fail "PATH line count after second run: $(marker_count "$H1/$PROFILE")"
 fi
 
-# 3. Setup on an already-configured machine is non-interactive.
+# 3. Setup on an already-configured machine needs no terminal.
 mkdir -p "$H1/.stradl"
 : >"$H1/.stradl/config.yaml"
 NO_SETUP=0 run_install "$H1" "$URL/good"
 case "$RC:$OUT" in
-  0:*"already configured"* | 0:*"no terminal"*) pass "setup skips init when already configured" ;;
+  0:*"no terminal"*) fail "setup with existing config asked for a terminal: $OUT" ;;
+  0:*"already configured"*) pass "setup skips init when already configured" ;;
   *) fail "setup with existing config (rc=$RC): $OUT" ;;
 esac
 
@@ -203,9 +254,11 @@ case "$RC:$OUT" in
   *) fail "missing release (rc=$RC): $OUT" ;;
 esac
 
-# 7. Placeholder repo without STRADL_REPO gives a friendly error.
+# 7. The placeholder repo gives a friendly error. STRADL_REPO is passed
+# explicitly, so this holds whatever default this copy of install.sh has.
 set +e
-OUT="$(env -i HOME="$WORK/home5" PATH="/usr/bin:/bin" "$SH" -s -- --no-setup <"$ROOT/install.sh" 2>&1)"
+OUT="$(env -i HOME="$WORK/home5" PATH="/usr/bin:/bin" STRADL_REPO=REPLACE_OWNER/stradl \
+  "$SH" -s -- --no-setup <"$ROOT/install.sh" 2>&1)"
 RC=$?
 set -e
 case "$RC:$OUT" in
@@ -213,10 +266,119 @@ case "$RC:$OUT" in
   *STRADL_REPO*) pass "placeholder repo asks for STRADL_REPO" ;;
   *) fail "placeholder repo (rc=$RC): $OUT" ;;
 esac
+set +e
+OUT="$(env -i HOME="$WORK/home5" PATH="/usr/bin:/bin" STRADL_REPO="not a repo" \
+  "$SH" -s -- --no-setup <"$ROOT/install.sh" 2>&1)"
+RC=$?
+set -e
+case "$RC:$OUT" in
+  0:*) fail "malformed STRADL_REPO was accepted" ;;
+  *"owner/name"*) pass "malformed STRADL_REPO is refused" ;;
+  *) fail "malformed STRADL_REPO (rc=$RC): $OUT" ;;
+esac
 
 # 8. Unknown flags are rejected.
 run_install "$WORK/home6" "$URL/good" --bogus
 if [ "$RC" -ne 0 ]; then pass "unknown option rejected"; else fail "unknown option accepted"; fi
+
+# 9. bash as the login shell, with an existing ~/.profile: ~/.bash_profile is
+# created, keeps ~/.profile working, and puts ~/.local/bin on PATH once.
+H9="$WORK/home9"
+mkdir -p "$H9"
+printf 'export STRADL_FROM_PROFILE=yes\n' >"$H9/.profile"
+RUN_SHELL=/bin/bash run_install "$H9" "$URL/good"
+RUN_SHELL=/bin/bash run_install "$H9" "$URL/good"
+# shellcheck disable=SC2016 # the literal line install.sh writes
+if [ "$RC" -eq 0 ] && [ "$(marker_count "$H9/.bash_profile")" = 1 ] &&
+  [ "$(count_lines '. "$HOME/.profile"' "$H9/.bash_profile")" = 1 ]; then
+  pass "bash login shell: ~/.bash_profile created once, sourcing ~/.profile"
+else
+  fail "bash login shell with ~/.profile (rc=$RC): $OUT; .bash_profile: $(cat "$H9/.bash_profile" 2>&1)"
+fi
+# shellcheck disable=SC2016 # expanded by the login shell
+login="$(env -i HOME="$H9" PATH="/usr/bin:/bin" TERM=dumb /bin/bash -l -c \
+  'printf "%s|%s" "${STRADL_FROM_PROFILE:-}" "$PATH"' 2>/dev/null </dev/null || true)"
+path_hits="$(printf '%s' "${login#*|}" | tr ':' '\n' | grep -cxF "$H9/.local/bin" || true)"
+if [ "${login%%|*}" = yes ] && [ "$path_hits" = 1 ]; then
+  pass "bash login shell reads ~/.profile and gets ~/.local/bin on PATH once"
+else
+  fail "bash login shell environment: $login"
+fi
+
+# 10. bash as the login shell, no profiles at all: ~/.bash_profile is created
+# with just the PATH line.
+H10="$WORK/home10"
+RUN_SHELL=/bin/bash run_install "$H10" "$URL/good"
+RUN_SHELL=/bin/bash run_install "$H10" "$URL/good"
+if [ "$RC" -eq 0 ] && [ "$(marker_count "$H10/.bash_profile")" = 1 ] &&
+  [ "$(count_lines "Created by the Stradl installer" "$H10/.bash_profile")" = 0 ]; then
+  pass "bash login shell: ~/.bash_profile created with the PATH line"
+else
+  fail "bash login shell without profiles (rc=$RC): $OUT; .bash_profile: $(cat "$H10/.bash_profile" 2>&1)"
+fi
+
+# 11-14. Upgrading a machine that runs the agent restarts it without a
+# terminal, retrying while the old agent is still busy. These use the
+# stand-in stradl, so launchd is never called.
+agent_home() {
+  local home="$1" fails="$2"
+  mkdir -p "$home/.stradl" "$home/Library/LaunchAgents"
+  : >"$home/.stradl/config.yaml"
+  : >"$home/Library/LaunchAgents/com.breakpointdata.stradl.plist"
+  printf '%s\n' "$fails" >"$home/fake-fail-count"
+}
+fake_calls() { count_lines "agent install" "$1/fake-stradl.log"; }
+
+H11="$WORK/home11"
+agent_home "$H11" 0
+NO_SETUP=0 run_install "$H11" "$URL/fake"
+if [ "$OS" = darwin ]; then
+  if [ "$RC" -eq 0 ] && [ "$(fake_calls "$H11")" = 1 ] &&
+    [ "$(count_lines "agent install notty" "$H11/fake-stradl.log")" = 1 ]; then
+    case "$OUT" in
+      *"agent restarted"*) pass "existing agent restarted without a terminal" ;;
+      *) fail "agent restart not reported: $OUT" ;;
+    esac
+  else
+    fail "agent restart without a terminal (rc=$RC, calls=$(fake_calls "$H11")): $OUT"
+  fi
+else
+  if [ "$RC" -eq 0 ] && [ "$(fake_calls "$H11")" = 0 ]; then
+    pass "no agent restart on $OS"
+  else
+    fail "agent restart attempted on $OS (rc=$RC): $OUT"
+  fi
+fi
+
+if [ "$OS" = darwin ]; then
+  H12="$WORK/home12"
+  agent_home "$H12" 1
+  NO_SETUP=0 run_install "$H12" "$URL/fake"
+  case "$RC:$(fake_calls "$H12"):$OUT" in
+    0:2:*"trying again"*"agent restarted"*) pass "busy agent: restart retried until it took" ;;
+    *) fail "busy agent restart (rc=$RC, calls=$(fake_calls "$H12")): $OUT" ;;
+  esac
+
+  H13="$WORK/home13"
+  agent_home "$H13" 99
+  NO_SETUP=0 run_install "$H13" "$URL/fake"
+  case "$RC:$(fake_calls "$H13"):$OUT" in
+    0:*) fail "agent that never restarts was reported as fine: $OUT" ;;
+    *:4:*"agent restart failed"*) pass "agent that never restarts fails the install after 4 tries" ;;
+    *) fail "agent that never restarts (rc=$RC, calls=$(fake_calls "$H13")): $OUT" ;;
+  esac
+
+  # Not configured and no terminal: init can't run, and the agent is left
+  # alone (it has nothing to sync without a config).
+  H14="$WORK/home14"
+  agent_home "$H14" 0
+  rm "$H14/.stradl/config.yaml"
+  NO_SETUP=0 run_install "$H14" "$URL/fake"
+  case "$RC:$(fake_calls "$H14"):$OUT" in
+    0:0:*"no terminal"*) pass "unconfigured machine without a terminal skips setup" ;;
+    *) fail "unconfigured machine without a terminal (rc=$RC, calls=$(fake_calls "$H14")): $OUT" ;;
+  esac
+fi
 
 echo
 if [ "$FAILURES" -gt 0 ]; then

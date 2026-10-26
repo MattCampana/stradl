@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # Stradl installer. Musical chairs for your Claude sessions.
 #
-#   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/OWNER/stradl/main/install.sh)"
+#   /bin/bash -c "$(curl -fsSL https://github.com/REPLACE_OWNER/stradl/releases/latest/download/install.sh)"
 #
 # Downloads the release for this OS/arch from GitHub Releases, verifies it
 # against checksums.txt, and installs it to ~/.local/bin/stradl. Needs no sudo,
-# Homebrew, or Go, so it works for a Standard (non-admin) macOS user. When a
-# terminal is available it then runs `stradl init` and, on macOS,
-# `stradl agent install`.
+# Homebrew, or Go, so it works for a Standard (non-admin) macOS user. On a new
+# machine with a terminal it then runs `stradl init` and, on macOS,
+# `stradl agent install`. On a Mac that already runs the agent it restarts the
+# agent on the new binary, terminal or not.
 #
 # This file must stay compatible with /bin/bash 3.2 (what macOS ships), so no
 # associative arrays, no ${var,,}, and no expanding empty arrays under set -u.
 set -euo pipefail
 
-# The release workflow rewrites this default in the copy it attaches to each
-# release, so .../releases/latest/download/install.sh needs no STRADL_REPO.
+# This copy keeps the placeholder. The release workflow rewrites it in the
+# copy it attaches to each release, so .../releases/latest/download/install.sh
+# needs no STRADL_REPO.
 REPO="${STRADL_REPO:-REPLACE_OWNER/stradl}"
 
 BIN_DIR="$HOME/.local/bin"
@@ -158,6 +160,25 @@ Is there a published release with an asset for $OS/$ARCH?"
   fi
 }
 
+# start_bash_profile creates ~/.bash_profile for a bash login shell. bash
+# reads only the first of ~/.bash_profile, ~/.bash_login and ~/.profile, so a
+# new ~/.bash_profile first sources whichever of the other two bash was
+# reading, and nothing the user set up there is lost.
+start_bash_profile() {
+  local profile="$HOME/.bash_profile" fallback=""
+  if [ -e "$profile" ]; then return 0; fi
+  if [ -f "$HOME/.bash_login" ]; then
+    fallback=".bash_login"
+  elif [ -f "$HOME/.profile" ]; then
+    fallback=".profile"
+  fi
+  if [ -z "$fallback" ]; then return 0; fi
+  # A failed write is reported by add_path_line, which tries the same file.
+  { printf '%s\n%s\n' \
+    "# Created by the Stradl installer. bash read ~/$fallback before this file existed." \
+    "if [ -f \"\$HOME/$fallback\" ]; then . \"\$HOME/$fallback\"; fi" >"$profile"; } 2>/dev/null || true
+}
+
 # add_path_line appends the marked PATH line to a shell profile once.
 add_path_line() {
   local profile="$1"
@@ -179,16 +200,21 @@ ensure_path() {
       return 0
       ;;
   esac
-  local shell_name="${SHELL:-}"
+  local shell_name="${SHELL:-}" had_bash_profile=0
   shell_name="${shell_name##*/}"
-  # zsh is the macOS login shell; .bash_profile only if the user has one, so
-  # creating it doesn't stop bash from reading an existing ~/.profile.
+  if [ -f "$HOME/.bash_profile" ]; then had_bash_profile=1; fi
+  # zsh is the macOS login shell.
   if [ "$OS" = darwin ] || [ "$shell_name" = zsh ] || [ -f "$HOME/.zprofile" ]; then
     add_path_line "$HOME/.zprofile"
   fi
-  if [ -f "$HOME/.bash_profile" ]; then
+  # A bash login shell reads ~/.bash_profile, so create it when bash is the
+  # login shell (start_bash_profile keeps an existing ~/.profile working).
+  if [ "$shell_name" = bash ] || [ "$had_bash_profile" = 1 ]; then
+    start_bash_profile
     add_path_line "$HOME/.bash_profile"
-  elif [ "$OS" = linux ] && [ "$shell_name" != zsh ]; then
+  fi
+  # Other login shells on Linux, and desktop sessions, read ~/.profile.
+  if [ "$OS" = linux ] && [ "$shell_name" != zsh ] && [ "$had_bash_profile" = 0 ]; then
     add_path_line "$HOME/.profile"
   fi
   if [ -n "$UPDATED_PROFILES" ]; then
@@ -200,27 +226,44 @@ ensure_path() {
   fi
 }
 
-run_setup() {
-  # curl | bash leaves stdin on the pipe, so talk to the terminal directly,
-  # and skip setup entirely when there isn't one (CI, ssh without -t).
-  if ! { : </dev/tty; } 2>/dev/null; then
-    SETUP_STATE="skipped (no terminal); run 'stradl init' to finish"
-    return 0
-  fi
+# restart_agent reloads an installed agent so it runs the binary just
+# installed. It needs no terminal, so an upgrade over ssh or from a script
+# restarts the agent too. The reload waits for the old agent to exit, which
+# takes up to 10 seconds when it is in the middle of a sync, longer than
+# `stradl agent install` keeps retrying on its own, so retry here as well.
+restart_agent() {
+  local attempt
+  info "Restarting the background agent"
+  for attempt in 1 2 3 4; do
+    if [ "$attempt" -gt 1 ]; then
+      warn "the agent hasn't restarted yet (it may be finishing a sync); trying again"
+      sleep 3
+    fi
+    if "$BIN" agent install </dev/null; then
+      SETUP_STATE="$SETUP_STATE; agent restarted"
+      return 0
+    fi
+  done
+  SETUP_FAILED=1
+  SETUP_STATE="$SETUP_STATE; agent restart failed, run 'stradl agent install'"
+}
 
+run_setup() {
   if [ -f "$CONFIG_FILE" ]; then
     SETUP_STATE="already configured ($(pretty "$CONFIG_FILE"))"
     # An upgrade replaced the binary under a running agent; restart it, but
     # only if this Mac had it installed in the first place.
     if [ "$OS" = darwin ] && [ -f "$AGENT_PLIST" ]; then
-      info "Restarting the background agent"
-      if "$BIN" agent install </dev/tty; then
-        SETUP_STATE="$SETUP_STATE; agent restarted"
-      else
-        SETUP_FAILED=1
-        SETUP_STATE="$SETUP_STATE; agent restart failed, run 'stradl agent install'"
-      fi
+      restart_agent
     fi
+    return 0
+  fi
+
+  # `stradl init` asks questions. curl | bash leaves stdin on the pipe, so
+  # talk to the terminal directly, and skip setup when there isn't one (CI,
+  # ssh without -t).
+  if ! { : </dev/tty; } 2>/dev/null; then
+    SETUP_STATE="skipped (no terminal); run 'stradl init' to finish"
     return 0
   fi
 

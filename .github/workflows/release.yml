@@ -18,18 +18,36 @@ concurrency:
 jobs:
   release:
     # Apple Silicon runner: the darwin builds need cgo, and it cross-builds
-    # the Intel binary with clang -arch x86_64.
-    runs-on: macos-14
+    # the Intel binary with clang -arch x86_64. build-release.sh pins
+    # MACOSX_DEPLOYMENT_TARGET=13.0, so the binaries still run on Ventura
+    # whatever macOS the runner has.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
 
+      # setup-go@v6 installs the go.mod toolchain directive when there is one.
       - name: Setup Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
+      # Release binaries embed the standard library, so they must come from
+      # the patched toolchain go.mod names, not whatever Go the runner has.
+      - name: Check Go toolchain
+        run: |
+          want="$(awk '$1 == "toolchain" { print $2 }' go.mod)"
+          got="$(go env GOVERSION)"
+          echo "go.mod toolchain: ${want:-none}; building with: $got"
+          if [ -z "$want" ] || [ "$got" != "$want" ]; then
+            echo "::error::release must build with the go.mod toolchain (${want:-none}), got $got"
+            exit 1
+          fi
+
       - name: Test
         run: go test -short ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
       - name: Build release assets
         run: scripts/build-release.sh "${GITHUB_REF_NAME#v}" "${{ github.repository }}" dist
@@ -43,12 +61,18 @@ jobs:
       - name: Test the installer against the built assets
         run: scripts/test-install.sh dist
 
-      # The attached copy has this repo baked in, so
-      # .../releases/latest/download/install.sh works without STRADL_REPO.
-      - name: Attach installer
+      # install.sh on main keeps the REPLACE_OWNER placeholder; the copy
+      # attached here has this repo baked in, so the README one-liner
+      # (.../releases/latest/download/install.sh) works without STRADL_REPO.
+      # The Azure setup script ships with each release too, so Cloud Shell
+      # runs the reviewed copy rather than whatever is on main.
+      - name: Attach installer and Azure setup script
         run: |
-          sed "s#REPLACE_OWNER/stradl#${GITHUB_REPOSITORY}#" install.sh >dist/install.sh
+          sed "s#REPLACE_OWNER/stradl#${GITHUB_REPOSITORY}#g" install.sh >dist/install.sh
           grep -qF "STRADL_REPO:-${GITHUB_REPOSITORY}}" dist/install.sh
+          bash dist/install.sh --help >/dev/null
+          cp scripts/azure-setup.sh dist/azure-setup.sh
+          bash dist/azure-setup.sh --help >/dev/null
 
       - name: Create GitHub release
         env:
