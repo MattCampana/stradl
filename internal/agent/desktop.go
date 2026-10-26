@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tawanorg/claude-sync/internal/config"
 )
 
 // Commander runs a program and returns its standard output. Tests replace it
@@ -30,11 +32,20 @@ type DesktopApp struct {
 	Name        string        // process and application name, "Claude"
 	QuitTimeout time.Duration // how long Restart waits for the app to exit
 	PollEvery   time.Duration
+	// SessionsDir holds Claude Code's per-process session records
+	// (~/.claude/sessions), which ConfirmRestart reads to find work in
+	// progress. Empty skips the check.
+	SessionsDir string
+	// Alive reports whether a process is running; nil means signal 0.
+	Alive func(pid int) bool
 }
 
 // NewDesktopApp returns a DesktopApp for the real Claude app.
 func NewDesktopApp() *DesktopApp {
-	return &DesktopApp{Run: ExecCommand, Name: "Claude", QuitTimeout: 20 * time.Second, PollEvery: 500 * time.Millisecond}
+	return &DesktopApp{
+		Run: ExecCommand, Name: "Claude", QuitTimeout: 20 * time.Second, PollEvery: 500 * time.Millisecond,
+		SessionsDir: filepath.Join(config.ClaudeDir(), "sessions"),
+	}
 }
 
 // pids lists the app's main processes (exact name match, so helper

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	gosync "sync"
 	"testing"
@@ -490,37 +491,198 @@ func TestRunnerBacksOffAndNotifiesOnRepeatedErrors(t *testing.T) {
 		}
 	})
 	h.start()
-	if st := h.status(); st.LastError != boom.Error() {
-		t.Fatalf("lastError = %q", st.LastError)
+	if st := h.status(); st.LastError != boom.Error() || st.LastErrorKind != ErrorOffline {
+		t.Fatalf("lastError = %q (%s)", st.LastError, st.LastErrorKind)
+	}
+	if notes := h.notifications(); len(notes) != 0 {
+		t.Fatalf("a passing network error notified on the first failure: %q", notes)
 	}
 	h.advance(30*s + 60*s + 120*s)
 	h.expectSyncs(0, 30*s, 90*s, 210*s)
 
-	h.mu.Lock()
-	notes := append([]string(nil), h.notes...)
-	h.mu.Unlock()
+	notes := h.notifications()
 	if len(notes) != 1 || !strings.Contains(notes[0], "network is unreachable") {
 		t.Fatalf("want exactly one error notification within the hour, got %q", notes)
+	}
+	if st := h.status(); !st.LastSyncAt.IsZero() || !st.LastAttemptAt.Equal(h.t0.Add(210*s)) {
+		t.Fatalf("failed syncs: lastSyncAt=%v lastAttemptAt=%v", st.LastSyncAt, st.LastAttemptAt)
 	}
 
 	// Recovery clears the error.
 	h.set(func() { h.results = nil })
 	h.advance(210*s + 240*s)
-	if st := h.status(); st.LastError != "" {
-		t.Fatalf("error not cleared after a good sync: %q", st.LastError)
+	if st := h.status(); st.LastError != "" || st.LastErrorKind != "" || !st.LastSyncAt.Equal(h.t0.Add(450*s)) {
+		t.Fatalf("not recovered after a good sync: %+v", st)
 	}
 }
 
 func TestRunnerReportsPerFileErrors(t *testing.T) {
 	h := newHarness(t, func(h *harness, _ *Options) {
-		h.results = []syncResult{{report: &sync.SyncReport{Errors: []error{errors.New("a: denied"), errors.New("b: denied")}}}}
+		h.results = []syncResult{{report: &sync.SyncReport{
+			Uploaded: []string{"a"},
+			Errors:   []error{errors.New("a: denied"), errors.New("b: denied")},
+		}}}
 	})
 	h.start()
-	if st := h.status(); !strings.Contains(st.LastError, "2 files failed") {
-		t.Fatalf("lastError = %q", st.LastError)
+	st := h.status()
+	if !strings.Contains(st.LastError, "2 files failed") || st.LastErrorKind != ErrorOther {
+		t.Fatalf("lastError = %q (%s)", st.LastError, st.LastErrorKind)
+	}
+	// Files failed, so this was an attempt, not a sync; its counts still show.
+	if !st.LastSyncAt.IsZero() || !st.LastAttemptAt.Equal(h.t0) || st.Uploaded != 1 {
+		t.Fatalf("status = %+v", st)
 	}
 	h.advance(30 * s) // retried
 	h.expectSyncs(0, 30*s)
+	if st := h.status(); !st.LastSyncAt.Equal(h.t0.Add(30*s)) || st.LastError != "" {
+		t.Fatalf("status after a clean retry = %+v", st)
+	}
+}
+
+func (h *harness) notifications() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.notes...)
+}
+
+// TestRunnerFailedSyncIsNotLastSync guards against "Last sync: just now" for
+// a sync that failed.
+func TestRunnerFailedSyncIsNotLastSync(t *testing.T) {
+	offline := fmt.Errorf("failed to list remote objects: %w", &net.DNSError{Err: "no such host", Name: "acct.blob.core.windows.net"})
+	h := newHarness(t, func(h *harness, _ *Options) {
+		h.results = []syncResult{{report: &sync.SyncReport{Uploaded: []string{"a", "b"}}}, {err: offline}}
+	})
+	h.start()
+	h.set(func() { h.remote = "R1" })
+	h.advance(60 * s) // remote change: this sync fails
+	h.expectSyncs(0, 60*s)
+
+	st := h.status()
+	if !st.LastSyncAt.Equal(h.t0) || !st.LastAttemptAt.Equal(h.t0.Add(60*s)) {
+		t.Fatalf("lastSyncAt=%v lastAttemptAt=%v", st.LastSyncAt, st.LastAttemptAt)
+	}
+	if st.LastErrorKind != ErrorOffline || st.Uploaded != 2 {
+		t.Fatalf("status = %+v (a sync that failed outright keeps the last counts)", st)
+	}
+	snap := h.r.Snapshot()
+	now := h.t0.Add(61 * s)
+	if line := StatusLine(snap, now); line != "Offline: will retry" {
+		t.Fatalf("status line = %q", line)
+	}
+	if line := AttemptLine(snap, now); line != "Last attempt: just now (failed) · last sync: 1 min ago" {
+		t.Fatalf("attempt line = %q", line)
+	}
+}
+
+// A config that stops loading is a failed attempt, not an old success.
+func TestRunnerBrokenConfigIsAFailedAttempt(t *testing.T) {
+	h := newHarness(t, nil)
+	h.start()
+	h.set(func() { h.cfgErr = errors.New("failed to parse config.yaml: line 3") })
+	h.advance(300 * s) // the interval sync can't load it
+	h.expectSyncs(0)
+	st := h.status()
+	if !st.LastSyncAt.Equal(h.t0) || !st.LastAttemptAt.Equal(h.t0.Add(300*s)) || !st.AttemptFailed() {
+		t.Fatalf("status = %+v", st)
+	}
+	if line := StatusLine(h.r.Snapshot(), h.t0.Add(300*s)); line != "Sync error (see log)" {
+		t.Fatalf("status line = %q", line)
+	}
+}
+
+func TestRunnerNotifiesAtOnceForErrorsOnlyTheUserCanFix(t *testing.T) {
+	h := newHarness(t, func(h *harness, _ *Options) {
+		for i := 0; i < 40; i++ {
+			h.results = append(h.results, syncResult{err: sync.ErrKeyMismatch})
+		}
+	})
+	h.start()
+	notes := h.notifications()
+	if len(notes) != 1 || !strings.Contains(notes[0], "Passphrase doesn't match your other Macs") ||
+		!strings.Contains(notes[0], "stradl init --passphrase") {
+		t.Fatalf("wrong key: notifications = %q", notes)
+	}
+	if line := StatusLine(h.r.Snapshot(), h.t0); line != "Passphrase doesn't match your other Macs" {
+		t.Fatalf("status line = %q", line)
+	}
+
+	// Backoff still applies, and the reminder comes at most once an hour.
+	h.advance(30*s + 60*s + 120*s)
+	h.expectSyncs(0, 30*s, 90*s, 210*s)
+	h.advance(59 * time.Minute)
+	if n := len(h.notifications()); n != 1 {
+		t.Fatalf("%d notifications within the hour, want 1", n)
+	}
+	h.advance(66 * time.Minute)
+	if n := len(h.notifications()); n != 2 {
+		t.Fatalf("%d notifications after an hour, want 2", n)
+	}
+
+	// A different problem is news: an expired token notifies at once.
+	auth := errors.New("Azure rejected the credentials; the SAS token may have expired: RESPONSE 403 AuthenticationFailed")
+	h.set(func() { h.results = []syncResult{{err: auth}} })
+	h.r.SyncNow()
+	h.settle()
+	notes = h.notifications()
+	if len(notes) != 3 || !strings.Contains(notes[2], "Storage token expired or invalid") {
+		t.Fatalf("expired token: notifications = %q", notes)
+	}
+	if st := h.status(); st.LastErrorKind != ErrorAuth {
+		t.Fatalf("kind = %q", st.LastErrorKind)
+	}
+}
+
+// TestRunnerStatusIsRaceFree has the menu bar's RefreshDesktop run against
+// the loop's own status updates. Run with -race; the file must also end up
+// holding the latest status, not an older write that finished late.
+func TestRunnerStatusIsRaceFree(t *testing.T) {
+	h := newHarness(t, func(h *harness, _ *Options) {
+		h.appUp = true
+		h.appStart = h.t0.Add(-time.Hour)
+	})
+	h.start()
+
+	stop := make(chan struct{})
+	var wg gosync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				h.r.RefreshDesktop(context.Background())
+				_ = h.r.Snapshot()
+			}
+		}()
+	}
+	for i := 0; i < 30; i++ {
+		h.set(func() {
+			h.results = []syncResult{{report: &sync.SyncReport{NewDesktopSessions: []string{"x"}}}}
+			// Claude "restarts" now and then, so pending batches are both
+			// added and cleared while the menu bar refreshes.
+			if i%3 == 2 {
+				h.appStart = h.t0.Add(time.Second)
+			} else {
+				h.appStart = h.t0.Add(-time.Hour)
+			}
+		})
+		h.r.SyncNow()
+		h.settle()
+	}
+	close(stop)
+	wg.Wait()
+
+	h.r.RefreshDesktop(context.Background())
+	want := h.r.Snapshot().Status
+	got := h.status()
+	if got.PendingDesktopRestart != want.PendingDesktopRestart || fmt.Sprint(got.PendingDesktop) != fmt.Sprint(want.PendingDesktop) {
+		t.Fatalf("status.json pending = %d %v, runner has %d %v",
+			got.PendingDesktopRestart, got.PendingDesktop, want.PendingDesktopRestart, want.PendingDesktop)
+	}
 }
 
 func TestRunnerRetriesSoonAfterDeferredFiles(t *testing.T) {

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -66,23 +65,26 @@ func agentRunCmd() *cobra.Command {
 		Short: "Run the agent in the foreground (launchd runs this)",
 		Long: `Run the sync agent until it is stopped. On macOS it shows the Stradl menu bar
 icon unless --headless is given. Only one agent runs per user; a second one
-exits quietly.`,
+waits for the first to stop and then takes over.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := agentPaths()
 			if err != nil {
 				return err
 			}
-			release, err := sync.AcquireLock(p.Lock, false, 0)
-			if errors.Is(err, sync.ErrLocked) {
-				if isTerminal(os.Stderr) {
-					fmt.Fprintln(os.Stderr, "Stradl is already running.")
-				}
-				return nil
-			}
+			sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			release, err := acquireAgentLock(sigCtx, p, os.Stderr, isTerminal(os.Stderr))
+			stopped := sigCtx.Err() != nil
+			stopSignals()
 			if err != nil {
+				if stopped {
+					return nil // Ctrl-C or SIGTERM while waiting
+				}
 				return err
 			}
 			defer release()
+			if stopped {
+				return nil
+			}
 
 			logFile, err := agent.OpenLogFile(p.Log, agent.MaxLogSize)
 			if err != nil {
@@ -111,6 +113,32 @@ exits quietly.`,
 	}
 	cmd.Flags().BoolVar(&headless, "headless", false, "Run without the menu bar icon")
 	return cmd
+}
+
+// agentLockPoll is how often a second agent checks whether the first one
+// has stopped. Tests shorten it.
+var agentLockPoll = agent.LockPoll
+
+// acquireAgentLock takes the single-instance agent lock. While another
+// agent holds it, it says so once on stderr (a timestamped line, since under
+// launchd stderr is the agent log) and waits to take over. Exiting instead
+// would end a launchd-started agent for good: KeepAlive restarts only after
+// a failure, so nothing would run once the other agent went away. It returns
+// ctx's error if ctx ends while waiting.
+func acquireAgentLock(ctx context.Context, p agent.Paths, stderr io.Writer, tty bool) (func(), error) {
+	try := func() (func(), error) { return sync.AcquireLock(p.Lock, false, 0) }
+	return agent.WaitForLock(ctx, try, agentLockPoll, func() {
+		who := "another Stradl agent is running"
+		if pid := agent.LockHolder(p.Lock); pid != "" {
+			who += " (pid " + pid + ")"
+		}
+		if tty {
+			fmt.Fprintf(stderr, "%s%s. Waiting to take over when it stops; press Ctrl-C to exit.\n",
+				strings.ToUpper(who[:1]), who[1:])
+			return
+		}
+		agent.NewLogger(stderr).Printf("%s; waiting to take over when it stops", who)
+	})
 }
 
 // runHeadless runs the sync loop until SIGINT or SIGTERM.
@@ -286,7 +314,7 @@ func agentStatusCmd() *cobra.Command {
 // doesn't exist.
 func printAgentStatus(w io.Writer, p agent.Paths, job *agent.JobState, st *agent.Status, paused, haveStatus bool, now time.Time) {
 	row := func(label, value string) {
-		fmt.Fprintf(w, "  %s%-10s%s %s\n", colorDim, label, colorReset, value)
+		fmt.Fprintf(w, "  %s%-12s%s %s\n", colorDim, label, colorReset, value)
 	}
 	fmt.Fprintf(w, "%sStradl agent%s\n", colorBold, colorReset)
 
@@ -312,13 +340,23 @@ func printAgentStatus(w io.Writer, p agent.Paths, job *agent.JobState, st *agent
 		row("Syncing", "on")
 	}
 
-	if !haveStatus || st.LastSyncAt.IsZero() {
+	// Last sync is the last clean one; a failure since shows as an attempt.
+	synced := haveStatus && !st.LastSyncAt.IsZero()
+	if !synced {
 		row("Last sync", "never")
 	} else {
 		took := time.Duration(st.LastDurationMs) * time.Millisecond
 		row("Last sync", fmt.Sprintf("%s (took %s)", agent.Ago(now.Sub(st.LastSyncAt)), took.Round(100*time.Millisecond)))
+	}
+	if haveStatus && st.AttemptFailed() {
+		row("Last attempt", fmt.Sprintf("%s %s(failed: %s)%s", agent.Ago(now.Sub(st.LastAttemptAt)),
+			colorYellow, st.ErrorSummary(), colorReset))
+	}
+	if synced {
 		row("Result", fmt.Sprintf("↑ %d uploaded  ↓ %d downloaded  ⇄ %d merged  … %d waiting  ! %d conflicts",
 			st.Uploaded, st.Downloaded, st.Merged, st.Deferred, st.Conflicts))
+	}
+	if synced || (haveStatus && !st.LastAttemptAt.IsZero()) {
 		row("Sessions", agent.Plural(st.SessionsTotal, "session")+" on this Mac")
 	}
 	if n := st.PendingDesktopRestart; n > 0 {

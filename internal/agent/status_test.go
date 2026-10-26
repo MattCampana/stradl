@@ -5,13 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/tawanorg/claude-sync/internal/config"
+	"github.com/tawanorg/claude-sync/internal/storage"
+	"github.com/tawanorg/claude-sync/internal/sync"
 )
 
 func TestStatusRoundTrip(t *testing.T) {
@@ -21,7 +26,7 @@ func TestStatusRoundTrip(t *testing.T) {
 	}
 	at := time.Date(2026, 10, 25, 9, 30, 0, 0, time.UTC)
 	in := &Status{
-		LastSyncAt: at, LastDurationMs: 1234, LastError: "boom",
+		LastSyncAt: at, LastDurationMs: 1234, LastAttemptAt: at.Add(time.Minute), LastError: "boom", LastErrorKind: ErrorOffline,
 		Uploaded: 1, Downloaded: 2, Merged: 3, Deferred: 4, Conflicts: 5,
 		SessionsTotal: 9, Paused: true, AgentVersion: "1.0.0", Device: "mac-a",
 	}
@@ -47,7 +52,7 @@ func TestStatusRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"lastSyncAt", "lastDurationMs", "lastError", "uploaded", "downloaded", "merged",
+	for _, k := range []string{"lastSyncAt", "lastDurationMs", "lastAttemptAt", "lastError", "lastErrorKind", "uploaded", "downloaded", "merged",
 		"deferred", "conflicts", "sessionsTotal", "pendingDesktopRestart", "paused", "agentVersion", "device"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("status.json lacks %q", k)
@@ -100,7 +105,15 @@ func TestStatusLine(t *testing.T) {
 		{Snapshot{Syncing: true, Status: Status{Paused: true}}, "Syncing…"},
 		{Snapshot{Status: Status{Paused: true, LastError: "x"}}, "Paused"},
 		{Snapshot{Status: Status{LastError: NotConfigured}}, "Not set up: run stradl init in Terminal"},
-		{Snapshot{Status: Status{LastError: "dial tcp: connection refused"}}, "Error: dial tcp: connection refused (see log)"},
+		{Snapshot{Status: Status{LastError: "a: denied", LastErrorKind: ErrorOther}}, "Sync error (see log)"},
+		{Snapshot{Status: Status{LastError: "x", LastErrorKind: ErrorKeyMismatch}}, "Passphrase doesn't match your other Macs"},
+		{Snapshot{Status: Status{LastError: "x", LastErrorKind: ErrorAuth}}, "Storage token expired or invalid"},
+		{Snapshot{Status: Status{LastError: "x", LastErrorKind: ErrorNoContainer}}, "Storage container not found"},
+		{Snapshot{Status: Status{LastError: "x", LastErrorKind: ErrorOffline}}, "Offline: will retry"},
+		// A status file from an older agent has no kind: sorted by message.
+		{Snapshot{Status: Status{LastError: "dial tcp: connection refused"}}, "Offline: will retry"},
+		// A failure after a good sync shows the failure, not "Synced just now".
+		{Snapshot{Status: Status{LastSyncAt: now.Add(-time.Hour), LastAttemptAt: now, LastError: "x", LastErrorKind: ErrorOffline}}, "Offline: will retry"},
 		{Snapshot{Status: Status{LastSyncAt: now.Add(-2 * time.Minute), SessionsTotal: 9}}, "Synced 2 min ago · 9 sessions"},
 		{Snapshot{Status: Status{LastSyncAt: now.Add(-10 * time.Second), SessionsTotal: 1}}, "Synced just now · 1 session"},
 		{Snapshot{Status: Status{LastSyncAt: now.Add(-3 * time.Hour)}}, "Synced 3 hr ago · 0 sessions"},
@@ -114,6 +127,89 @@ func TestStatusLine(t *testing.T) {
 	long := Snapshot{Status: Status{LastError: strings.Repeat("x", 200)}}
 	if got := StatusLine(long, now); len([]rune(got)) > 70 {
 		t.Errorf("long error not truncated: %q", got)
+	}
+}
+
+func TestAttemptLine(t *testing.T) {
+	now := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
+	cases := []struct {
+		st   Status
+		want string
+	}{
+		{Status{}, ""},
+		{Status{LastSyncAt: now, LastAttemptAt: now}, ""},
+		{Status{LastError: NotConfigured}, ""}, // no attempt without a config
+		{Status{LastAttemptAt: now, LastError: NotConfigured}, ""},
+		{Status{LastSyncAt: now.Add(-2 * time.Hour), LastAttemptAt: now.Add(-30 * time.Second), LastError: "x"},
+			"Last attempt: just now (failed) · last sync: 2 hr ago"},
+		{Status{LastAttemptAt: now.Add(-5 * time.Minute), LastError: "x"},
+			"Last attempt: 5 min ago (failed) · last sync: never"},
+	}
+	for _, c := range cases {
+		if got := AttemptLine(Snapshot{Status: c.st}, now); got != c.want {
+			t.Errorf("AttemptLine(%+v) = %q, want %q", c.st, got, c.want)
+		}
+	}
+}
+
+// netErr is a net.Error that isn't a timeout.
+type netErr struct{}
+
+func (netErr) Error() string   { return "read: broken pipe" }
+func (netErr) Timeout() bool   { return false }
+func (netErr) Temporary() bool { return false }
+
+func TestClassifyError(t *testing.T) {
+	azureAuth := errors.New("Azure rejected the credentials; the SAS token may have expired (extend its stored access policy in the portal, or rerun init with a new token): GET https://acct.blob.core.windows.net/c\nRESPONSE 403\nERROR CODE: AuthenticationFailed")
+	cases := []struct {
+		name string
+		err  error
+		want ErrorKind
+	}{
+		{"nil", nil, ""},
+		{"wrong passphrase", sync.ErrKeyMismatch, ErrorKeyMismatch},
+		{"wrapped wrong passphrase", fmt.Errorf("sync: %w", sync.ErrKeyMismatch), ErrorKeyMismatch},
+		{"expired SAS", azureAuth, ErrorAuth},
+		{"expired SAS through a transport error", &url.Error{Op: "Get", URL: "https://x", Err: azureAuth}, ErrorAuth},
+		{"auth code only", errors.New("RESPONSE 403: AuthenticationFailed"), ErrorAuth},
+		{"S3 expired token", errors.New("operation error S3: ListObjectsV2, api error ExpiredToken: token expired"), ErrorAuth},
+		{"container missing on list", fmt.Errorf("failed to list remote objects: %w", fmt.Errorf("%w: ContainerNotFound", storage.ErrNotFound)), ErrorNoContainer},
+		{"not found on list", fmt.Errorf("failed to list remote objects: %w", storage.ErrNotFound), ErrorNoContainer},
+		{"container code", errors.New("ERROR CODE: ContainerNotFound"), ErrorNoContainer},
+		{"S3 bucket missing", errors.New("api error NoSuchBucket: The specified bucket does not exist"), ErrorNoContainer},
+		{"DNS", &net.DNSError{Err: "no such host", Name: "acct.blob.core.windows.net"}, ErrorOffline},
+		{"url error", &url.Error{Op: "Get", URL: "https://x", Err: errors.New("EOF")}, ErrorOffline},
+		{"net.Error", fmt.Errorf("list: %w", netErr{}), ErrorOffline},
+		{"refused", fmt.Errorf("dial: %w", syscall.ECONNREFUSED), ErrorOffline},
+		{"unreachable", fmt.Errorf("dial: %w", syscall.ENETUNREACH), ErrorOffline},
+		{"timeout", context.DeadlineExceeded, ErrorOffline},
+		{"refused by text", errors.New("dial tcp 127.0.0.1:10000: connect: connection refused"), ErrorOffline},
+		{"no such host by text", errors.New("dial tcp: lookup acct.blob.core.windows.net: no such host"), ErrorOffline},
+		{"i/o timeout by text", errors.New("read tcp: i/o timeout"), ErrorOffline},
+		{"other", errors.New("failed to decrypt: bad header"), ErrorOther},
+		{"permission", errors.New("the SAS token lacks a required permission"), ErrorOther},
+	}
+	for _, c := range cases {
+		if got := ClassifyError(c.err); got != c.want {
+			t.Errorf("%s: ClassifyError(%v) = %q, want %q", c.name, c.err, got, c.want)
+		}
+	}
+
+	// Per-file errors: a missing object is that file's problem, and the most
+	// telling error wins.
+	files := []struct {
+		errs []error
+		want ErrorKind
+	}{
+		{[]error{fmt.Errorf("a: %w", storage.ErrNotFound)}, ErrorOther},
+		{[]error{errors.New("a: denied"), fmt.Errorf("b: %w", syscall.ECONNRESET)}, ErrorOffline},
+		{[]error{fmt.Errorf("b: %w", syscall.ECONNRESET), azureAuth, errors.New("c")}, ErrorAuth},
+		{[]error{errors.New("MCP servers: boom")}, ErrorOther},
+	}
+	for _, c := range files {
+		if got := classifyFileErrors(c.errs); got != c.want {
+			t.Errorf("classifyFileErrors(%v) = %q, want %q", c.errs, got, c.want)
+		}
 	}
 }
 

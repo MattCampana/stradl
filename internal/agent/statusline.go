@@ -6,7 +6,8 @@ import (
 )
 
 // StatusLine is the one-line summary shown at the top of the menu, e.g.
-// "Synced 2 min ago · 9 sessions".
+// "Synced 2 min ago · 9 sessions", or after a failure a short line saying
+// what is wrong, e.g. "Offline: will retry".
 func StatusLine(s Snapshot, now time.Time) string {
 	switch {
 	case s.Syncing:
@@ -16,11 +17,25 @@ func StatusLine(s Snapshot, now time.Time) string {
 	case s.LastError == NotConfigured:
 		return "Not set up: run stradl init in Terminal"
 	case s.LastError != "":
-		return "Error: " + truncate(s.LastError, 48) + " (see log)"
+		return s.ErrorSummary()
 	case s.LastSyncAt.IsZero():
 		return "Starting…"
 	}
 	return fmt.Sprintf("Synced %s · %s", Ago(now.Sub(s.LastSyncAt)), Plural(s.SessionsTotal, "session"))
+}
+
+// AttemptLine is the menu line under StatusLine after a failed sync, e.g.
+// "Last attempt: just now (failed) · last sync: 2 hr ago", or "" when the
+// last attempt succeeded.
+func AttemptLine(s Snapshot, now time.Time) string {
+	if !s.AttemptFailed() {
+		return ""
+	}
+	last := "never"
+	if !s.LastSyncAt.IsZero() {
+		last = Ago(now.Sub(s.LastSyncAt))
+	}
+	return fmt.Sprintf("Last attempt: %s (failed) · last sync: %s", Ago(now.Sub(s.LastAttemptAt)), last)
 }
 
 // RestartLine labels the menu item that restarts the Claude app, or "" when

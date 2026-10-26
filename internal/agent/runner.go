@@ -29,9 +29,12 @@ const (
 	// that keeps talking) can postpone a sync while waiting for quiet.
 	DefaultMaxDebounce = 2 * time.Minute
 
-	syncTimeout     = 15 * time.Minute
-	errorNotifyGap  = time.Hour
-	errorNotifyRuns = 2 // consecutive failed syncs before notifying
+	syncTimeout    = 15 * time.Minute
+	errorNotifyGap = time.Hour // per kind of error
+	// errorNotifyRuns is how many syncs in a row must fail before a
+	// notification, except for errors only the user can fix (a wrong
+	// passphrase, an expired token), which notify at once.
+	errorNotifyRuns = 2
 )
 
 // NotConfigured is the status error shown until `stradl init` has run.
@@ -85,6 +88,11 @@ type Runner struct {
 	trigger chan struct{}
 	nudge   chan struct{}
 
+	// writeMu serializes status changes together with their write to
+	// status.json, so concurrent updates (the loop and the menu bar's
+	// RefreshDesktop) land in the file in the order they were made.
+	writeMu gosync.Mutex
+
 	mu         gosync.Mutex
 	status     Status
 	syncing    bool
@@ -104,7 +112,7 @@ type Runner struct {
 	nextFull    time.Time
 	lastLoop    time.Time
 	failures    int
-	lastNotify  time.Time
+	lastNotify  map[ErrorKind]time.Time
 }
 
 // NewRunner returns a Runner with defaults filled in. It carries over the
@@ -146,7 +154,7 @@ func NewRunner(o Options) *Runner {
 	def(&o.DeferredRetry, DefaultDeferredRetry)
 	def(&o.MaxDebounce, DefaultMaxDebounce)
 
-	r := &Runner{o: o, trigger: make(chan struct{}, 1), nudge: make(chan struct{}, 1)}
+	r := &Runner{o: o, trigger: make(chan struct{}, 1), nudge: make(chan struct{}, 1), lastNotify: map[ErrorKind]time.Time{}}
 	if prev, err := ReadStatus(o.Paths.Status); err == nil {
 		r.status = *prev // keep the last result on display until the first sync
 		r.status.recount()
@@ -403,26 +411,41 @@ func (r *Runner) runSync(ctx context.Context, reason string) {
 // comes next.
 func (r *Runner) finish(ctx context.Context, start, end time.Time, cfg *config.Config, report *sync.SyncReport, err error) {
 	errMsg := ""
+	var kind ErrorKind
 	switch {
 	case err != nil:
 		errMsg = err.Error()
+		kind = ClassifyError(err)
 	case report != nil && len(report.Errors) > 0:
 		errMsg = report.Errors[0].Error()
 		if n := len(report.Errors); n > 1 {
 			errMsg = fmt.Sprintf("%d files failed to sync; first: %s", n, errMsg)
 		}
+		kind = classifyFileErrors(report.Errors)
 	}
 
 	newDesktop := 0
+	sessions := 0
+	if cfg != nil {
+		sessions = r.o.CountSessions(cfg) // a directory walk: not under the lock
+	}
 	r.update(func(st *Status) {
-		st.LastError = errMsg
-		if cfg == nil {
-			return // no sync was attempted (no usable config)
+		st.LastError, st.LastErrorKind = errMsg, kind
+		// Only a clean sync counts as the last sync; a failed one is an
+		// attempt, so "Last sync" never claims "just now" for a failure.
+		// A config that fails to load is a failed attempt too, but waiting
+		// for `stradl init` is not.
+		if errMsg != NotConfigured {
+			st.LastAttemptAt = end
 		}
-		st.LastSyncAt = end
-		st.LastDurationMs = end.Sub(start).Milliseconds()
-		st.Uploaded, st.Downloaded, st.Merged, st.Deferred, st.Conflicts = 0, 0, 0, 0, 0
-		if report != nil {
+		if cfg == nil {
+			return // no sync ran (no usable config)
+		}
+		if errMsg == "" {
+			st.LastSyncAt = end
+			st.LastDurationMs = end.Sub(start).Milliseconds()
+		}
+		if report != nil { // a sync that failed outright keeps the last counts
 			st.Uploaded = len(report.Uploaded) + len(report.Restored)
 			st.Downloaded = len(report.Downloaded)
 			st.Merged = len(report.Merged)
@@ -431,7 +454,7 @@ func (r *Runner) finish(ctx context.Context, start, end time.Time, cfg *config.C
 			newDesktop = len(report.NewDesktopSessions)
 			st.addPending(end, newDesktop)
 		}
-		st.SessionsTotal = r.o.CountSessions(cfg)
+		st.SessionsTotal = sessions
 	})
 	r.refreshDesktop(ctx)
 
@@ -445,7 +468,7 @@ func (r *Runner) finish(ctx context.Context, start, end time.Time, cfg *config.C
 			r.retryAt = end.Add(r.o.DeferredRetry)
 		}
 	}
-	r.notify(end, errMsg, newDesktop)
+	r.notify(end, errMsg, kind, newDesktop)
 }
 
 // reschedule restarts every timer from t after a sync attempt.
@@ -479,7 +502,7 @@ func (r *Runner) backoff(cfg *config.Config) time.Duration {
 	return d
 }
 
-func (r *Runner) notify(now time.Time, errMsg string, newDesktop int) {
+func (r *Runner) notify(now time.Time, errMsg string, kind ErrorKind, newDesktop int) {
 	if r.o.Notify == nil {
 		return
 	}
@@ -497,9 +520,19 @@ func (r *Runner) notify(now time.Time, errMsg string, newDesktop int) {
 			r.o.Notify("Stradl", what+" from your other Macs — they'll appear when you open Claude")
 		}
 	}
-	if errMsg != "" && errMsg != NotConfigured && r.failures >= errorNotifyRuns &&
-		(r.lastNotify.IsZero() || wallSince(now, r.lastNotify) >= errorNotifyGap) {
-		r.lastNotify = now
+	if errMsg == "" || errMsg == NotConfigured || (r.failures < errorNotifyRuns && !kind.urgent()) {
+		return
+	}
+	if last, ok := r.lastNotify[kind]; ok && wallSince(now, last) < errorNotifyGap {
+		return
+	}
+	r.lastNotify[kind] = now
+	switch kind {
+	case ErrorKeyMismatch:
+		r.o.Notify("Stradl", kind.Summary()+". To resume syncing, run 'stradl init --passphrase' in Terminal with the passphrase they use.")
+	case ErrorAuth:
+		r.o.Notify("Stradl", kind.Summary()+". To resume syncing, run 'stradl init' in Terminal with new storage credentials.")
+	default:
 		r.o.Notify("Stradl", "Sync keeps failing: "+truncate(errMsg, 120)+" (see the log)")
 	}
 }
@@ -527,13 +560,21 @@ func (r *Runner) refreshDesktop(ctx context.Context) {
 	}
 }
 
-// update changes the status under the lock, persists it, and tells the UI.
+// update changes the status, persists it, and tells the UI. Safe to call
+// from any goroutine: writeMu covers both the change and the write, so the
+// file always ends up holding the latest status, and the status is encoded
+// under mu, so no slice it shares is read while another update rewrites it.
 func (r *Runner) update(fn func(st *Status)) {
+	r.writeMu.Lock()
 	r.mu.Lock()
 	fn(&r.status)
-	st := r.status
+	data, err := encodeStatus(&r.status)
 	r.mu.Unlock()
-	if err := WriteStatus(r.o.Paths.Status, &st); err != nil {
+	if err == nil {
+		err = writeFileAtomic(r.o.Paths.Status, data)
+	}
+	r.writeMu.Unlock()
+	if err != nil {
 		r.o.Log.Printf("failed to write status: %v", err)
 	}
 	r.changed()

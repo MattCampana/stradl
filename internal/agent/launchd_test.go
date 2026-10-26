@@ -15,6 +15,7 @@ import (
 type fakeLaunchctl struct {
 	calls     []string
 	failFirst map[string]int // subcommand -> remaining failures
+	failIf    func(sub string) bool
 	outputs   map[string]string
 	errs      map[string]error
 }
@@ -22,8 +23,10 @@ type fakeLaunchctl struct {
 func (f *fakeLaunchctl) Run(args ...string) (string, error) {
 	f.calls = append(f.calls, strings.Join(args, " "))
 	sub := args[0]
-	if f.failFirst[sub] > 0 {
-		f.failFirst[sub]--
+	if f.failFirst[sub] > 0 || (f.failIf != nil && f.failIf(sub)) {
+		if f.failFirst[sub] > 0 {
+			f.failFirst[sub]--
+		}
 		return "Bootstrap failed: 5: Input/output error", errors.New("exit status 5")
 	}
 	return f.outputs[sub], f.errs[sub]
@@ -158,9 +161,48 @@ func TestLaunchdInstall(t *testing.T) {
 func TestLaunchdInstallGivesUp(t *testing.T) {
 	ctl := &fakeLaunchctl{failFirst: map[string]int{"bootstrap": 100}}
 	l := testLaunchd(t, ctl)
+	var waited time.Duration
+	l.Sleep = func(d time.Duration) { waited += d }
 	err := l.Install()
 	if err == nil || !strings.Contains(err.Error(), "Input/output error") {
 		t.Fatalf("err = %v", err)
+	}
+	if waited != 15*time.Second {
+		t.Fatalf("gave up after %s of retries, want 15s", waited)
+	}
+}
+
+// TestLaunchdInstallOutlastsGracefulStop: bootout returns while the old
+// agent is still stopping (up to 10s), and bootstrap fails until it has.
+// Install must keep retrying past that instead of leaving no agent loaded.
+func TestLaunchdInstallOutlastsGracefulStop(t *testing.T) {
+	var waited time.Duration
+	var sleeps []time.Duration
+	ctl := &fakeLaunchctl{failIf: func(sub string) bool { return sub == "bootstrap" && waited < 10*time.Second }}
+	l := testLaunchd(t, ctl)
+	l.Sleep = func(d time.Duration) {
+		sleeps = append(sleeps, d)
+		waited += d
+	}
+	if err := l.Install(); err != nil {
+		t.Fatalf("install gave up after %s: %v", waited, err)
+	}
+	if waited < 10*time.Second || waited > 12*time.Second {
+		t.Fatalf("bootstrap succeeded after %s of retries, want just past 10s", waited)
+	}
+	// Quick at first (the usual case is a fraction of a second), then
+	// backing off to at most 2s between attempts.
+	if sleeps[0] > 500*time.Millisecond {
+		t.Errorf("first retry after %s", sleeps[0])
+	}
+	for i, d := range sleeps {
+		if d > 2*time.Second || (i > 0 && d < sleeps[i-1]) {
+			t.Errorf("retry delays %v don't back off up to 2s", sleeps)
+			break
+		}
+	}
+	if last := ctl.calls[len(ctl.calls)-1]; last != "bootstrap gui/501 "+l.Paths.Plist {
+		t.Fatalf("last call %q", last)
 	}
 }
 
