@@ -42,15 +42,22 @@ func AttemptLine(s Snapshot, now time.Time) string {
 // there is nothing waiting for a restart.
 func RestartLine(s Snapshot) string {
 	n := s.PendingDesktopRestart
-	if n <= 0 {
+	if n <= 0 && !s.SidebarPending {
 		return ""
 	}
 	verb := "Restart"
 	if !s.AppRunning {
 		verb = "Open"
 	}
-	if n == 1 {
+	switch {
+	case n <= 0:
+		return verb + " Claude to apply sidebar changes"
+	case n == 1 && s.SidebarPending:
+		return verb + " Claude to show 1 new session and sidebar changes"
+	case n == 1:
 		return verb + " Claude to show 1 new session"
+	case s.SidebarPending:
+		return fmt.Sprintf("%s Claude to show %d new sessions and sidebar changes", verb, n)
 	}
 	return fmt.Sprintf("%s Claude to show %d new sessions", verb, n)
 }

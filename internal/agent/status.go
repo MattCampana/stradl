@@ -37,6 +37,9 @@ type Status struct {
 	// from other devices since the Claude app last started. The app reads its
 	// sidebar only at launch, so they appear after it restarts.
 	PendingDesktopRestart int `json:"pendingDesktopRestart"`
+	// SidebarPending is true while sidebar layout changes from other Macs
+	// (groups, membership, pins) wait for the Claude app to quit.
+	SidebarPending bool `json:"sidebarPending,omitempty"`
 
 	Paused       bool   `json:"paused"`
 	AgentVersion string `json:"agentVersion"`

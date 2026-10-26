@@ -41,6 +41,14 @@ func RunSync(ctx context.Context, cfg *config.Config, quiet, wait bool) (*SyncRe
 			report.Errors = append(report.Errors, fmt.Errorf("MCP servers: %w", err))
 		}
 	}
+	// The desktop sidebar layout (groups, membership, pins) merges as a whole
+	// document; changes for a running app wait for it to quit.
+	if sres, err := s.SyncSidebar(ctx, nil); err != nil {
+		report.Errors = append(report.Errors, fmt.Errorf("desktop sidebar: %w", err))
+	} else {
+		report.SidebarPending = sres.PendingRestart
+		report.SidebarChanged = sres.GroupsChanged + sres.AssignmentsChanged
+	}
 	// Best effort: remember what this Mac changed and tell the other Macs'
 	// dashboards about this sync. Never fails the sync.
 	s.AfterSync(ctx, report)

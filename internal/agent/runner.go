@@ -62,6 +62,10 @@ type Options struct {
 	// AppStart reports when the Claude desktop app was launched, and whether
 	// it is running. Nil means unknown: pending sessions are never cleared.
 	AppStart func(ctx context.Context) (time.Time, bool)
+	// ApplySidebar applies sidebar layout changes waiting for the Claude app
+	// to quit (it does nothing while the app runs) and reports whether any
+	// are still waiting. Nil disables it.
+	ApplySidebar func(ctx context.Context) (stillPending bool)
 	// Notify shows a user notification; nil disables notifications.
 	Notify func(title, body string)
 	// OnChange is called from the runner goroutine whenever Snapshot may
@@ -235,6 +239,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		r.reschedule(now, nil)
 	} else {
 		r.o.Log.Printf("agent %s started (pid %d)", r.o.Version, os.Getpid())
+		// At login the Claude app usually hasn't started yet: apply sidebar
+		// changes left waiting before syncing.
+		r.applySidebar(ctx)
 		r.runSync(ctx, "start")
 	}
 
@@ -453,6 +460,9 @@ func (r *Runner) finish(ctx context.Context, start, end time.Time, cfg *config.C
 			st.Conflicts = len(report.Conflicts)
 			newDesktop = len(report.NewDesktopSessions)
 			st.addPending(end, newDesktop)
+			if report.SidebarPending {
+				st.SidebarPending = true
+			}
 		}
 		st.SessionsTotal = sessions
 	})
@@ -547,17 +557,31 @@ func (r *Runner) refreshDesktop(ctx context.Context) {
 	}
 	r.mu.Lock()
 	pending := r.status.PendingDesktopRestart
+	sidebar := r.status.SidebarPending
 	r.mu.Unlock()
-	if pending == 0 {
+	if pending == 0 && !sidebar {
 		return
 	}
 	started, running := r.o.AppStart(ctx)
 	r.mu.Lock()
 	r.appRunning = running
 	r.mu.Unlock()
-	if running {
+	if running && pending > 0 {
 		r.update(func(st *Status) { st.clearPendingBefore(started) })
 	}
+	if !running && sidebar {
+		r.applySidebar(ctx)
+	}
+}
+
+// applySidebar applies waiting sidebar changes while the Claude app is
+// closed, whether the user quit it or Restart Claude did.
+func (r *Runner) applySidebar(ctx context.Context) {
+	if r.o.ApplySidebar == nil {
+		return
+	}
+	left := r.o.ApplySidebar(ctx)
+	r.update(func(st *Status) { st.SidebarPending = left })
 }
 
 // update changes the status, persists it, and tells the UI. Safe to call

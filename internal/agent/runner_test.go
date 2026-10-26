@@ -699,6 +699,39 @@ func TestRunnerRetriesSoonAfterDeferredFiles(t *testing.T) {
 	h.expectSyncs(0, 45*s)
 }
 
+func TestRunnerAppliesSidebarWhenClaudeIsClosed(t *testing.T) {
+	applied := 0
+	stillPending := true
+	h := newHarness(t, func(h *harness, o *Options) {
+		h.appUp = true
+		h.appStart = h.t0.Add(-time.Hour)
+		h.results = []syncResult{{report: &sync.SyncReport{SidebarPending: true}}}
+		o.ApplySidebar = func(context.Context) bool {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			if !h.appUp {
+				applied++
+				stillPending = false
+			}
+			return stillPending
+		}
+	})
+	h.start()
+	snap := h.r.Snapshot()
+	if !snap.SidebarPending || RestartLine(snap) != "Restart Claude to apply sidebar changes" {
+		t.Fatalf("after sync: pending=%v line=%q", snap.SidebarPending, RestartLine(snap))
+	}
+	// The user quits Claude: the next desktop check applies the layout.
+	h.set(func() { h.appUp = false })
+	h.advance(25 * s)
+	h.mu.Lock()
+	n := applied
+	h.mu.Unlock()
+	if n != 1 || h.status().SidebarPending {
+		t.Fatalf("applied=%d pending=%v after Claude quit", n, h.status().SidebarPending)
+	}
+}
+
 func TestRunnerTracksDesktopSessionsUntilClaudeRestarts(t *testing.T) {
 	h := newHarness(t, func(h *harness, _ *Options) {
 		h.appUp = true

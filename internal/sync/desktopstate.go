@@ -370,6 +370,13 @@ func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (Sideb
 // nothing is pending. The file is re-read and merged three ways with the
 // pending layout, so sidebar edits made on this Mac in the meantime are kept
 // (and go to storage on the next sync). Callers hold the sync lock.
+// SidebarPendingExists reports whether a sidebar layout is waiting for the
+// Claude app to quit.
+func SidebarPendingExists(cfg *config.Config) bool {
+	_, err := os.Stat(filepath.Join(sidebarStateDir(cfg), sidebarPendingFile))
+	return err == nil
+}
+
 func ApplyPendingSidebar(cfg *config.Config, sidebarPath string) (applied bool, err error) {
 	stateDir := sidebarStateDir(cfg)
 	pendingPath := filepath.Join(stateDir, sidebarPendingFile)

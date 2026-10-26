@@ -104,6 +104,8 @@ waits for the first to stop and then takes over.`,
 			}
 			if runtime.GOOS == "darwin" {
 				opts.AppStart = agent.NewDesktopApp().StartTime
+				logger := opts.Log
+				opts.ApplySidebar = func(ctx context.Context) bool { return applyPendingSidebar(ctx, logger) }
 			}
 			if trayAvailable && !headless {
 				return runTray(opts)

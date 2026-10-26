@@ -223,6 +223,12 @@ func TestRestartLine(t *testing.T) {
 	if got := RestartLine(Snapshot{Status: Status{PendingDesktopRestart: 4}}); got != "Open Claude to show 4 new sessions" {
 		t.Errorf("got %q", got)
 	}
+	if got := RestartLine(Snapshot{AppRunning: true, Status: Status{SidebarPending: true}}); got != "Restart Claude to apply sidebar changes" {
+		t.Errorf("sidebar only: %q", got)
+	}
+	if got := RestartLine(Snapshot{AppRunning: true, Status: Status{PendingDesktopRestart: 2, SidebarPending: true}}); got != "Restart Claude to show 2 new sessions and sidebar changes" {
+		t.Errorf("both: %q", got)
+	}
 }
 
 func TestConfigLoader(t *testing.T) {
@@ -371,6 +377,18 @@ func TestDesktopAppRestart(t *testing.T) {
 	joined := strings.Join(f.calls, "\n")
 	if !strings.Contains(joined, `osascript -e tell application "Claude" to quit`) || !strings.HasSuffix(joined, "open -a Claude") {
 		t.Fatalf("calls:\n%s", joined)
+	}
+
+	// BeforeLaunch runs after the app is gone and before it reopens.
+	order := &fakeCommands{pgrep: []string{"812", ""}}
+	app = &DesktopApp{Run: order.run, Name: "Claude", QuitTimeout: time.Second, PollEvery: time.Millisecond}
+	app.BeforeLaunch = func(context.Context) { order.calls = append(order.calls, "before-launch") }
+	if err := app.Restart(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(order.calls, "\n")
+	if !strings.Contains(got, "pgrep -x Claude\nbefore-launch\nopen -a Claude") {
+		t.Fatalf("BeforeLaunch out of order:\n%s", got)
 	}
 
 	// An app that won't quit is left alone, not reopened or killed.

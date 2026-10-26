@@ -30,6 +30,9 @@ const statusRefresh = 15 * time.Second
 func runTray(opts agent.Options) error {
 	logger := opts.Log
 	app := agent.NewDesktopApp()
+	// Restart Claude applies sidebar changes from other Macs in the moment
+	// between the old app quitting and the new one opening.
+	app.BeforeLaunch = func(ctx context.Context) { applyPendingSidebar(ctx, logger) }
 	refresh := make(chan struct{}, 1)
 	poke := func() {
 		select {

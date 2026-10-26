@@ -56,6 +56,12 @@ type SyncReport struct {
 	Skipped    []string // remote keys using a path token this device can't map
 	Moved      []string // stale copies of sessions Claude Code moved to another project folder, folded into the current copy
 
+	// SidebarPending is set when sidebar layout changes from other devices
+	// (groups, membership, pins) are waiting for the Claude app to quit
+	// before they can be applied; SidebarChanged counts what changed.
+	SidebarPending bool
+	SidebarChanged int
+
 	// NewDesktopSessions lists desktop sidebar records that did not exist on
 	// this device before. The desktop app loads its sidebar at launch, so they
 	// show up after it restarts.

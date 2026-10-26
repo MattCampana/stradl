@@ -38,6 +38,10 @@ type DesktopApp struct {
 	SessionsDir string
 	// Alive reports whether a process is running; nil means signal 0.
 	Alive func(pid int) bool
+	// BeforeLaunch runs after the app has quit and before Restart opens it
+	// again: the one moment its settings file can change without the app
+	// overwriting it. Stradl applies pending sidebar layout changes here.
+	BeforeLaunch func(ctx context.Context)
 }
 
 // NewDesktopApp returns a DesktopApp for the real Claude app.
@@ -111,6 +115,9 @@ func (a *DesktopApp) Restart(ctx context.Context) error {
 			case <-time.After(a.PollEvery):
 			}
 		}
+	}
+	if a.BeforeLaunch != nil {
+		a.BeforeLaunch(ctx)
 	}
 	if _, err := a.Run(ctx, "/usr/bin/open", "-a", a.Name); err != nil {
 		return fmt.Errorf("failed to open %s: %w", a.Name, err)
