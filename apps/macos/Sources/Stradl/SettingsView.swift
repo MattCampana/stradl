@@ -14,7 +14,6 @@ struct SettingsForm: View {
     @EnvironmentObject var model: AppModel
     @State private var deviceName = ""
     @State private var newExclude = ""
-    @State private var confirmBuildOutput = false
 
     var body: some View {
         if let c = model.config {
@@ -30,16 +29,7 @@ struct SettingsForm: View {
                         .disabled(c.scope != "everything")
                     Toggle("Claude app sidebar (sessions, groups and pins)", isOn: binding(c.desktopSync) { model.setConfig("desktop_sync", $0 ? "on" : "off") })
                     Toggle("MCP servers", isOn: binding(c.mcpSync) { model.setConfig("mcp_sync", $0 ? "on" : "off") })
-                    Toggle("Build output too (node_modules, .venv, …)", isOn: binding(c.syncBuildArtifacts) { on in
-                        // Turning it on is rarely right: ask first.
-                        if on { confirmBuildOutput = true } else { model.setConfig("sync_build_artifacts", "off") }
-                    })
-                    .confirmationDialog("Sync build output too?", isPresented: $confirmBuildOutput) {
-                        Button("Sync Build Output") { model.setConfig("sync_build_artifacts", "on") }
-                        Button("Cancel", role: .cancel) {}
-                    } message: {
-                        Text("Folders like node_modules can hold hundreds of thousands of files. Every Mac rebuilds its own, and syncing them is slow, fills your storage and, on an iCloud Desktop, makes iCloud download all of them.")
-                    }
+                    Toggle("Build output too (node_modules, .venv, …)", isOn: binding(c.syncBuildArtifacts) { model.setConfig("sync_build_artifacts", $0 ? "on" : "off") })
                     Text("Left on each Mac by default: \(c.buildArtifacts.joined(separator: ", ")). Each Mac rebuilds its own.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
