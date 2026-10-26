@@ -102,7 +102,8 @@ Every sync compares each file on your Mac with the copy in storage and with the 
 - **New on either side:** copied to the other side.
 - **Changed on one side:** that side wins.
 - **Changed on both sides:** transcripts are merged line by line (every message is kept, in time order); sidebar entries keep the most recently active version; any other file keeps the newer copy and saves the other as a `.conflict` copy.
-- **A project folder that was already on two Macs:** your copy of each file stays put and the other Mac's is saved beside it, except that a file git says you never touched takes the other Mac's edit. In a git repository the Mac that is ahead wins, and a branch two Macs moved apart keeps both commits (the other one as `stradl/<branch>-<commit>`).
+- **A project folder that was already on two Macs:** the first Mac to sync it is the reference. When the second Mac joins, every file it has a different version of is saved beside the reference copy as `<file>.from-<Mac name>`, on every Mac, so nothing is overwritten and you can merge at leisure. Its git commits stay reachable as branches named `stradl/<branch>-<commit>`. Tip: update the Mac you work on first.
+- **Git repositories** sync completely, with git's own rules respected: never mid-command, commits before the branches that point to them, branches that moved apart on two Macs both kept, and a cleanup (`git gc`) on one Mac never deleting anything on another.
 - **Deleted:** sessions, prompt history and sidebar entries stay deleted on that Mac only; every other file is deleted everywhere, into the other Macs' trash.
 - **Missing from storage:** restored from this Mac.
 

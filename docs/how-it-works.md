@@ -81,13 +81,13 @@ folder_exclude:
 
 ### When a folder was already on two Macs
 
-The first time a Mac syncs a folder that another Mac already synced, nobody knows which copy is right, so Stradl doesn't guess by timestamps:
+The first time a Mac syncs a folder that another Mac already synced, nobody knows which copy is right, so Stradl doesn't guess by timestamps. The copy already in storage, from the first Mac to sync the folder, is the reference:
 
 - **A file only one Mac has** goes to both.
-- **A file both Macs have with different content:** this Mac's copy stays where it is, and the other Mac's is saved beside it as a `.conflict` copy. The one exception is a file git says you never touched (it matches the last commit); then the other Mac's edit wins, and your untouched copy, which git still has, goes to `~/.stradl/conflicts/`.
-- **git's own files** (HEAD, branches, the index) all come from whichever Mac's checkout is ahead, so they always agree with each other. When neither contains the other, the Mac with the newer commit leads.
+- **A file both Macs have with different content** keeps the reference version on every Mac, and the joining Mac's version is saved beside it as `<file>.from-<Mac name>`. That copy syncs like any file, so every Mac sees both; delete it once you have merged it, and it goes away everywhere. A file git says the joining Mac never touched (it matches its last commit), or one git ignores (build output), needs no copy beside it: it goes to `~/.stradl/conflicts/` on that Mac.
+- **git's own files** (HEAD, refs) follow the reference too, so they always agree with each other and with the files. Branches only the joining Mac has are added, and a branch both had but moved apart keeps the joining Mac's commit as `stradl/<branch>-<short commit>`.
 
-So a fresh clone on one Mac picks up the uncommitted work another Mac has, and a Mac with new commits is never rolled back by an older copy.
+So update the Mac you work on first: its folders become the reference, and the other Macs' extra work shows up beside it.
 
 ### Git repositories
 
@@ -95,7 +95,11 @@ So a fresh clone on one Mac picks up the uncommitted work another Mac has, and a
 
 - **Never mid-command.** While git holds a lock anywhere in `.git` (a commit, checkout or rebase in progress), the folder sits the pass out. A lock left behind for more than 15 minutes, usually by a crashed git, produces a warning.
 - **Objects first.** Within a pass, git's objects sync before its refs, index and HEAD, so a branch never points at a commit that hasn't arrived.
-- **Branches fast-forward.** When two Macs moved a branch and one commit contains the other, the branch takes the newer one. When they diverged, the branch keeps the newer commit and the other is saved as a branch named `stradl/<branch>-<short commit>`, so no commit becomes unreachable. Merge it, or delete it once you don't need it.
+- **Branches fast-forward.** When two Macs moved a branch and one commit contains the other, the branch takes the newer one. When they diverged, the branch keeps the newer commit and the other is saved as a branch named `stradl/<branch>-<short commit>`, so no commit becomes unreachable. Merge it, or delete it once you don't need it. A detached HEAD or a stash that diverged is kept the same way.
+- **A ref waits for its commits.** A branch from another Mac is written only once the commits it points to are on this Mac.
+- **Nothing git deletes spreads.** git deletes objects and loose refs when it packs or prunes them (`git gc`). Those deletes stay on that Mac, so a commit another Mac builds on never goes missing, and an object pruned here that another Mac's commit needs is fetched again. Deleting a branch also stays on the Mac where you did it.
+- **Each Mac keeps its own index.** The index (git's staging area and file-stat cache) is rewritten by every `git status`, so it doesn't sync; when sync moves HEAD or a branch, Stradl rebuilds it from the new commit. Staged-but-uncommitted changes then show as unstaged, with their content untouched.
+- **Linked worktrees** (`git worktree add`, which Claude Code uses) sync their files, but their pointers to the repository hold absolute paths into one Mac's home, so they stay on that Mac.
 
 ## Remote Control
 
