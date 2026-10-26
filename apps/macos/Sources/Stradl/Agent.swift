@@ -57,9 +57,17 @@ enum StradlCLI {
                 }
                 let timer = DispatchWorkItem { if p.isRunning { p.terminate() } }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
-                // Read before waiting: a full pipe would block the command.
+                // Drain both pipes at once before waiting: a full pipe would
+                // block the command, and reading one to the end first could
+                // leave it stuck writing the other.
+                var errData = Data()
+                let errDone = DispatchSemaphore(value: 0)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    errData = err.fileHandleForReading.readDataToEndOfFile()
+                    errDone.signal()
+                }
                 let outData = out.fileHandleForReading.readDataToEndOfFile()
-                let errData = err.fileHandleForReading.readDataToEndOfFile()
+                errDone.wait()
                 p.waitUntilExit()
                 timer.cancel()
                 if p.terminationStatus == 0 {
