@@ -67,6 +67,10 @@ type Syncer struct {
 
 	// modes is the shared modes manifest during a pass.
 	modes *modeBook
+
+	// repos caches, during a pass, which Mac leads in each git repository
+	// that exists on both sides (see repoVerdict).
+	repos *repoVerdicts
 }
 
 type SyncResult struct {

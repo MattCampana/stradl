@@ -456,7 +456,8 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	loaded, manifestETag := s.loadMtimes(ctx)
 	manifest := &mtimeBook{m: loaded}
 	s.modes = s.loadModes(ctx, hasModes)
-	defer func() { s.modes = nil }()
+	s.repos = &repoVerdicts{m: make(map[string]*repoVerdictEntry)}
+	defer func() { s.modes, s.repos = nil, nil }()
 	homeDir := s.home
 	repos := newRepoIndex(homeDir)
 
@@ -646,13 +647,21 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	s.markFolders(ctx, roots, local, objects)
 
 	// Run with a bounded worker pool: transcripts, settings and project
-	// folders first, then sidebar records, so a record never lands on a device
-	// before its transcript and its folder.
-	var files, records []job
+	// folders first, then git's refs and index, then sidebar records, so a
+	// ref never lands on a device before the objects it points to and a
+	// record never before its transcript and its folder.
+	// Conflicts in a working tree wait for the objects too: deciding them
+	// compares this Mac's commit with the other Mac's (repoVerdict).
+	var files, worktree, gitMeta, records []job
 	for _, j := range jobs {
-		if strings.HasPrefix(j.npath, DesktopPrefix) {
+		switch {
+		case strings.HasPrefix(j.npath, DesktopPrefix):
 			records = append(records, j)
-		} else {
+		case gitMetadata(j.npath):
+			gitMeta = append(gitMeta, j)
+		case j.kind == "merge" && j.root != nil && j.root.kind == rootFolder:
+			worktree = append(worktree, j)
+		default:
 			files = append(files, j)
 		}
 	}
@@ -664,7 +673,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	// path on a case-insensitive volume) run one at a time: the second then
 	// sees the first's write and merges or defers instead of renaming over it.
 	locks := &keyedLocks{m: make(map[string]*gosync.Mutex)}
-	for _, batch := range [][]job{files, records} {
+	for _, batch := range [][]job{files, worktree, gitMeta, records} {
 		sem := make(chan struct{}, defaultWorkers)
 		var wg gosync.WaitGroup
 		for _, j := range batch {
@@ -1371,20 +1380,21 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 				result, uploadThere = localData, true
 			}
 		default:
-			// Non-mergeable: newest wins, the other copy is kept.
-			remoteTime := manifest.get(key)
-			if remoteTime.IsZero() || info.ModTime().After(remoteTime) {
+			// Non-mergeable: one copy keeps the name, the other is kept.
+			side := s.chooseSide(ctx, npath, lf, info, localData, remoteData, manifest.get(key))
+			loser, origin := remoteData, ConflictFromOtherMac
+			if side.local {
 				result, uploadThere = localData, true
-				conflict = true
-				if err := s.keepConflict(npath, lf.abs, remoteData, ConflictFromOtherMac); err != nil {
-					return err
-				}
 			} else {
 				result, writeHere = remoteData, true
+				loser, origin = localData, ConflictFromThisMac
+			}
+			if side.keep {
 				conflict = true
-				if err := s.keepConflict(npath, lf.abs, localData, ConflictFromThisMac); err != nil {
+				if err := s.keepLoser(npath, lf.abs, loser, origin, side.aside); err != nil {
 					return err
 				}
+				keepLosingBranch(npath, lf.abs, result, loser)
 			}
 		}
 
@@ -1485,7 +1495,8 @@ func (s *Syncer) settleStreamed(ctx context.Context, npath string, lf *localFile
 		return true, nil
 	}
 	key := s.engineRemoteKey(npath)
-	if remoteTime := manifest.get(key); remoteTime.IsZero() || info.ModTime().After(remoteTime) {
+	side := s.chooseSide(ctx, npath, lf, info, nil, nil, manifest.get(key))
+	if side.local {
 		newETag, hash, err := s.uploadLocal(ctx, npath, lf.abs, info, etag)
 		if errors.Is(err, storage.ErrPreconditionFailed) {
 			return false, nil
@@ -1493,7 +1504,7 @@ func (s *Syncer) settleStreamed(ctx context.Context, npath string, lf *localFile
 		if err != nil {
 			return true, err
 		}
-		if err := s.keepConflictFile(npath, lf.abs, tmp, ConflictFromOtherMac, true); err != nil {
+		if err := s.keepConflictFile(npath, lf.abs, tmp, ConflictFromOtherMac, true, false); err != nil {
 			return true, err
 		}
 		s.recordMtime(manifest, npath, info.ModTime())
@@ -1506,12 +1517,12 @@ func (s *Syncer) settleStreamed(ctx context.Context, npath string, lf *localFile
 		if isSymlink(info) {
 			data, err := readLocalContent(lf.abs, info)
 			if err == nil {
-				err = s.keepConflict(npath, lf.abs, data, ConflictFromThisMac)
+				err = s.keepLoser(npath, lf.abs, data, ConflictFromThisMac, side.aside)
 			}
 			if err != nil {
 				return true, err
 			}
-		} else if err := s.keepConflictFile(npath, lf.abs, lf.abs, ConflictFromThisMac, false); err != nil {
+		} else if err := s.keepConflictFile(npath, lf.abs, lf.abs, ConflictFromThisMac, false, side.aside); err != nil {
 			return true, err
 		}
 		if err := commitTemp(tmp, lf.abs, info, perm, s.claudeDir, lf.root.dir); err != nil {

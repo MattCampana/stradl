@@ -136,11 +136,12 @@ func conflictsAside(npath string) bool {
 	return strings.HasPrefix(npath, "plugins/") || hasGitSegment(npath)
 }
 
-// keepConflict saves the losing side of a non-mergeable conflict as
+// keepLoser saves the losing side of a non-mergeable conflict as
 // <file>.conflict.<time>.<origin>, beside the file or in the conflicts folder
-// (see conflictsAside). Conflict copies are never synced.
-func (s *Syncer) keepConflict(npath, abs string, data []byte, origin string) error {
-	if !conflictsAside(npath) {
+// (see conflictsAside; aside sends it there wherever the file lives, for a
+// copy git already holds). Conflict copies are never synced.
+func (s *Syncer) keepLoser(npath, abs string, data []byte, origin string, aside bool) error {
+	if !aside && !conflictsAside(npath) {
 		return writeConflictCopy(abs, data, origin)
 	}
 	p := filepath.Join(s.conflictsDir(), s.keepRel(abs)) + conflictSuffix(origin)
@@ -150,12 +151,12 @@ func (s *Syncer) keepConflict(npath, abs string, data []byte, origin string) err
 	return os.WriteFile(freeName(p), data, 0600)
 }
 
-// keepConflictFile is keepConflict for a losing side that is already a file
+// keepConflictFile is keepLoser for a losing side that is already a file
 // (a streamed download, or a local file too large to hold in memory). It
-// moves (move=true) or copies src.
-func (s *Syncer) keepConflictFile(npath, abs, src, origin string, move bool) error {
+// moves (move=true) or copies src, to the conflicts folder when aside.
+func (s *Syncer) keepConflictFile(npath, abs, src, origin string, move, aside bool) error {
 	p := abs + conflictSuffix(origin)
-	if conflictsAside(npath) {
+	if aside || conflictsAside(npath) {
 		p = filepath.Join(s.conflictsDir(), s.keepRel(abs)) + conflictSuffix(origin)
 	}
 	p = freeName(p)
