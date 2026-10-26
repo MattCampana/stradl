@@ -216,19 +216,28 @@ struct AgentOffline: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
+        // The agent can be running but slow to answer (its first overview
+        // reads every transcript): that is not the same as stopped.
+        let running = model.config?.agentRunning ?? false
         VStack(spacing: 14) {
-            Image(systemName: "moon.zzz")
+            Image(systemName: running ? "hourglass" : "moon.zzz")
                 .font(.system(size: 40))
                 .foregroundStyle(.secondary)
-            Text("Stradl isn't running")
+            Text(running ? "Stradl is busy" : "Stradl isn't running")
                 .font(.title2.weight(.semibold))
-            Text(model.overviewError ?? "Start the background agent to sync and see your Macs.")
+            Text(running
+                 ? "It didn't answer in time, usually because it's in the middle of a big sync. \(model.overviewError ?? "")"
+                 : "Start the background agent to sync and see your Macs.")
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 420)
-            Button("Start Stradl") { model.startAgent() }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.busy.contains("agent"))
+                .frame(maxWidth: 440)
+            if running {
+                Button("Try Again") { Task { await model.refreshAll() } }
+            } else {
+                Button("Start Stradl") { model.startAgent() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.busy.contains("agent"))
+            }
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
