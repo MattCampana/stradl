@@ -16,8 +16,12 @@ func init() {
 	extraCommands = append(extraCommands, syncCmd)
 }
 
+// syncOnce runs one sync pass under the device lock. A variable so tests can
+// stand in for the engine.
+var syncOnce = sync.RunSync
+
 func syncCmd() *cobra.Command {
-	var wait bool
+	var noWait bool
 	var timeout time.Duration
 
 	cmd := &cobra.Command{
@@ -29,7 +33,11 @@ Every session created on any device ends up on every device. A conversation
 continued on two devices before they synced is merged, so no turn is lost.
 Deleting a session here only removes it here. A session open in a running
 Claude process is never rewritten underneath it; its updates wait until the
-process exits.`,
+process exits.
+
+When another sync is already running (the background agent's, say), this one
+waits up to 2 minutes for it to finish and then runs, so it always includes
+your latest changes. --no-wait skips it instead.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
@@ -39,12 +47,23 @@ process exits.`,
 			defer cancel()
 
 			start := time.Now()
-			report, err := sync.RunSync(ctx, cfg, quiet, wait)
+			report, err := syncOnce(ctx, cfg, quiet, false)
 			if errors.Is(err, sync.ErrLocked) {
-				if !quiet {
-					printInfo("Another sync is already running; it covers the same files.")
+				// The running sync may have started before the latest
+				// changes, so it doesn't stand in for this one.
+				if noWait {
+					if !quiet {
+						printInfo("Another sync is running, so this one was skipped (--no-wait).")
+					}
+					return nil
 				}
-				return nil
+				if !quiet {
+					printInfo("Another sync is running; waiting for it to finish...")
+				}
+				report, err = syncOnce(ctx, cfg, quiet, true)
+				if errors.Is(err, sync.ErrLocked) {
+					return fmt.Errorf("another sync is still running after 2 minutes; try again shortly, or check 'stradl status'")
+				}
 			}
 			if err != nil {
 				return err
@@ -58,7 +77,9 @@ process exits.`,
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&wait, "wait", false, "Wait for a running sync to finish instead of skipping")
+	cmd.Flags().BoolVar(&noWait, "no-wait", false, "Skip this sync, instead of waiting, when another one is running")
+	cmd.Flags().Bool("wait", true, "Wait for a running sync to finish (the default)")
+	_ = cmd.Flags().MarkDeprecated("wait", "waiting is now the default; pass --no-wait to skip instead")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Minute, "Give up after this long")
 	return cmd
 }

@@ -106,6 +106,9 @@ func TestNormalizeSASToken(t *testing.T) {
 }
 
 func TestRunAzureWizardNonInteractive(t *testing.T) {
+	t.Setenv(envAzureSASToken, "")
+	t.Setenv(envAzureAccountKey, "")
+
 	t.Run("complete flags need no prompts", func(t *testing.T) {
 		cfg, err := runAzureWizard(azureOptions{Account: "mystradl", SASToken: testSAS}, false)
 		if err != nil {
@@ -126,10 +129,43 @@ func TestRunAzureWizardNonInteractive(t *testing.T) {
 		}
 	})
 
-	t.Run("missing secret without a terminal explains the flags", func(t *testing.T) {
+	t.Run("missing secret without a terminal points at the environment", func(t *testing.T) {
 		_, err := runAzureWizard(azureOptions{Account: "mystradl"}, false)
-		if err == nil || !strings.Contains(err.Error(), "--azure-sas-token") || !strings.Contains(err.Error(), "not a terminal") {
+		if err == nil || !strings.Contains(err.Error(), envAzureSASToken) || !strings.Contains(err.Error(), "not a terminal") {
 			t.Fatalf("runAzureWizard() error = %v", err)
+		}
+	})
+
+	t.Run("SAS token from the environment", func(t *testing.T) {
+		t.Setenv(envAzureSASToken, "?"+testSAS)
+		cfg, err := runAzureWizard(azureOptions{Account: "mystradl"}, false)
+		if err != nil {
+			t.Fatalf("runAzureWizard() = %v", err)
+		}
+		if cfg.AzureSASToken != testSAS || cfg.AzureAccountKey != "" {
+			t.Errorf("runAzureWizard() = %+v", *cfg)
+		}
+	})
+
+	t.Run("account key from the environment", func(t *testing.T) {
+		t.Setenv(envAzureAccountKey, testAccountKey)
+		cfg, err := runAzureWizard(azureOptions{Account: "mystradl"}, false)
+		if err != nil {
+			t.Fatalf("runAzureWizard() = %v", err)
+		}
+		if cfg.AzureAccountKey != testAccountKey || cfg.AzureSASToken != "" {
+			t.Errorf("runAzureWizard() = %+v", *cfg)
+		}
+	})
+
+	t.Run("a credential flag wins over the environment", func(t *testing.T) {
+		t.Setenv(envAzureSASToken, "sv=1&sig=fromenv")
+		cfg, err := runAzureWizard(azureOptions{Account: "mystradl", AccountKey: testAccountKey}, false)
+		if err != nil {
+			t.Fatalf("runAzureWizard() = %v", err)
+		}
+		if cfg.AzureAccountKey != testAccountKey || cfg.AzureSASToken != "" {
+			t.Errorf("runAzureWizard() = %+v", *cfg)
 		}
 	})
 }

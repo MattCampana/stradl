@@ -21,6 +21,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/tawanorg/claude-sync/internal/agent"
 	"github.com/tawanorg/claude-sync/internal/util"
 )
 
@@ -49,9 +50,9 @@ const (
 	// (200MB), so a bad or hostile response can't exhaust memory.
 	maxBinarySize = 200 * 1024 * 1024
 
-	// launchAgentLabel is the background agent's launchd label; update uses
-	// it to tell the user how to restart the agent onto the new binary.
-	launchAgentLabel = "com.breakpointdata.stradl"
+	// launchAgentLabel is the background agent's launchd label; update
+	// restarts that job onto the new binary.
+	launchAgentLabel = agent.Label
 )
 
 // GitHubRelease is the subset of the GitHub release API response Stradl uses.
@@ -399,11 +400,27 @@ func runUpdate(ctx context.Context, checkOnly bool, execPath string) error {
 	}
 
 	fmt.Printf("%s✓%s Updated stradl v%s → v%s\n", colorGreen, colorReset, currentVersion, latestVersion)
-	if launchAgentInstalled() {
-		fmt.Printf("\n%sThe background agent keeps running the old version until it restarts:%s\n", colorDim, colorReset)
-		fmt.Printf("  %slaunchctl kickstart -k gui/%d/%s%s\n", colorCyan, os.Getuid(), launchAgentLabel, colorReset)
-	}
+	restartAgentAfterUpdate()
 	return nil
+}
+
+// restartAgentAfterUpdate restarts the background agent, when one is
+// installed, so it runs the new binary instead of the old one it still has
+// open. If launchd refuses, it says how to restart the agent by hand.
+func restartAgentAfterUpdate() {
+	if !launchAgentInstalled() {
+		return
+	}
+	p, err := agentPaths()
+	if err == nil {
+		err = newLaunchd(p, "").Restart()
+	}
+	if err != nil {
+		printWarning("Could not restart the background agent, so it keeps running the old version: " + err.Error())
+		fmt.Printf("  Restart it with: %slaunchctl kickstart -k gui/%d/%s%s\n", colorCyan, os.Getuid(), launchAgentLabel, colorReset)
+		return
+	}
+	fmt.Printf("%s✓%s Restarted the background agent on the new version\n", colorGreen, colorReset)
 }
 
 // launchAgentInstalled reports whether the background agent's launchd plist

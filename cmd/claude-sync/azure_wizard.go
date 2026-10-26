@@ -17,6 +17,14 @@ import (
 // --bucket is omitted, for Azure Blob Storage.
 const defaultAzureContainer = "stradl"
 
+// Environment variables init reads an Azure secret from when no credential
+// flag is given. They keep the secret out of the command line, where shell
+// history and ps would show it.
+const (
+	envAzureSASToken   = "STRADL_AZURE_SAS_TOKEN"
+	envAzureAccountKey = "STRADL_AZURE_ACCOUNT_KEY"
+)
+
 var (
 	// azureAccountRe matches storage account names: 3-24 lowercase letters
 	// and digits.
@@ -50,6 +58,16 @@ func (o azureOptions) hasAny() bool {
 // scripted setup never stops at a prompt.
 func (o azureOptions) complete() bool {
 	return o.Account != "" && (o.SASToken != "" || o.AccountKey != "")
+}
+
+// withEnvSecret fills the credential from STRADL_AZURE_SAS_TOKEN or
+// STRADL_AZURE_ACCOUNT_KEY when no credential flag was given.
+func (o azureOptions) withEnvSecret() azureOptions {
+	if o.SASToken == "" && o.AccountKey == "" {
+		o.SASToken = os.Getenv(envAzureSASToken)
+		o.AccountKey = os.Getenv(envAzureAccountKey)
+	}
+	return o
 }
 
 func validateAzureAccount(name string) error {
@@ -125,7 +143,7 @@ func azureConfig(opts azureOptions) (*storage.StorageConfig, error) {
 	}
 	switch {
 	case sas != "" && key != "":
-		return nil, fmt.Errorf("use either --azure-sas-token or --azure-account-key, not both")
+		return nil, fmt.Errorf("use either a SAS token or an account key, not both")
 	case sas != "":
 		if err := validateSASToken(sas); err != nil {
 			return nil, err
@@ -135,7 +153,7 @@ func azureConfig(opts azureOptions) (*storage.StorageConfig, error) {
 			return nil, err
 		}
 	default:
-		return nil, fmt.Errorf("an Azure credential is required: --azure-sas-token (recommended) or --azure-account-key")
+		return nil, fmt.Errorf("an Azure credential is required: set %s (recommended) or %s", envAzureSASToken, envAzureAccountKey)
 	}
 
 	cfg := &storage.StorageConfig{
@@ -158,17 +176,20 @@ func stdinIsTerminal() bool {
 	return err == nil && fi.Mode()&os.ModeCharDevice != 0
 }
 
-// runAzureWizard configures Azure Blob Storage. When the flags already name
-// the account and a credential (scripted setup), or stdin is not a terminal,
-// it uses opts as given; otherwise it prompts for whatever is missing, reading
-// the secret with a hidden prompt so it never lands in shell history.
+// runAzureWizard configures Azure Blob Storage. When the flags (with the
+// secret from the environment) already name the account and a credential
+// (scripted setup), or stdin is not a terminal, it uses them as given;
+// otherwise it prompts for whatever is missing, reading the secret with a
+// hidden prompt so it never lands in shell history.
 func runAzureWizard(opts azureOptions, interactive bool) (*storage.StorageConfig, error) {
 	fmt.Printf("  %sAzure Blob Storage Setup%s\n\n", colorBold, colorReset)
 
+	opts = opts.withEnvSecret()
 	if opts.complete() || !interactive {
 		cfg, err := azureConfig(opts)
 		if err != nil && !interactive {
-			return nil, fmt.Errorf("%w\n  (stdin is not a terminal, so init can't prompt; pass --azure-account and --azure-sas-token)", err)
+			return nil, fmt.Errorf("%w\n  (stdin is not a terminal, so init can't prompt: pass --azure-account, and put the SAS token in %s or the account key in %s)",
+				err, envAzureSASToken, envAzureAccountKey)
 		}
 		return cfg, err
 	}

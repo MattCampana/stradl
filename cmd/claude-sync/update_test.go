@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/tawanorg/claude-sync/internal/agent"
 )
 
 // tarEntry is one file in a test release archive.
@@ -383,12 +386,96 @@ func TestGetLatestReleaseErrors(t *testing.T) {
 	}
 }
 
+// launchctlSpy records launchctl calls instead of talking to launchd.
+type launchctlSpy struct {
+	calls [][]string
+	err   error
+}
+
+func (s *launchctlSpy) Run(args ...string) (string, error) {
+	s.calls = append(s.calls, args)
+	return "", s.err
+}
+
+func spyOnLaunchctl(t *testing.T) *launchctlSpy {
+	t.Helper()
+	spy := &launchctlSpy{}
+	old := launchctl
+	launchctl = spy
+	t.Cleanup(func() { launchctl = old })
+	return spy
+}
+
+func TestRunUpdateRestartsAgent(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("the agent runs under launchd only on macOS")
+	}
+	assetName, err := releaseAssetName(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Skipf("no release build for this platform: %v", err)
+	}
+	archive := makeTarGz(t, tarEntry{name: "stradl", body: "v1.2.0 binary"})
+	srv := fakeRelease{tag: "v1.2.0", assets: map[string][]byte{assetName: archive}, withChecksums: true}.serve(t)
+	setReleaseRepo(t, "owner/stradl", srv.URL)
+	oldVersion := version
+	t.Cleanup(func() { version = oldVersion })
+	version = "1.1.0"
+
+	install := func(t *testing.T) (exe string) {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		plist := agent.PathsFor(home).Plist
+		if err := os.MkdirAll(filepath.Dir(plist), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(plist, []byte("<plist/>"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		exe = filepath.Join(t.TempDir(), "stradl")
+		if err := os.WriteFile(exe, []byte("old binary"), 0755); err != nil {
+			t.Fatal(err)
+		}
+		return exe
+	}
+
+	t.Run("restarts the installed agent", func(t *testing.T) {
+		exe := install(t)
+		spy := spyOnLaunchctl(t)
+		if err := runUpdate(context.Background(), false, exe); err != nil {
+			t.Fatalf("runUpdate() = %v", err)
+		}
+		want := fmt.Sprintf("kickstart -k gui/%d/%s", os.Getuid(), agent.Label)
+		if len(spy.calls) != 1 || strings.Join(spy.calls[0], " ") != want {
+			t.Errorf("launchctl calls = %v, want [%s]", spy.calls, want)
+		}
+	})
+
+	t.Run("a failed restart still updates", func(t *testing.T) {
+		exe := install(t)
+		spy := spyOnLaunchctl(t)
+		spy.err = errors.New("Could not find service")
+		if err := runUpdate(context.Background(), false, exe); err != nil {
+			t.Fatalf("runUpdate() = %v", err)
+		}
+		if got, _ := os.ReadFile(exe); string(got) != "v1.2.0 binary" {
+			t.Errorf("binary = %q, want the new release", got)
+		}
+	})
+}
+
 func TestRunUpdate(t *testing.T) {
 	assetName, err := releaseAssetName(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		t.Skipf("no release build for this platform: %v", err)
 	}
 	t.Setenv("HOME", t.TempDir()) // no launch agent plist
+	spy := spyOnLaunchctl(t)
+	t.Cleanup(func() {
+		if len(spy.calls) != 0 {
+			t.Errorf("launchctl ran without an installed agent: %v", spy.calls)
+		}
+	})
 
 	archive := makeTarGz(t, tarEntry{name: "stradl", body: "v1.2.0 binary"})
 	srv := fakeRelease{tag: "v1.2.0", assets: map[string][]byte{assetName: archive}, withChecksums: true}.serve(t)

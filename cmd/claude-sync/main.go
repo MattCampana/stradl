@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -217,12 +218,18 @@ Supported providers:
   - webdav:        WebDAV (Nextcloud, ownCloud, etc. - self-hosted)
 
 New setups sync sessions only (conversation history, plans and tasks); pass
---scope full to also sync settings, plugins, skills and agents.
+--scope full to also sync settings, plugins, skills and agents. Rerunning init
+replaces the storage settings and key but keeps everything else in the config
+(path_map, desktop_sync, sync paths, excludes, MCP sync, the sync interval, and
+the scope unless --scope is given).
+
+For scripted Azure setup, put the SAS token in STRADL_AZURE_SAS_TOKEN (or the
+account key in STRADL_AZURE_ACCOUNT_KEY) rather than on the command line.
 
 Examples:
   stradl init                # Full setup wizard
   stradl init --passphrase   # Re-enter passphrase only (keeps storage config)
-  stradl init --force        # Reset everything, start fresh
+  stradl init --force        # Replace storage and key settings without asking
   stradl init --azure-account mystradl   # Azure; prompts for the SAS token (hidden)
   stradl init --provider s3-compatible --endpoint https://s3.us-west-004.backblazeb2.com   # Backblaze B2`,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -251,8 +258,8 @@ Examples:
 
 	// Azure flags
 	cmd.Flags().StringVar(&opts.azure.Account, "azure-account", "", "Azure storage account name")
-	cmd.Flags().StringVar(&opts.azure.SASToken, "azure-sas-token", "", "Azure container SAS token (prompted for, hidden, when omitted)")
-	cmd.Flags().StringVar(&opts.azure.AccountKey, "azure-account-key", "", "Azure storage account key (instead of a SAS token)")
+	cmd.Flags().StringVar(&opts.azure.SASToken, "azure-sas-token", "", "Azure container SAS token; prefer "+envAzureSASToken+", which keeps it out of shell history (prompted for, hidden, when neither is set)")
+	cmd.Flags().StringVar(&opts.azure.AccountKey, "azure-account-key", "", "Azure storage account key instead of a SAS token; prefer "+envAzureAccountKey)
 
 	// R2 flags
 	cmd.Flags().StringVar(&opts.accountID, "account-id", "", "Cloudflare Account ID (R2)")
@@ -309,6 +316,10 @@ func resolveProvider(opts initOptions, interactive bool) (string, error) {
 	return providerChoices[choice].id, nil
 }
 
+// newStorageClient opens storage for init and reset. A variable so tests can
+// substitute an in-memory store.
+var newStorageClient = storage.New
+
 // initPassphraseOnly handles the case where user just wants to re-enter passphrase
 // keeping existing storage configuration
 func initPassphraseOnly(ctx context.Context, keyPath string) error {
@@ -316,11 +327,14 @@ func initPassphraseOnly(ctx context.Context, keyPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load existing config: %w", err)
 	}
+	if existingCfg.EncryptionKey != "" {
+		keyPath = existingCfg.EncryptionKey // the key every sync reads
+	}
 
 	storageCfg := existingCfg.GetStorageConfig()
-	store, err := storage.New(storageCfg)
+	store, err := newStorageClient(storageCfg)
 	if err != nil {
-		return fmt.Errorf("failed to connect to storage: %w", err)
+		return fmt.Errorf("failed to connect to storage: %s", redactSAS(err.Error()))
 	}
 
 	fmt.Printf("  %sUsing existing storage config:%s %s/%s\n\n",
@@ -328,23 +342,16 @@ func initPassphraseOnly(ctx context.Context, keyPath string) error {
 
 	printInfo("Use the SAME passphrase on all devices.")
 
-	shouldClearRemote, err := enterPassphraseAndVerify(ctx, store, keyPath)
+	rekeyed, err := enterPassphraseAndVerify(ctx, store, keyPath)
 	if err != nil {
 		return err
 	}
 
-	// Clear remote if user chose to start fresh
-	if shouldClearRemote {
-		fmt.Printf("%s⋯%s Clearing remote files...\n", colorDim, colorReset)
-		if err := clearRemoteStorage(ctx, store); err != nil {
-			printWarning("Failed to clear remote: " + err.Error())
-		} else {
-			printSuccess("Remote files cleared")
-		}
-	}
-
 	fmt.Println()
 	fmt.Println(colorGreen + "  Passphrase updated!" + colorReset)
+	if rekeyed {
+		printRekeyedTip()
+	}
 	fmt.Println()
 
 	return nil
@@ -364,6 +371,16 @@ func resolveScope(scope string) (string, error) {
 	}
 }
 
+// keySource records where init's encryption key came from, for the closing
+// advice about the other Macs.
+type keySource int
+
+const (
+	keyKept keySource = iota
+	keyFromPassphrase
+	keyRandom
+)
+
 // initFullSetup handles the full init wizard
 func initFullSetup(ctx context.Context, keyPath string, opts initOptions) error {
 	usePassphrase, force := opts.usePassphrase, opts.force
@@ -374,17 +391,29 @@ func initFullSetup(ctx context.Context, keyPath string, opts initOptions) error 
 		return err
 	}
 
-	if config.Exists() && !force {
-		var overwrite bool
-		prompt := &survey.Confirm{
-			Message: "Configuration already exists. Overwrite?",
-			Default: false,
+	// A rerun replaces only the storage target, its credentials and the key
+	// path; every other setting in the existing config is kept.
+	cfg := &config.Config{}
+	if config.Exists() {
+		existing, err := config.Load()
+		if err != nil && !force {
+			return fmt.Errorf("%w\n  Fix %s, or rerun with --force to replace it", err, config.ConfigFilePath())
 		}
-		if err := survey.AskOne(prompt, &overwrite); err != nil || !overwrite {
-			fmt.Println("  Aborted.")
-			return nil
+		if !force {
+			var overwrite bool
+			prompt := &survey.Confirm{
+				Message: "Configuration already exists. Replace its storage and encryption settings? (Your other settings are kept.)",
+				Default: false,
+			}
+			if err := survey.AskOne(prompt, &overwrite); err != nil || !overwrite {
+				fmt.Println("  Aborted.")
+				return nil
+			}
+			fmt.Println()
 		}
-		fmt.Println()
+		if existing != nil {
+			cfg = existing
+		}
 	}
 
 	// Step 1: Select provider
@@ -426,9 +455,36 @@ func initFullSetup(ctx context.Context, keyPath string, opts initOptions) error 
 		return fmt.Errorf("setup cancelled")
 	}
 
-	// Step 2: Encryption setup
+	// Step 2: Test the connection before any key is written, so a failed
+	// init never leaves a new key behind for the next init to reuse.
 	fmt.Println()
-	printStep(2, 3, "Set Up Encryption")
+	printStep(2, 3, "Test Connection")
+
+	store, err := newStorageClient(storageCfg)
+	if err != nil {
+		if strings.Contains(err.Error(), "could not find default credentials") {
+			printWarning("GCS Application Default Credentials not configured.")
+			fmt.Println()
+			printInfo("To set up ADC, run:")
+			fmt.Printf("  %sgcloud auth application-default login%s\n", colorCyan, colorReset)
+			fmt.Println()
+			printInfo("Or use a service account JSON file instead.")
+			return fmt.Errorf("GCS credentials not configured")
+		}
+		return fmt.Errorf("failed to create storage client: %s", redactSAS(err.Error()))
+	}
+
+	exists, err := store.BucketExists(ctx)
+	if err != nil {
+		return bucketCheckError(storageCfg, err)
+	} else if !exists {
+		return missingBucketError(storageCfg)
+	}
+	printSuccess(connectedMessage(storageCfg))
+
+	// Step 3: Encryption setup
+	fmt.Println()
+	printStep(3, 3, "Set Up Encryption")
 	printInfo("Files are encrypted with 'age' before upload.")
 	fmt.Println()
 
@@ -454,107 +510,75 @@ func initFullSetup(ctx context.Context, keyPath string, opts initOptions) error 
 		fmt.Println()
 	}
 
-	// Create storage client early so we can verify key matches remote
-	store, err := storage.New(storageCfg)
-	if err != nil {
-		if strings.Contains(err.Error(), "could not find default credentials") {
-			printWarning("GCS Application Default Credentials not configured.")
-			fmt.Println()
-			printInfo("To set up ADC, run:")
-			fmt.Printf("  %sgcloud auth application-default login%s\n", colorCyan, colorReset)
-			fmt.Println()
-			printInfo("Or use a service account JSON file instead.")
-			return fmt.Errorf("GCS credentials not configured")
+	prevKey, prevKeyErr := os.ReadFile(keyPath)
+	source := keyKept
+	rekeyed := false
+
+	if usePassphrase && crypto.KeyExists(keyPath) && !force {
+		var overwriteKey bool
+		prompt := &survey.Confirm{
+			Message: "Encryption key already exists. Overwrite?",
+			Default: false,
 		}
-		return fmt.Errorf("failed to create storage client: %s", redactSAS(err.Error()))
+		if err := survey.AskOne(prompt, &overwriteKey); err != nil || !overwriteKey {
+			usePassphrase = false // keep the existing key
+		}
 	}
 
-	shouldClearRemote := false
-
-	if usePassphrase {
-		if crypto.KeyExists(keyPath) && !force {
-			var overwriteKey bool
-			prompt := &survey.Confirm{
-				Message: "Encryption key already exists. Overwrite?",
-				Default: false,
-			}
-			if err := survey.AskOne(prompt, &overwriteKey); err != nil || !overwriteKey {
-				printSuccess("Using existing key")
-				goto skipKeyGen
-			}
-		}
-
+	switch {
+	case usePassphrase:
 		printInfo("Use the SAME passphrase on all devices.")
-		shouldClearRemote, err = enterPassphraseAndVerify(ctx, store, keyPath)
-		if err != nil {
+		if rekeyed, err = enterPassphraseAndVerify(ctx, store, keyPath); err != nil {
 			return err
 		}
+		source = keyFromPassphrase
 
-	} else if !crypto.KeyExists(keyPath) {
-		if err := crypto.GenerateKey(keyPath); err != nil {
-			return fmt.Errorf("failed to generate key: %w", err)
+	case !crypto.KeyExists(keyPath):
+		if err := generateRandomKey(ctx, store, keyPath); err != nil {
+			return err
 		}
+		source = keyRandom
 		printSuccess("Key generated: " + keyPath)
 		printWarning("Back up this file! You need it on other devices.")
-	} else {
+
+	default:
 		printSuccess("Using existing key")
-	}
-skipKeyGen:
-
-	// Step 3: Test Connection
-	fmt.Println()
-	printStep(3, 3, "Test Connection")
-
-	exists, err := store.BucketExists(ctx)
-	if err != nil {
-		return bucketCheckError(storageCfg, err)
-	} else if !exists {
-		return missingBucketError(storageCfg)
-	}
-	printSuccess(connectedMessage(storageCfg))
-
-	// Clear remote if user chose to start fresh
-	if shouldClearRemote {
-		fmt.Printf("%s⋯%s Clearing remote files...\n", colorDim, colorReset)
-		if err := clearRemoteStorage(ctx, store); err != nil {
-			printWarning("Failed to clear remote: " + err.Error())
-		} else {
-			printSuccess("Remote files cleared")
-		}
-	}
-
-	// Verify encryption key can decrypt remote files (if any exist)
-	if !shouldClearRemote {
-		if err := verifyKeyMatchesRemote(ctx, store, keyPath); err != nil {
+		if err := verifyKeyMatchesRemote(ctx, store, keyPath); errors.Is(err, sync.ErrKeyMismatch) {
 			fmt.Println()
-			printWarning("Encryption key cannot decrypt remote files!")
-			printInfo("The remote bucket has files encrypted with a different key.")
+			printWarning("This Mac's encryption key can't read the files already in this storage.")
 			fmt.Println()
 			printInfo("Options:")
-			printInfo("  1. Run 'stradl init --passphrase' to try a different passphrase")
-			printInfo("  2. Copy the age-key.txt from your original device")
-			printInfo("  3. Run 'stradl reset --remote' to clear remote and start fresh")
+			printInfo("  1. Run 'stradl init --passphrase' with the passphrase your other Macs use")
+			printInfo("  2. Copy age-key.txt from a Mac that already syncs, if they use a random key")
+			printInfo("  3. Run 'stradl reset --remote' to delete everything synced and start fresh")
 			fmt.Println()
 			return fmt.Errorf("encryption key mismatch - cannot sync with remote")
+		} else if err != nil {
+			return err
 		}
 		printSuccess("Encryption key verified")
 	}
 
 	// Save config
-	cfg := &config.Config{
-		Storage:       storageCfg,
-		EncryptionKey: "~/" + config.ConfigDir + "/" + config.AgeKeyFile,
-		Scope:         scope,
+	cfg.Storage = storageCfg
+	cfg.EncryptionKey = "~/" + config.ConfigDir + "/" + config.AgeKeyFile
+	// Storage now names the target, so the legacy top-level R2 fields go.
+	cfg.AccountID, cfg.AccessKeyID, cfg.SecretAccessKey, cfg.Bucket, cfg.Endpoint = "", "", "", "", ""
+	if opts.scope != "" || cfg.Scope == "" {
+		cfg.Scope = scope
 	}
 
 	if err := config.Save(cfg); err != nil {
+		if source != keyKept && !rekeyed {
+			restoreKey(keyPath, prevKey, prevKeyErr)
+		}
 		return err
 	}
 
 	// Done
 	fmt.Println()
 	fmt.Println(colorGreen + "  Setup complete!" + colorReset)
-	if scope == config.ScopeSessions {
+	if cfg.Scope == config.ScopeSessions {
 		printInfo("Syncing sessions only (use 'stradl init --scope full' to include settings and plugins)")
 	}
 	fmt.Println()
@@ -562,80 +586,183 @@ skipKeyGen:
 	fmt.Printf("    %sstradl sync%s              sync this Mac now\n", colorCyan, colorReset)
 	fmt.Printf("    %sstradl agent install%s     keep it in sync in the background\n", colorCyan, colorReset)
 	fmt.Println()
-	if usePassphrase {
-		printInfo("Then run 'stradl init' with the same passphrase on your other Macs.")
-	} else {
+	switch {
+	case rekeyed:
+		printRekeyedTip()
+	case source == keyRandom:
 		printInfo("Then copy " + keyPath + " to your other Macs and run 'stradl init' there.")
+	case source == keyKept && !opts.usePassphrase:
+		printInfo("Then run 'stradl init --passphrase' on your other Macs with the passphrase this Mac uses")
+		printInfo("(or, if this Mac uses a random key, copy " + keyPath + " to them and run 'stradl init').")
+	default:
+		printInfo("Then run 'stradl init --passphrase' with the same passphrase on your other Macs.")
 	}
 	fmt.Println()
 
 	return nil
 }
 
-// enterPassphraseAndVerify prompts for passphrase and verifies against remote
-// Returns shouldClearRemote flag
-func enterPassphraseAndVerify(ctx context.Context, store storage.Storage, keyPath string) (bool, error) {
+// restoreKey puts back the key init found, or removes the one it created, so
+// a failed init never leaves a new key that the next init silently reuses.
+func restoreKey(keyPath string, prev []byte, prevErr error) {
+	switch {
+	case prevErr == nil:
+		_ = os.WriteFile(keyPath, prev, 0600)
+	case os.IsNotExist(prevErr):
+		_ = os.Remove(keyPath)
+	}
+}
+
+// generateRandomKey creates a random key at keyPath, refusing when the
+// container already holds files: a brand-new key can never read them.
+func generateRandomKey(ctx context.Context, store storage.Storage, keyPath string) error {
+	staged := keyPath + ".new"
+	defer func() { _ = os.Remove(staged) }()
+
+	if err := crypto.GenerateKey(staged); err != nil {
+		return fmt.Errorf("failed to generate key: %w", err)
+	}
+	if err := verifyKeyMatchesRemote(ctx, store, staged); errors.Is(err, sync.ErrKeyMismatch) {
+		return fmt.Errorf("this storage already holds files encrypted with another key: run 'stradl init --passphrase' with the passphrase your other Macs use, or copy age-key.txt from one of them")
+	} else if err != nil {
+		return err
+	}
+	if err := os.Rename(staged, keyPath); err != nil {
+		return fmt.Errorf("failed to save key: %w", err)
+	}
+	return nil
+}
+
+// promptPassphrase reads a new passphrase, hidden and typed twice. A variable
+// so tests can supply passphrases without a terminal.
+var promptPassphrase = func() (string, error) {
 	for {
 		var passphrase string
-		for {
-			prompt := &survey.Password{
-				Message: "Passphrase (min 8 chars):",
-			}
-			if err := survey.AskOne(prompt, &passphrase); err != nil {
-				return false, err
-			}
-
-			if err := crypto.ValidatePassphraseStrength(passphrase); err != nil {
-				printWarning(err.Error())
-				continue
-			}
-
-			var confirm string
-			confirmPrompt := &survey.Password{
-				Message: "Confirm passphrase:",
-			}
-			if err := survey.AskOne(confirmPrompt, &confirm); err != nil {
-				return false, err
-			}
-
-			if passphrase != confirm {
-				printWarning("Passphrases don't match.")
-				continue
-			}
-			break
+		prompt := &survey.Password{
+			Message: "Passphrase (min 12 chars):",
+		}
+		if err := survey.AskOne(prompt, &passphrase); err != nil {
+			return "", err
 		}
 
-		if err := crypto.GenerateKeyFromPassphrase(keyPath, passphrase); err != nil {
+		if err := crypto.ValidatePassphraseStrength(passphrase); err != nil {
+			printWarning(err.Error())
+			continue
+		}
+
+		var confirm string
+		confirmPrompt := &survey.Password{
+			Message: "Confirm passphrase:",
+		}
+		if err := survey.AskOne(confirmPrompt, &confirm); err != nil {
+			return "", err
+		}
+
+		if passphrase != confirm {
+			printWarning("Passphrases don't match.")
+			continue
+		}
+		return passphrase, nil
+	}
+}
+
+// promptKeyMismatch asks what to do when a passphrase can't read the
+// container. A variable so tests can answer without a terminal.
+var promptKeyMismatch = handleKeyMismatch
+
+// enterPassphraseAndVerify asks for the passphrase and installs the key it
+// derives at keyPath, but only once that key is accepted: it reads the
+// container, the container is empty, or the user chose to delete everything
+// in it. Until then the key is staged beside keyPath, so a typo, Abort or
+// Ctrl-C leaves the existing key exactly as it was. It reports whether the
+// container was cleared and re-keyed.
+func enterPassphraseAndVerify(ctx context.Context, store storage.Storage, keyPath string) (bool, error) {
+	staged := keyPath + ".new"
+	defer func() { _ = os.Remove(staged) }()
+
+	for {
+		passphrase, err := promptPassphrase()
+		if err != nil {
+			return false, err
+		}
+
+		if err := crypto.GenerateKeyFromPassphrase(staged, passphrase); err != nil {
 			return false, fmt.Errorf("failed to generate key: %w", err)
 		}
 
-		// Verify the key matches existing remote files (if any)
-		if err := verifyKeyMatchesRemote(ctx, store, keyPath); err != nil {
-			// Key mismatch detected - ask user what to do
-			action, actionErr := handleKeyMismatch()
-			if actionErr != nil {
-				return false, actionErr
+		err = verifyKeyMatchesRemote(ctx, store, staged)
+		if err != nil && !errors.Is(err, sync.ErrKeyMismatch) {
+			return false, err
+		}
+		if err == nil {
+			if err := os.Rename(staged, keyPath); err != nil {
+				return false, fmt.Errorf("failed to save key: %w", err)
 			}
-
-			switch action {
-			case actionRetryPassphrase:
-				_ = os.Remove(keyPath)
-				fmt.Println()
-				printInfo("Enter a different passphrase:")
-				continue
-			case actionClearRemote:
-				printSuccess("Key derived from passphrase")
-				printInfo("Remote files will be cleared...")
-				return true, nil
-			case actionAbort:
-				_ = os.Remove(keyPath)
-				return false, fmt.Errorf("setup aborted")
-			}
+			printSuccess("Key derived from passphrase")
+			return false, nil
 		}
 
-		printSuccess("Key derived from passphrase")
-		return false, nil
+		// Key mismatch detected - ask user what to do
+		action, err := promptKeyMismatch()
+		if err != nil {
+			return false, err
+		}
+		switch action {
+		case actionRetryPassphrase:
+			fmt.Println()
+			printInfo("Enter a different passphrase:")
+			continue
+		case actionClearRemote:
+			if err := wipeAndRekey(ctx, store, staged, keyPath); err != nil {
+				return false, err
+			}
+			return true, nil
+		default:
+			return false, fmt.Errorf("setup aborted; the encryption key was not changed")
+		}
 	}
+}
+
+// wipeAndRekey deletes everything in the container, pins it to the staged
+// key, and then installs that key at keyPath. It holds the sync lock so this
+// Mac's agent can't upload a file with the old key in the meantime.
+func wipeAndRekey(ctx context.Context, store storage.Storage, staged, keyPath string) error {
+	enc, err := crypto.NewEncryptor(staged)
+	if err != nil {
+		return err
+	}
+	release, err := sync.AcquireLock(config.LockFilePath(), true, 2*time.Minute)
+	if errors.Is(err, sync.ErrLocked) {
+		return fmt.Errorf("another sync is still running; try again in a minute (nothing was deleted)")
+	}
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	fmt.Printf("%s⋯%s Deleting remote files...\n", colorDim, colorReset)
+	rekeyed, clearErr := clearRemoteStorage(ctx, store, enc)
+	if !rekeyed {
+		return fmt.Errorf("could not clear remote storage, so nothing was deleted and the encryption key was not changed: %w", clearErr)
+	}
+	// From here the container belongs to the new key, even if some deletes
+	// failed, so this Mac must use it too.
+	if err := os.Rename(staged, keyPath); err != nil {
+		return fmt.Errorf("remote storage now uses the new passphrase, but saving its key failed (run 'stradl init --passphrase' again with it): %w", err)
+	}
+	if clearErr != nil {
+		printWarning("Some remote files could not be deleted: " + redactSAS(clearErr.Error()))
+	} else {
+		printSuccess("Remote files deleted")
+	}
+	printSuccess("Key derived from passphrase")
+	return nil
+}
+
+// printRekeyedTip explains what re-keying the container means for the other
+// Macs.
+func printRekeyedTip() {
+	printWarning("Your other Macs stop syncing until each one runs 'stradl init --passphrase' with this passphrase.")
 }
 
 func runR2Wizard(accountID, accessKey, secretKey, bucket string) (*storage.StorageConfig, error) {
@@ -1233,10 +1360,86 @@ Examples:
 	return cmd
 }
 
+// conflictMarker separates a file's name from the rest of a conflict copy's
+// name: <file>.conflict.<YYYYMMDD-HHMMSS>.<origin>.
+const conflictMarker = ".conflict."
+
 type conflictFile struct {
 	ConflictPath string
 	OriginalPath string
-	Timestamp    string
+	Timestamp    string // when the copy was saved, YYYYMMDD-HHMMSS
+	// Origin is sync.ConflictFromThisMac when the copy holds this Mac's
+	// version, sync.ConflictFromOtherMac when it holds another Mac's, and ""
+	// for copies saved by older versions, which didn't record it.
+	Origin string
+}
+
+// parseConflictPath splits a conflict copy's path into its parts.
+func parseConflictPath(path string) (conflictFile, bool) {
+	dir, base := filepath.Split(path)
+	i := strings.LastIndex(base, conflictMarker)
+	if i <= 0 {
+		return conflictFile{}, false
+	}
+	ts, origin, _ := strings.Cut(base[i+len(conflictMarker):], ".")
+	if ts == "" {
+		return conflictFile{}, false
+	}
+	switch origin {
+	case sync.ConflictFromThisMac, sync.ConflictFromOtherMac:
+	default:
+		origin = ""
+	}
+	return conflictFile{
+		ConflictPath: path,
+		OriginalPath: filepath.Join(dir, base[:i]),
+		Timestamp:    ts,
+		Origin:       origin,
+	}, true
+}
+
+// source names the Mac whose version the .conflict copy holds.
+func (c conflictFile) source() string {
+	switch c.Origin {
+	case sync.ConflictFromThisMac:
+		return "from this Mac"
+	case sync.ConflictFromOtherMac:
+		return "from another Mac"
+	default:
+		return "from an unknown device"
+	}
+}
+
+// savedAt renders the copy's timestamp for people.
+func (c conflictFile) savedAt() string {
+	if t, err := time.ParseInLocation("20060102-150405", c.Timestamp, time.Local); err == nil {
+		return t.Format("2006-01-02 15:04:05")
+	}
+	return c.Timestamp
+}
+
+// parseKeep reads a --keep value: "current" (or its alias "local") keeps the
+// current file, "copy" (or its alias "remote") keeps the .conflict copy.
+func parseKeep(keep string) (keepCopy bool, err error) {
+	switch strings.ToLower(keep) {
+	case "current", "local":
+		return false, nil
+	case "copy", "remote":
+		return true, nil
+	default:
+		return false, fmt.Errorf("--keep must be 'current' or 'copy' ('local' and 'remote' also work)")
+	}
+}
+
+// resolveConflict keeps one side of a conflict. It never touches state.json:
+// the last sync recorded the current file as synced, so a kept .conflict copy
+// reads as a local edit and the next sync uploads it to the other Macs
+// (compare-and-swap against the version it replaces).
+func resolveConflict(c conflictFile, keepCopy bool) error {
+	if keepCopy {
+		return os.Rename(c.ConflictPath, c.OriginalPath)
+	}
+	return os.Remove(c.ConflictPath)
 }
 
 func conflictsCmd() *cobra.Command {
@@ -1246,16 +1449,22 @@ func conflictsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "conflicts",
 		Short: "List and resolve sync conflicts",
-		Long: `Find and resolve conflicts from sync operations.
+		Long: `Review the .conflict copies sync saves beside files it can't merge.
 
-When both local and remote files change, the remote version is saved
-as a .conflict file. Use this command to review and resolve them.
+When a file that can't be merged line by line (a plan, say) changed on this
+Mac and on another Mac before they synced, the newer version stays in place
+and the other is saved beside it as <file>.conflict.<time>.<origin>, where the
+origin says whether the copy came from this Mac or another one.
+
+For each conflict, keep the current file (the copy is deleted) or keep the
+.conflict copy (it replaces the current file, and the next sync sends it to
+your other Macs).
 
 Examples:
-  stradl conflicts              # Interactive resolution
-  stradl conflicts --list       # Just list conflicts
-  stradl conflicts --keep local # Keep all local versions
-  stradl conflicts --keep remote # Keep all remote versions`,
+  stradl conflicts                 # Interactive resolution
+  stradl conflicts --list          # Just list conflicts
+  stradl conflicts --keep current  # Keep every current file, delete the copies
+  stradl conflicts --keep copy     # Replace every file with its .conflict copy`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			claudeDir := config.ClaudeDir()
 
@@ -1275,7 +1484,7 @@ Examples:
 			for i, c := range conflicts {
 				relOriginal, _ := filepath.Rel(claudeDir, c.OriginalPath)
 				fmt.Printf("  %s%d.%s %s\n", colorCyan, i+1, colorReset, relOriginal)
-				fmt.Printf("     %sConflict from: %s%s\n", colorDim, c.Timestamp, colorReset)
+				fmt.Printf("     %s.conflict copy %s, saved %s%s\n", colorDim, c.source(), c.savedAt(), colorReset)
 			}
 			fmt.Println()
 
@@ -1284,24 +1493,18 @@ Examples:
 				return nil
 			}
 
-			// Load sync state to update after resolution
-			state, err := sync.LoadState()
-			if err != nil {
-				return fmt.Errorf("failed to load sync state: %w", err)
-			}
-
 			// Batch resolve mode
 			if resolveAll != "" {
-				return batchResolveConflicts(conflicts, resolveAll, claudeDir, state)
+				return batchResolveConflicts(conflicts, resolveAll)
 			}
 
 			// Interactive mode
-			return interactiveResolveConflicts(conflicts, claudeDir, state)
+			return interactiveResolveConflicts(os.Stdin, conflicts, claudeDir)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&listOnly, "list", "l", false, "Only list conflicts, don't resolve")
-	cmd.Flags().StringVar(&resolveAll, "keep", "", "Resolve all conflicts: 'local' or 'remote'")
+	cmd.Flags().StringVar(&resolveAll, "keep", "", "Resolve all conflicts: 'current' keeps each current file, 'copy' replaces it with its .conflict copy ('local' and 'remote' are aliases for these)")
 
 	return cmd
 }
@@ -1316,82 +1519,65 @@ func findConflicts(claudeDir string) ([]conflictFile, error) {
 		if info.IsDir() {
 			return nil
 		}
-
-		// Look for .conflict. pattern
-		if strings.Contains(filepath.Base(path), ".conflict.") {
-			// Extract original path and timestamp
-			// Format: filename.ext.conflict.20260208-095132
-			parts := strings.Split(path, ".conflict.")
-			if len(parts) == 2 {
-				conflicts = append(conflicts, conflictFile{
-					ConflictPath: path,
-					OriginalPath: parts[0],
-					Timestamp:    parts[1],
-				})
-			}
+		if c, ok := parseConflictPath(path); ok {
+			conflicts = append(conflicts, c)
 		}
 		return nil
 	})
 
 	// Sort by timestamp (newest first)
-	sort.Slice(conflicts, func(i, j int) bool {
+	sort.SliceStable(conflicts, func(i, j int) bool {
 		return conflicts[i].Timestamp > conflicts[j].Timestamp
 	})
 
 	return conflicts, err
 }
 
-func batchResolveConflicts(conflicts []conflictFile, keep string, claudeDir string, state *sync.SyncState) error {
-	keep = strings.ToLower(keep)
-	if keep != "local" && keep != "remote" {
-		return fmt.Errorf("--keep must be 'local' or 'remote'")
+func batchResolveConflicts(conflicts []conflictFile, keep string) error {
+	keepCopy, err := parseKeep(keep)
+	if err != nil {
+		return err
 	}
 
 	resolved := 0
+	replaced := make(map[string]bool) // files a newer copy already replaced
 	for _, c := range conflicts {
-		if keep == "local" {
-			// Delete conflict file, keep local
+		name := filepath.Base(c.OriginalPath)
+		if keepCopy && replaced[c.OriginalPath] {
+			// Conflicts run newest first, so the newest copy already won.
 			if err := os.Remove(c.ConflictPath); err != nil {
 				fmt.Printf("%s✗%s Failed to remove %s: %v\n", colorYellow, colorReset, c.ConflictPath, err)
 				continue
 			}
-			fmt.Printf("%s✓%s Kept local: %s\n", colorGreen, colorReset, filepath.Base(c.OriginalPath))
-		} else {
-			// Replace local with conflict, delete conflict
-			if err := os.Rename(c.ConflictPath, c.OriginalPath); err != nil {
-				fmt.Printf("%s✗%s Failed to replace %s: %v\n", colorYellow, colorReset, c.OriginalPath, err)
-				continue
-			}
-			fmt.Printf("%s✓%s Kept remote: %s\n", colorGreen, colorReset, filepath.Base(c.OriginalPath))
+			fmt.Printf("%s✓%s Removed an older .conflict copy of %s\n", colorGreen, colorReset, name)
+			resolved++
+			continue
 		}
-
-		// Update state with the resolved file's hash
-		relPath, _ := filepath.Rel(claudeDir, c.OriginalPath)
-		if info, err := os.Stat(c.OriginalPath); err == nil {
-			if hash, err := sync.HashFile(c.OriginalPath); err == nil {
-				state.UpdateFile(relPath, info, hash)
-				state.MarkUploaded(relPath)
-			}
+		if err := resolveConflict(c, keepCopy); err != nil {
+			fmt.Printf("%s✗%s Failed to resolve %s: %v\n", colorYellow, colorReset, c.ConflictPath, err)
+			continue
+		}
+		if keepCopy {
+			replaced[c.OriginalPath] = true
+			fmt.Printf("%s✓%s Kept the .conflict copy (%s): %s\n", colorGreen, colorReset, c.source(), name)
+		} else {
+			fmt.Printf("%s✓%s Kept the current file: %s\n", colorGreen, colorReset, name)
 		}
 		resolved++
 	}
 
-	// Save updated state
-	if resolved > 0 {
-		if err := state.Save(); err != nil {
-			fmt.Printf("%s⚠%s Warning: failed to save state: %v\n", colorYellow, colorReset, err)
-		}
-	}
-
 	fmt.Printf("\n%s✓%s Resolved %d conflict(s)\n", colorGreen, colorReset, resolved)
+	if keepCopy && resolved > 0 {
+		printInfo("The next sync sends the kept copies to your other Macs.")
+	}
 	return nil
 }
 
-func interactiveResolveConflicts(conflicts []conflictFile, claudeDir string, state *sync.SyncState) error {
-	reader := bufio.NewReader(os.Stdin)
+func interactiveResolveConflicts(in io.Reader, conflicts []conflictFile, claudeDir string) error {
+	reader := bufio.NewReader(in)
 
-	fmt.Println("For each conflict, choose how to resolve:")
-	fmt.Printf("  %s[l]%s Keep local  %s[r]%s Keep remote  %s[d]%s Show diff  %s[s]%s Skip  %s[q]%s Quit\n\n",
+	fmt.Println("For each conflict, choose which version to keep:")
+	fmt.Printf("  %s[f]%s Keep the current file  %s[c]%s Keep the .conflict copy  %s[d]%s Show diff  %s[s]%s Skip  %s[q]%s Quit\n\n",
 		colorCyan, colorReset,
 		colorCyan, colorReset,
 		colorCyan, colorReset,
@@ -1416,78 +1602,51 @@ func interactiveResolveConflicts(conflicts []conflictFile, claudeDir string, sta
 		}
 
 		fmt.Printf("%s[%d/%d]%s %s\n", colorCyan, i+1, len(conflicts), colorReset, relOriginal)
-		fmt.Printf("        Local: %s  |  Remote: %s  |  Conflict from: %s\n",
-			util.FormatSize(localSize), util.FormatSize(conflictSize), c.Timestamp)
+		fmt.Printf("        Current file: %s  |  .conflict copy: %s, %s, saved %s\n",
+			util.FormatSize(localSize), util.FormatSize(conflictSize), c.source(), c.savedAt())
 
 	promptLoop:
 		for {
-			fmt.Printf("        %sResolve [l/r/d/s/q]:%s ", colorDim, colorReset)
-			input, _ := reader.ReadString('\n')
+			fmt.Printf("        %sResolve [f/c/d/s/q]:%s ", colorDim, colorReset)
+			input, err := reader.ReadString('\n')
 			input = strings.TrimSpace(strings.ToLower(input))
+			if input == "" && err != nil {
+				input = "q" // end of input
+			}
 
 			switch input {
-			case "l", "local":
-				// Keep local, delete conflict
-				if err := os.Remove(c.ConflictPath); err != nil {
+			case "f", "file", "current", "l", "local":
+				if err := resolveConflict(c, false); err != nil {
 					fmt.Printf("        %s✗%s Error: %v\n", colorYellow, colorReset, err)
 				} else {
-					fmt.Printf("        %s✓%s Kept local version\n\n", colorGreen, colorReset)
-					// Update state with the kept file's hash
-					if info, err := os.Stat(c.OriginalPath); err == nil {
-						if hash, err := sync.HashFile(c.OriginalPath); err == nil {
-							state.UpdateFile(relOriginal, info, hash)
-							state.MarkUploaded(relOriginal)
-						}
-					}
+					fmt.Printf("        %s✓%s Kept the current file\n\n", colorGreen, colorReset)
 					resolved++
 				}
 				break promptLoop
 
-			case "r", "remote":
-				// Replace local with conflict
-				if err := os.Rename(c.ConflictPath, c.OriginalPath); err != nil {
+			case "c", "copy", "r", "remote":
+				if err := resolveConflict(c, true); err != nil {
 					fmt.Printf("        %s✗%s Error: %v\n", colorYellow, colorReset, err)
 				} else {
-					fmt.Printf("        %s✓%s Replaced with remote version\n\n", colorGreen, colorReset)
-					// Update state with the new file's hash
-					if info, err := os.Stat(c.OriginalPath); err == nil {
-						if hash, err := sync.HashFile(c.OriginalPath); err == nil {
-							state.UpdateFile(relOriginal, info, hash)
-							state.MarkUploaded(relOriginal)
-						}
-					}
+					fmt.Printf("        %s✓%s Kept the .conflict copy; the next sync sends it to your other Macs\n\n", colorGreen, colorReset)
 					resolved++
 				}
 				break promptLoop
 
 			case "d", "diff":
-				// Show diff
-				showDiff(c.OriginalPath, c.ConflictPath)
+				showDiff(c)
 
 			case "s", "skip":
 				fmt.Printf("        %s→%s Skipped\n\n", colorDim, colorReset)
 				break promptLoop
 
 			case "q", "quit":
-				// Save state before quitting if any conflicts were resolved
-				if resolved > 0 {
-					if err := state.Save(); err != nil {
-						fmt.Printf("%s⚠%s Warning: failed to save state: %v\n", colorYellow, colorReset, err)
-					}
-				}
 				fmt.Printf("\n%s✓%s Resolved %d of %d conflict(s)\n", colorGreen, colorReset, resolved, len(conflicts))
 				return nil
 
 			default:
-				fmt.Printf("        %sInvalid choice. Use l/r/d/s/q%s\n", colorDim, colorReset)
+				fmt.Printf("        %sInvalid choice. Use f/c/d/s/q%s\n", colorDim, colorReset)
 			}
-		}
-	}
-
-	// Save updated state
-	if resolved > 0 {
-		if err := state.Save(); err != nil {
-			fmt.Printf("%s⚠%s Warning: failed to save state: %v\n", colorYellow, colorReset, err)
 		}
 	}
 
@@ -1495,15 +1654,16 @@ func interactiveResolveConflicts(conflicts []conflictFile, claudeDir string, sta
 	return nil
 }
 
-func showDiff(localPath, conflictPath string) {
+func showDiff(c conflictFile) {
+	localPath, conflictPath := c.OriginalPath, c.ConflictPath
 	// Try to use diff command
 	cmd := exec.Command("diff", "-u", "--color=always", localPath, conflictPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
 	fmt.Println()
-	fmt.Printf("        %s--- Local%s\n", colorGreen, colorReset)
-	fmt.Printf("        %s+++ Remote (conflict)%s\n", colorCyan, colorReset)
+	fmt.Printf("        %s--- Current file%s\n", colorGreen, colorReset)
+	fmt.Printf("        %s+++ .conflict copy (%s)%s\n", colorCyan, c.source(), colorReset)
 	fmt.Println()
 
 	if err := cmd.Run(); err != nil {
@@ -1518,8 +1678,8 @@ func showDiff(localPath, conflictPath string) {
 			localInfo, _ := os.Stat(localPath)
 			conflictInfo, _ := os.Stat(conflictPath)
 			if localInfo != nil && conflictInfo != nil {
-				fmt.Printf("        Local:  %s (%s)\n", localPath, util.FormatSize(localInfo.Size()))
-				fmt.Printf("        Remote: %s (%s)\n", conflictPath, util.FormatSize(conflictInfo.Size()))
+				fmt.Printf("        Current file:   %s (%s)\n", localPath, util.FormatSize(localInfo.Size()))
+				fmt.Printf("        .conflict copy: %s (%s)\n", conflictPath, util.FormatSize(conflictInfo.Size()))
 			}
 		}
 	}
@@ -1576,25 +1736,11 @@ Examples:
 					printWarning("Could not load config: " + err.Error())
 				} else {
 					storageCfg := cfg.GetStorageConfig()
-					store, err := storage.New(storageCfg)
+					store, err := newStorageClient(storageCfg)
 					if err != nil {
-						printWarning("Could not connect to storage: " + err.Error())
+						printWarning("Could not connect to storage: " + redactSAS(err.Error()))
 					} else {
-						ctx := context.Background()
-						objects, err := store.List(ctx, "")
-						if err != nil {
-							printWarning("Could not list objects: " + err.Error())
-						} else {
-							deleted := 0
-							for _, obj := range objects {
-								if err := store.Delete(ctx, obj.Key); err != nil {
-									printWarning("Failed to delete " + obj.Key)
-								} else {
-									deleted++
-								}
-							}
-							printSuccess(fmt.Sprintf("Deleted %d files from storage", deleted))
-						}
+						deleteAllRemote(context.Background(), store)
 					}
 				}
 			}
@@ -1631,6 +1777,39 @@ Examples:
 	cmd.Flags().BoolVar(&force, "force", false, "Skip confirmation prompt")
 
 	return cmd
+}
+
+// deleteAllRemote deletes every object in the container for reset --remote.
+// The key-check marker goes last: while any file is left it keeps the
+// container pinned to the key that file uses, so a Mac syncing meanwhile
+// can't start filling it with another key.
+func deleteAllRemote(ctx context.Context, store storage.Storage) {
+	objects, err := store.List(ctx, "")
+	if err != nil {
+		printWarning("Could not list objects: " + redactSAS(err.Error()))
+		return
+	}
+	keys := make([]string, 0, len(objects))
+	hasMarker := false
+	for _, obj := range objects {
+		if obj.Key == sync.KeyCheckKey {
+			hasMarker = true
+		} else {
+			keys = append(keys, obj.Key)
+		}
+	}
+	if hasMarker {
+		keys = append(keys, sync.KeyCheckKey)
+	}
+	deleted := 0
+	for _, key := range keys {
+		if err := store.Delete(ctx, key); err != nil {
+			printWarning("Failed to delete " + key)
+		} else {
+			deleted++
+		}
+	}
+	printSuccess(fmt.Sprintf("Deleted %d files from storage", deleted))
 }
 
 func rebuildHistoryCmd() *cobra.Command {
@@ -1691,6 +1870,17 @@ device's migrate run and reported as "left for other devices".`,
 			if err != nil {
 				return err
 			}
+
+			// Migrate saves state.json, which a background sync rewrites, so
+			// it runs under the sync lock.
+			release, err := sync.AcquireLock(syncLockPath(cfg), true, 2*time.Minute)
+			if errors.Is(err, sync.ErrLocked) {
+				return fmt.Errorf("another sync is still running; try again in a minute")
+			}
+			if err != nil {
+				return err
+			}
+			defer release()
 
 			syncer, err := sync.NewSyncer(cfg, quiet)
 			if err != nil {
@@ -1758,49 +1948,68 @@ device's migrate run and reported as "left for other devices".`,
 	return cmd
 }
 
-// verifyKeyMatchesRemote checks if the encryption key can decrypt existing remote files.
-// Returns nil if no files exist or if decryption succeeds.
-// Returns an error if files exist but cannot be decrypted with the current key.
+// verifyKeyMatchesRemote checks whether the key at keyPath can read the
+// container. It returns nil when it can or the container is empty, an error
+// wrapping sync.ErrKeyMismatch when it can't, and any other error when the
+// container couldn't be read: a storage failure never counts as a match.
 func verifyKeyMatchesRemote(ctx context.Context, store storage.Storage, keyPath string) error {
-	// List remote files
-	objects, err := store.List(ctx, "")
-	if err != nil || len(objects) == 0 {
-		return nil // No files to verify, or error listing (will fail later anyway)
-	}
-
-	// Find a small file to test with (prefer smaller files for faster verification)
-	var testObj storage.ObjectInfo
-	for _, obj := range objects {
-		if obj.Size > 0 && obj.Size < 10000 { // Pick a small file under 10KB
-			testObj = obj
-			break
-		}
-	}
-	if testObj.Key == "" && len(objects) > 0 {
-		testObj = objects[0] // Fallback to first file
-	}
-	if testObj.Key == "" {
-		return nil // No suitable file found
-	}
-
-	// Download the test file
-	encrypted, err := store.Download(ctx, testObj.Key)
-	if err != nil {
-		return nil // Download failed, will fail later during pull
-	}
-
-	// Try to decrypt with current key
 	enc, err := crypto.NewEncryptor(keyPath)
 	if err != nil {
 		return fmt.Errorf("failed to load encryption key: %w", err)
 	}
 
-	_, err = enc.Decrypt(encrypted)
-	if err != nil {
-		return fmt.Errorf("key_mismatch: cannot decrypt remote files with current key")
+	// The key-check marker pins the container to one key.
+	markerErr := sync.VerifyKeyCheck(ctx, store, enc)
+	if markerErr == nil || errors.Is(markerErr, sync.ErrKeyMismatch) {
+		return markerErr
 	}
 
+	objects, err := store.List(ctx, "")
+	if err != nil {
+		return remoteCheckError(err)
+	}
+	if !errors.Is(markerErr, storage.ErrNotFound) {
+		// Not every backend reports a missing object as ErrNotFound; the
+		// listing settles whether the marker exists but couldn't be read.
+		for _, obj := range objects {
+			if obj.Key == sync.KeyCheckKey {
+				return remoteCheckError(markerErr)
+			}
+		}
+	}
+
+	// No marker (a container synced before markers existed): try to decrypt
+	// one file, preferring a small one for speed.
+	var testObj storage.ObjectInfo
+	for _, obj := range objects {
+		if obj.Key == sync.KeyCheckKey || obj.Size <= 0 {
+			continue
+		}
+		if testObj.Key == "" {
+			testObj = obj
+		}
+		if obj.Size < 10000 { // Pick a small file under 10KB
+			testObj = obj
+			break
+		}
+	}
+	if testObj.Key == "" {
+		return nil // Empty container: any key works
+	}
+
+	encrypted, err := store.Download(ctx, testObj.Key)
+	if err != nil {
+		return remoteCheckError(err)
+	}
+	if _, err := enc.Decrypt(encrypted); err != nil {
+		return fmt.Errorf("cannot decrypt remote files with this key: %w", sync.ErrKeyMismatch)
+	}
 	return nil
+}
+
+// remoteCheckError explains a storage failure while checking the key.
+func remoteCheckError(err error) error {
+	return fmt.Errorf("could not read remote storage to check the encryption key (check your network connection and storage credentials): %s", redactSAS(err.Error()))
 }
 
 // keyMismatchAction represents the user's choice when a key mismatch is detected
@@ -1812,7 +2021,8 @@ const (
 	actionAbort
 )
 
-// handleKeyMismatch displays a helpful error message and prompts the user for action
+// handleKeyMismatch displays a helpful error message and prompts the user for
+// action. Deleting everything takes a typed "delete" to confirm.
 func handleKeyMismatch() (keyMismatchAction, error) {
 	fmt.Println()
 	printWarning("Cannot decrypt existing remote files!")
@@ -1823,46 +2033,78 @@ func handleKeyMismatch() (keyMismatchAction, error) {
 	printInfo("  - You previously set up with a random key (not passphrase)")
 	fmt.Println()
 
-	prompt := &survey.Select{
-		Message: "What would you like to do?",
-		Options: []string{
-			"Try a different passphrase",
-			"Clear remote files and start fresh (your local ~/.claude will be pushed)",
-			"Abort setup",
-		},
-	}
-	var choice int
-	if err := survey.AskOne(prompt, &choice); err != nil {
-		return actionAbort, err
-	}
+	for {
+		prompt := &survey.Select{
+			Message: "What would you like to do?",
+			Options: []string{
+				"Try a different passphrase",
+				"Delete ALL synced data, for every Mac, and start fresh with this passphrase (each other Mac must then run 'stradl init --passphrase' with it)",
+				"Abort setup",
+			},
+		}
+		var choice int
+		if err := survey.AskOne(prompt, &choice); err != nil {
+			return actionAbort, err
+		}
 
-	switch choice {
-	case 0:
-		return actionRetryPassphrase, nil
-	case 1:
-		return actionClearRemote, nil
-	default:
-		return actionAbort, nil
+		switch choice {
+		case 0:
+			return actionRetryPassphrase, nil
+		case 1:
+			if confirmDeleteAll() {
+				return actionClearRemote, nil
+			}
+			printInfo("Nothing was deleted.")
+			fmt.Println()
+		default:
+			return actionAbort, nil
+		}
 	}
 }
 
-// clearRemoteStorage deletes all files from the remote storage bucket
-func clearRemoteStorage(ctx context.Context, store storage.Storage) error {
+// confirmDeleteAll makes the user type "delete" before init wipes the
+// container.
+func confirmDeleteAll() bool {
+	fmt.Println()
+	printWarning("This permanently deletes every synced session in this storage, for all of your Macs.")
+	printInfo("Sessions still on a Mac's disk upload again once that Mac syncs with the new passphrase.")
+	var answer string
+	prompt := &survey.Input{Message: `Type "delete" to confirm:`}
+	if err := survey.AskOne(prompt, &answer); err != nil {
+		return false
+	}
+	return strings.TrimSpace(answer) == "delete"
+}
+
+// clearRemoteStorage deletes everything in the container and re-keys it for
+// enc. The key-check marker is written first, with the new key, so from then
+// on a Mac still holding the old key stops at its next sync instead of
+// uploading files no other Mac can read; only then is everything else
+// deleted. It reports whether the marker was written, which stays true even
+// when some deletes fail.
+func clearRemoteStorage(ctx context.Context, store storage.Storage, enc *crypto.Encryptor) (bool, error) {
+	if err := sync.WriteKeyCheck(ctx, store, enc, false); err != nil {
+		return false, fmt.Errorf("failed to write %s: %s", sync.KeyCheckKey, redactSAS(err.Error()))
+	}
+
 	objects, err := store.List(ctx, "")
 	if err != nil {
-		return fmt.Errorf("failed to list remote files: %w", err)
+		return true, fmt.Errorf("failed to list remote files: %s", redactSAS(err.Error()))
 	}
 
-	if len(objects) == 0 {
-		return nil
+	keys := make([]string, 0, len(objects))
+	for _, obj := range objects {
+		if obj.Key != sync.KeyCheckKey {
+			keys = append(keys, obj.Key)
+		}
 	}
-
-	keys := make([]string, len(objects))
-	for i, obj := range objects {
-		keys[i] = obj.Key
+	if len(keys) == 0 {
+		return true, nil
 	}
-
-	return store.DeleteBatch(ctx, keys)
+	if err := store.DeleteBatch(ctx, keys); err != nil {
+		return true, fmt.Errorf("failed to delete remote files: %s", redactSAS(err.Error()))
+	}
+	return true, nil
 }
 
 // MCP sync commands
