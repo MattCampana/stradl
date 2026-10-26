@@ -70,22 +70,6 @@ func TestAFolderWithOnlyNotesStillGetsTheStoredRepo(t *testing.T) {
 	}
 }
 
-func TestFrozenProtectionOutlastsAFileWaitingForICloud(t *testing.T) {
-	_, alice, _ := frozenLib(t, func(_, aliceLib string) {
-		os.WriteFile(filepath.Join(aliceLib, "lib.go"), []byte("v2\n"), 0644)
-		git(t, aliceLib, "commit", "-q", "-am", "v2")
-	})
-	libGo := filepath.Join(alice.home, "code", "work", "lib", "lib.go")
-	download, _ := cloudOnly(t, libGo)
-	alice.sync() // lib.go waits for iCloud; lib's marker goes up
-	download()
-	alice.sync()
-	alice.sync()
-	if got := alice.read("code/work/lib/lib.go"); got != "v2\n" {
-		t.Fatalf("lib.go = %q: rolled back to the frozen copy once iCloud delivered it", got)
-	}
-}
-
 func TestSubmoduleWithAGitLikeNameSyncsItsData(t *testing.T) {
 	needGit(t)
 	root := t.TempDir()
@@ -180,28 +164,6 @@ func TestFolderTrackedNeedsAFolderThatSynced(t *testing.T) {
 	}
 }
 
-func TestEmptyingAPlainFolderStillMirrors(t *testing.T) {
-	root := t.TempDir()
-	store := newCASStore()
-	a := newEverythingDevice(t, root, "alice", store)
-	a.s.cfg.ExtraFolders = []string{filepath.Join(a.home, "code", "work")}
-	a.write("code/work/keep.md", "k\n")
-	for _, f := range []string{"a", "b"} {
-		a.write("code/work/x/"+f+".md", f+"\n")
-	}
-	a.sync()
-	// Leftover git data of x in storage, from when x was a repository.
-	if _, err := a.s.put(t.Context(), FoldersPrefix+"code/work/x/.git/HEAD", []byte("ref: refs/heads/main\n"), ""); err != nil {
-		t.Fatal(err)
-	}
-	a.remove("code/work/x/a.md")
-	a.remove("code/work/x/b.md")
-	a.sync()
-	if keysHave(store, FoldersPrefix+"code/work/x/a.md") {
-		t.Fatal("deleting the files of a plain folder should delete them everywhere")
-	}
-}
-
 func TestAWorktreeSessionBringsItsRepository(t *testing.T) {
 	needGit(t)
 	root := t.TempDir()
@@ -220,10 +182,47 @@ func TestAWorktreeSessionBringsItsRepository(t *testing.T) {
 	a.write("code/work/c01/.claude/worktrees/w1/b.txt", "b\n")
 	git(t, wt, "add", "-A")
 	git(t, wt, "commit", "-q", "-m", "b")
+	a.write("code/work/c01/.claude/worktrees/w1/wip.txt", "uncommitted\n")
 	a.s.cfg.ExtraFolders = []string{wt}
 	a.sync()
 	if !keysHave(store, FoldersPrefix+"code/work/c01/.git/refs/heads/claude/w1") {
 		t.Fatal("the worktree session's branch never reached storage")
+	}
+	if !keysHave(store, FoldersPrefix+"code/work/c01/.claude/worktrees/w1/wip.txt") {
+		t.Fatal("the worktree session's own files never reached storage")
+	}
+}
+
+func TestABranchConflictWaitsForTheOtherMacsCommit(t *testing.T) {
+	needGit(t)
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	repo := filepath.Join(a.home, "code", "r")
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "init", "-q", "-b", "main")
+	a.write("code/r/a.txt", "a\n")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "a")
+	a.s.cfg.ExtraFolders = []string{repo}
+	a.sync()
+	a.write("code/r/a.txt", "a2\n")
+	git(t, repo, "commit", "-q", "-am", "a2")
+	mine := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD"))
+	// Another Mac moved main to a commit whose objects aren't here yet.
+	np := FoldersPrefix + "code/r/.git/refs/heads/main"
+	st := a.s.state.GetFile(np)
+	if _, err := a.s.put(t.Context(), np, []byte("1111111111111111111111111111111111111111\n"), st.RemoteETag); err != nil {
+		t.Fatal(err)
+	}
+	r := a.sync()
+	if !slices.Contains(r.Deferred, np) {
+		t.Fatalf("deferred = %v, want the branch to wait", r.Deferred)
+	}
+	if got := strings.TrimSpace(git(t, repo, "rev-parse", "main")); got != mine {
+		t.Fatalf("main moved to %s", got)
 	}
 }
 

@@ -164,11 +164,6 @@ func (s *Syncer) keepLosingBranch(ctx context.Context, npath, abs string, winner
 				continue
 			}
 		}
-		if _, err := runGit(gitDir, "--git-dir="+gitDir, "cat-file", "-e", sha+"^{commit}"); err != nil && gitBinary() != "" {
-			// Not here (yet): a branch naming it would break git log --all
-			// and gc. Its ref stays in the conflicts folder.
-			continue
-		}
 		p := filepath.Join(headsDir, filepath.FromSlash(keptBranchPrefix+branch+"-"+sha[:7]))
 		if existing, err := os.ReadFile(p); err == nil && bytes.Equal(bytes.TrimSpace(existing), []byte(sha)) {
 			continue
@@ -319,21 +314,13 @@ type sideChoice struct {
 //     as <file>.from-<this Mac>, which syncs so every Mac can see both;
 //     an untouched or ignored file goes to ~/.stradl/conflicts on this Mac.
 //     git's own files follow the reference too, so HEAD, the index and the
-//     refs agree, and this Mac's commits stay reachable on stradl/ branches;
-//   - except that in a repository whose stored copy an older Stradl left
-//     behind (syncRoot.stale), this Mac's copy is the reference.
+//     refs agree, and this Mac's commits stay reachable on stradl/ branches.
 //
 // localData and remoteData may be nil for files too large to hold in memory.
 func (s *Syncer) chooseSide(npath string, lf *localFile, info os.FileInfo, localData, remoteData []byte, remoteTime time.Time) sideChoice {
 	newest := sideChoice{local: remoteTime.IsZero() || info.ModTime().After(remoteTime), keep: true}
 	if lf.root == nil || lf.root.kind != rootFolder {
 		return newest
-	}
-	if owner := lf.root.gitOwner(lf.rel); owner.stale && s.state.GetFile(npath) == nil && s.staleLeads(owner) {
-		// The stored copy stopped updating (see syncRoot.stale) and this
-		// Mac's checkout already holds its commit: this Mac's copy is the
-		// reference, git's files included, and the stored one goes aside.
-		return sideChoice{local: true, keep: true, aside: true}
 	}
 	if hasGitSegment(npath) {
 		if !s.repoSyncedBefore(npath) {
@@ -362,70 +349,6 @@ func (s *Syncer) chooseSide(npath string, lf *localFile, info os.FileInfo, local
 		return sideChoice{keep: true, aside: true}
 	}
 	return sideChoice{keep: true, share: true}
-}
-
-// gitOwner returns the root whose repository rel (inside r) belongs to: for
-// a submodule's git data under .git/modules, that submodule's root.
-func (r *syncRoot) gitOwner(rel string) *syncRoot {
-	if rest, ok := strings.CutPrefix(rel, ".git/modules/"); ok {
-		if m := r.moduleFor(rest); m != "" && r.moduleRoot[m] != nil {
-			return r.moduleRoot[m]
-		}
-	}
-	return r
-}
-
-// staleLeads reports whether this Mac's checkout of the stale repository at
-// root contains the commit the stored copy's HEAD names: the stored copy is
-// behind, frozen. A stored copy that is ahead (another Mac, perhaps still on
-// an older Stradl, kept working) or that can't be compared is not. Worked
-// out once per pass, after the objects batch.
-func (s *Syncer) staleLeads(root *syncRoot) bool {
-	root.leadsOnce.Do(func() {
-		local, err := runGit(root.dir, "rev-parse", "--verify", "-q", "HEAD^{commit}")
-		if err != nil {
-			return
-		}
-		stored := s.storedHead(root)
-		if stored == "" {
-			return
-		}
-		if stored == strings.TrimSpace(string(local)) {
-			root.leads = true
-			return
-		}
-		_, err = runGit(root.dir, "merge-base", "--is-ancestor", stored, strings.TrimSpace(string(local)))
-		root.leads = err == nil
-	})
-	return root.leads
-}
-
-// storedHead returns the commit the stored copy of root's repository has
-// checked out ("" when unknown).
-func (s *Syncer) storedHead(root *syncRoot) string {
-	ctx := context.Background()
-	get := func(np string) string {
-		data, _, err := s.fetch(ctx, np, s.engineRemoteKey(np), nil, s.home)
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(string(data))
-	}
-	head := get(root.gitData + "/HEAD")
-	if gitSHARe.MatchString(head) {
-		return head
-	}
-	ref, ok := strings.CutPrefix(head, "ref: ")
-	if !ok || !strings.HasPrefix(ref, "refs/heads/") {
-		return ""
-	}
-	if sha := get(root.gitData + "/" + ref); gitSHARe.MatchString(sha) {
-		return sha
-	}
-	if packed := get(root.gitData + "/packed-refs"); packed != "" {
-		return packedBranches([]byte(packed))[strings.TrimPrefix(ref, "refs/heads/")]
-	}
-	return ""
 }
 
 // repoSyncedBefore reports whether this Mac had synced the git repository

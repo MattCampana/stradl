@@ -77,25 +77,10 @@ type syncRoot struct {
 	// maps each child to its entry.
 	modules  map[string]bool
 	moduleOf map[string]string
-	// stale marks a repository inside another folder whose files in storage
-	// an older Stradl uploaded as part of that folder: no Mac synced it as
-	// its own when this Mac first met it (it had no marker), so they may
-	// have stopped updating when the Macs upgraded. Where this Mac's
-	// checkout already contains the stored copy's commit (staleLeads), this
-	// Mac's copy is the reference (see chooseSide). It sticks
-	// (SyncState.StaleRoots) until a pass settles the repository.
-	stale bool
 	// inherited marks a repository inside another folder syncing on its own
 	// for the first time with state from when it synced as part of that
 	// folder.
 	inherited bool
-	// gitData is the npath prefix of the root's git data: <prefix>.git, or
-	// for a submodule its .git/modules/<name> in the superproject.
-	gitData string
-	// moduleRoot maps each entry of modules to the child root it belongs to.
-	moduleRoot map[string]*syncRoot
-	leadsOnce  gosync.Once
-	leads      bool
 }
 
 type localFile struct {
@@ -434,28 +419,6 @@ func (s *Syncer) ownsState(root *syncRoot) bool {
 	return false
 }
 
-// settleStaleRoots forgets the stale mark of each repository this pass
-// settled completely: nothing deferred, waiting for iCloud or failed in it.
-func (s *Syncer) settleStaleRoots(roots []*syncRoot, report *SyncReport) {
-	for _, r := range roots {
-		if r.kind != rootFolder || !s.state.isStaleRoot(r.prefix) || r.deferred {
-			continue
-		}
-		open := false
-		for _, list := range [][]string{report.Deferred, report.InICloud} {
-			for _, np := range list {
-				open = open || strings.HasPrefix(np, r.prefix)
-			}
-		}
-		for _, err := range report.Errors {
-			open = open || strings.HasPrefix(err.Error(), r.prefix) || strings.HasPrefix(err.Error(), r.label+":")
-		}
-		if !open {
-			s.state.setStaleRoot(r.prefix, false)
-		}
-	}
-}
-
 // insideFolder reports whether root lies inside another project folder.
 func insideFolder(roots []*syncRoot, root *syncRoot) bool {
 	for _, r := range roots {
@@ -552,12 +515,6 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		}
 		if root.kind == rootFolder && err == nil && !wasRoot[root.prefix] && insideFolder(roots, root) && s.ownsState(root) {
 			root.inherited = true
-		}
-		if root.kind == rootFolder && err == nil && (root.stale || s.state.isStaleRoot(root.prefix)) && isRepoDir(root.dir) {
-			root.stale = true
-			if !dryRun {
-				s.state.setStaleRoot(root.prefix, true)
-			}
 		}
 		for rel, info := range files {
 			local[root.prefix+rel] = &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel)), info: info}
@@ -945,9 +902,6 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		wg.Wait()
 	}
 	stopSaving()
-	if ctx.Err() == nil { // a pass cut short settled nothing for sure
-		s.settleStaleRoots(roots, report)
-	}
 	s.reindexRepos(roots)
 
 	// Downloads in this pass may have delivered the new copy of a moved session.
@@ -1688,6 +1642,12 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 			}
 		default:
 			// Non-mergeable: one copy keeps the name, the other is kept.
+			if isGitBranchRef(npath) && remoteData != nil && !gitRefsReady(lf.abs, remoteData) {
+				// The other Mac's commit hasn't arrived yet: settle the
+				// branch once it has, so whichever side loses stays
+				// reachable on a stradl/ branch.
+				return errLocalChanged
+			}
 			side := s.chooseSide(npath, lf, info, localData, remoteData, manifest.get(key))
 			loser, origin := remoteData, ConflictFromOtherMac
 			if side.local {

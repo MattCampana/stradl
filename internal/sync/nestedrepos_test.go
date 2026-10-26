@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -344,7 +345,12 @@ func uploadAsOldStradl(t *testing.T, d *device, outer, rel string) {
 	}
 }
 
-func TestFrozenOldUploadNeverRollsBackANewerClone(t *testing.T) {
+// A repository an older Stradl uploaded inside a folder and nobody updated
+// since follows the usual first-contact rule when a session needs it on a
+// Mac with its own clone: the stored copy leads, and nothing of this Mac's
+// is lost (its commits on a stradl/ branch, its files in the conflicts
+// folder). A `git pull` brings it forward again.
+func TestFrozenOldUploadNeverLosesANewerClone(t *testing.T) {
 	needGit(t)
 	root := t.TempDir()
 	store := newCASStore()
@@ -371,15 +377,24 @@ func TestFrozenOldUploadNeverRollsBackANewerClone(t *testing.T) {
 	v2 := git(t, lib, "rev-parse", "HEAD")
 	alice.s.cfg.ExtraFolders = []string{lib}
 	alice.sync()
-	if got := alice.read("code/work/lib/lib.go"); got != "v2\n" {
-		t.Fatalf("lib.go = %q: the frozen copy rolled alice's clone back", got)
-	}
-	if got := git(t, lib, "rev-parse", "HEAD"); got != v2 {
-		t.Fatalf("HEAD moved from %s to %s", v2, got)
-	}
 	alice.sync()
-	if got := alice.read("code/work/lib/lib.go"); got != "v2\n" {
-		t.Fatalf("second pass: lib.go = %q", got)
+	if !strings.Contains(git(t, lib, "log", "--all", "--format=%H"), strings.TrimSpace(v2)) {
+		t.Fatal("alice's v2 commit is no longer reachable")
+	}
+	if out := git(t, lib, "fsck", "--no-progress"); strings.Contains(out, "missing") || strings.Contains(out, "invalid") {
+		t.Fatalf("repository damaged:\n%s", out)
+	}
+	kept := false
+	_ = filepath.WalkDir(filepath.Join(alice.s.stateDir(), "conflicts"), func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			if b, _ := os.ReadFile(p); string(b) == "v2\n" {
+				kept = true
+			}
+		}
+		return nil
+	})
+	if !kept && alice.read("code/work/lib/lib.go") != "v2\n" {
+		t.Fatal("alice's v2 lib.go is gone")
 	}
 }
 

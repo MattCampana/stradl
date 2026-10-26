@@ -152,27 +152,6 @@ func (s *SyncState) pruneCwds(present map[string]bool) {
 	}
 }
 
-// isStaleRoot reports whether the folder root at prefix is marked stale
-// (see syncRoot.stale).
-func (s *SyncState) isStaleRoot(prefix string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.StaleRoots[prefix]
-}
-
-func (s *SyncState) setStaleRoot(prefix string, stale bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !stale {
-		delete(s.StaleRoots, prefix)
-		return
-	}
-	if s.StaleRoots == nil {
-		s.StaleRoots = make(map[string]bool)
-	}
-	s.StaleRoots[prefix] = true
-}
-
 // MarkLocalDeleted records that npath was deleted on this device while the
 // remote copy (etag) stays in place.
 func (s *SyncState) MarkLocalDeleted(npath, etag string) {
@@ -230,10 +209,6 @@ type SyncState struct {
 	// one of the sources project folders are discovered from, so a sync reads
 	// only transcripts it hasn't seen before.
 	TranscriptCwds map[string]cwdEntry `json:"transcript_cwds,omitempty"`
-
-	// StaleRoots are folder roots (by prefix) still settling a first
-	// contact with a stale stored copy (see syncRoot.stale).
-	StaleRoots map[string]bool `json:"stale_roots,omitempty"`
 
 	// savePath is the custom path to save state to (if set)
 	savePath string     `json:"-"`

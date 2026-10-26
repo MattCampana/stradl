@@ -356,7 +356,10 @@ func (s *Syncer) dropSkippedNested(candidates []string, fold bool) []string {
 			rest := c[len(o)+1:]
 			for i := 0; i <= len(rest) && !skipped; i++ {
 				if i == len(rest) || rest[i] == '/' {
-					skipped = s.folderSkipDir(rest[:i]) || hasGitSegment(rest[:i])
+					// (Not claudeWorktree: a worktree a session works in is
+					// a folder of its own.)
+					r := rest[:i]
+					skipped = s.cfg.IsBuildArtifact(r) || s.cfg.IsFolderExcluded(r) || gitPerMac(r) || hasGitSegment(r)
 				}
 			}
 			if skipped {
@@ -731,17 +734,15 @@ func (s *Syncer) folderRoot(rel string) *syncRoot {
 		paths:  []string{"."},
 		// A credential folder inside it (~/.config/gh in ~/.config) stays
 		// on each Mac.
-		include:    func(r string) bool { return s.folderInclude(r) && !credentialRel(rel+"/"+r) },
-		skipDir:    func(r string) bool { return s.folderSkipDir(r) || credentialRel(rel+"/"+r) },
-		kind:       rootFolder,
-		label:      "~/" + rel,
-		perm:       0644,
-		children:   make(map[string]bool),
-		nested:     make(map[string]bool),
-		modules:    make(map[string]bool),
-		moduleOf:   make(map[string]string),
-		moduleRoot: make(map[string]*syncRoot),
-		gitData:    FoldersPrefix + rel + "/.git",
+		include:  func(r string) bool { return s.folderInclude(r) && !credentialRel(rel+"/"+r) },
+		skipDir:  func(r string) bool { return s.folderSkipDir(r) || credentialRel(rel+"/"+r) },
+		kind:     rootFolder,
+		label:    "~/" + rel,
+		perm:     0644,
+		children: make(map[string]bool),
+		nested:   make(map[string]bool),
+		modules:  make(map[string]bool),
+		moduleOf: make(map[string]string),
 	}
 }
 
@@ -765,12 +766,6 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 				outer.children[child] = true
 				outer.modules[m] = true
 				outer.moduleOf[child] = m
-				outer.moduleRoot[m] = inner
-				if target, err := gitfileTarget(inner.dir); err == nil && target != "" && filepath.Clean(target) == filepath.Join(outer.dir, ".git", "modules", filepath.FromSlash(m)) {
-					// Its git data syncs in the superproject; the innermost
-					// superproject wins (roots are visited outer first).
-					inner.gitData = outer.prefix + ".git/modules/" + m
-				}
 				if len(s.cfg.FolderExclude) > 0 {
 					// folder_exclude patterns written for the outer folder
 					// ("lib/.env") still apply inside it.
@@ -797,15 +792,6 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 			}
 		}
 	}
-	for _, r := range folders {
-		rel := strings.TrimSuffix(strings.TrimPrefix(r.prefix, FoldersPrefix), "/")
-		for i := 0; i < len(rel) && !markers[rel]; i++ {
-			if rel[i] == '/' && markers[rel[:i]] {
-				r.stale = true
-				break
-			}
-		}
-	}
 	for _, obj := range objects {
 		if !strings.HasPrefix(obj.Key, FoldersPrefix) {
 			continue
@@ -820,8 +806,8 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 		}
 		// <dir>/.git/HEAD or a <dir>/.git file (a submodule's) names a
 		// repository at <dir> inside the root, unless <dir> is a plain folder
-		// here (leftovers of a .git since removed); one other Macs sync as its
-		// own folder is a child, not nested.
+		// of files here (leftovers of a .git since removed); one other Macs
+		// sync as its own folder is a child, not nested.
 		dir := ""
 		if d, ok := strings.CutSuffix(rel, "/.git/HEAD"); ok {
 			dir = d
@@ -829,7 +815,7 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 			dir = d
 		}
 		outerRel := strings.TrimSuffix(strings.TrimPrefix(root.prefix, FoldersPrefix), "/")
-		if dir != "" && !root.children[dir] && !markers[outerRel+"/"+dir] && !plainDir(filepath.Join(root.dir, filepath.FromSlash(dir))) {
+		if abs := filepath.Join(root.dir, filepath.FromSlash(dir)); dir != "" && !root.children[dir] && !markers[outerRel+"/"+dir] && !(plainDir(abs) && hasEntries(abs)) {
 			root.nested[dir] = true
 		}
 	}

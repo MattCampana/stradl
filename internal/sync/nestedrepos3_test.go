@@ -120,8 +120,8 @@ func TestFrozenFilesOnlyTheOldUploadHasStayOut(t *testing.T) {
 	if alice.exists("code/work/lib/.git/MERGE_HEAD") {
 		t.Fatal("another Mac's old merge-in-progress state landed in alice's clone")
 	}
-	if alice.read("code/work/lib/lib.go") != "v1\n" || strings.Contains(git(t, lib, "log", "--oneline", "-1"), "v1") {
-		t.Fatalf("alice's clone changed: %s", git(t, lib, "log", "--oneline", "-1"))
+	if !strings.Contains(git(t, lib, "log", "--all", "--oneline"), "v2: drop old.go") {
+		t.Fatal("alice's own commit is no longer reachable")
 	}
 	if out := git(t, lib, "fsck", "--no-progress"); strings.Contains(out, "error") || strings.Contains(out, "missing") {
 		t.Fatalf("alice's repository is damaged:\n%s", out)
