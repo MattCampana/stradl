@@ -104,6 +104,11 @@ type SyncReport struct {
 	// once Remote Control is off.
 	RemoteControlled []string
 
+	// InICloud lists files skipped because their contents are only in iCloud
+	// (Optimize Mac Storage); their download was requested and a later pass
+	// syncs them once they have arrived.
+	InICloud []string
+
 	// NewDesktopSessions lists desktop sidebar records that did not exist on
 	// this device before. The desktop app loads its sidebar at launch, so they
 	// show up after it restarts.
@@ -499,8 +504,12 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	}
 	sort.Strings(sorted)
 
-	for _, np := range sorted {
+	progress := progressFrom(ctx)
+	for i, np := range sorted {
 		np := np
+		if i%25 == 0 {
+			progress(PhaseCompare, i, len(sorted))
+		}
 		lf := local[np]
 		robj, hasRemote := remote[np]
 		st, hasState := known[np]
@@ -529,6 +538,10 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 				lhash = st.Hash // unchanged size and mtime: skip re-hashing
 			} else if h, err := hashLocal(lf.abs, lf.info); err == nil {
 				lhash = h
+			} else if _, cloud := inICloud(err); cloud {
+				// Its download was requested; decide once it is here.
+				rm.add(&report.InICloud, np)
+				continue
 			} else {
 				rm.fail(np, err)
 				continue
@@ -755,10 +768,9 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	// path on a case-insensitive volume) run one at a time: the second then
 	// sees the first's write and merges or defers instead of renaming over it.
 	locks := &keyedLocks{m: make(map[string]*gosync.Mutex)}
-	progress := progressFrom(ctx)
 	total := len(files) + len(worktree) + len(gitMeta) + len(records)
 	var done atomic.Int64
-	progress(0, total)
+	progress(PhaseTransfer, 0, total)
 	for _, batch := range [][]job{files, worktree, gitMeta, records} {
 		sem := make(chan struct{}, defaultWorkers)
 		var wg gosync.WaitGroup
@@ -773,10 +785,12 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 					rm.add(&report.Deferred, j.npath)
 				} else if errors.Is(err, errRemoteControlled) {
 					rm.add(&report.RemoteControlled, j.npath)
+				} else if _, cloud := inICloud(err); cloud {
+					rm.add(&report.InICloud, j.npath)
 				} else if err != nil {
 					rm.fail(j.npath, err)
 				}
-				progress(int(done.Add(1)), total)
+				progress(PhaseTransfer, int(done.Add(1)), total)
 			}(j)
 		}
 		wg.Wait()

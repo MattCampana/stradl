@@ -2,5 +2,5 @@
 
 package main
 
-// allowICloudDownloads is a no-op where there are no iCloud placeholders.
-func allowICloudDownloads() error { return nil }
+// setupICloud does nothing where there are no iCloud placeholders to fetch.
+func setupICloud() {}

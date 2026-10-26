@@ -526,6 +526,9 @@ func isSymlink(info os.FileInfo) bool {
 // readLocalContent returns what syncs for a local file: its bytes, or for a
 // symbolic link its target behind symlinkPrefix.
 func readLocalContent(abs string, info os.FileInfo) ([]byte, error) {
+	if err := checkInICloud(abs, info); err != nil {
+		return nil, err
+	}
 	if isSymlink(info) {
 		target, err := os.Readlink(abs)
 		if err != nil {
@@ -538,6 +541,9 @@ func readLocalContent(abs string, info os.FileInfo) ([]byte, error) {
 
 // hashLocal hashes what syncs for a local file.
 func hashLocal(abs string, info os.FileInfo) (string, error) {
+	if err := checkInICloud(abs, info); err != nil {
+		return "", err
+	}
 	if isSymlink(info) {
 		data, err := readLocalContent(abs, info)
 		if err != nil {

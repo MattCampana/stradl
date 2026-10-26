@@ -271,6 +271,13 @@ func (p *localProvider) build(ctx context.Context, now time.Time) (*Overview, ma
 	claudeDir := claudeDirOf(cfg)
 	st := readAgentStatus(p.opts.StatusPath)
 	ov.Agent = p.agentInfo(st)
+	if n := st.ICloudPending; n > 0 {
+		files := "files are"
+		if n == 1 {
+			files = "file is"
+		}
+		warn("%d %s only in iCloud on this Mac (Optimize Mac Storage). Stradl is downloading them in the background and syncs each one as it arrives.", n, files)
+	}
 
 	thisID, thisName, err := sync.ThisDevice(cfg)
 	if err != nil {

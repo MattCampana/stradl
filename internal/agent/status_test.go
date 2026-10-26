@@ -104,6 +104,8 @@ func TestStatusLine(t *testing.T) {
 	}{
 		{Snapshot{}, "Starting…"},
 		{Snapshot{Syncing: true, Status: Status{Paused: true}}, "Syncing…"},
+		{Snapshot{Syncing: true, SyncPhase: "compare", SyncDone: 50, SyncTotal: 3200}, "Checking files… 50 of 3200"},
+		{Snapshot{Syncing: true, SyncPhase: "transfer", SyncDone: 3, SyncTotal: 9}, "Syncing… 3 of 9 files"},
 		{Snapshot{Status: Status{Paused: true, LastError: "x"}}, "Paused"},
 		{Snapshot{Status: Status{LastError: NotConfigured}}, "Not set up: run stradl init in Terminal"},
 		{Snapshot{Status: Status{LastError: "a: denied", LastErrorKind: ErrorOther}}, "Sync error (see log)"},

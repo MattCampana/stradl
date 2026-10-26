@@ -3,6 +3,8 @@ package agent
 import (
 	"fmt"
 	"time"
+
+	"github.com/tawanorg/claude-sync/internal/sync"
 )
 
 // StatusLine is the one-line summary shown at the top of the menu, e.g.
@@ -10,6 +12,8 @@ import (
 // what is wrong, e.g. "Offline: will retry".
 func StatusLine(s Snapshot, now time.Time) string {
 	switch {
+	case s.Syncing && s.SyncTotal > 0 && s.SyncPhase == sync.PhaseCompare:
+		return fmt.Sprintf("Checking files… %d of %d", s.SyncDone, s.SyncTotal)
 	case s.Syncing && s.SyncTotal > 0:
 		return fmt.Sprintf("Syncing… %d of %s", s.SyncDone, Plural(s.SyncTotal, "file"))
 	case s.Syncing:

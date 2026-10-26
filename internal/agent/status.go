@@ -35,6 +35,9 @@ type Status struct {
 	// Warnings are problems that held part of the last sync back without
 	// failing it (deletions the mass-delete guard stopped, a stale git lock).
 	Warnings []string `json:"warnings,omitempty"`
+	// ICloudPending counts files the last sync skipped because they are only
+	// in iCloud; they are downloading and sync as they arrive.
+	ICloudPending int `json:"icloudPending,omitempty"`
 
 	// SessionsTotal counts transcripts (projects/<dir>/<id>.jsonl) on this
 	// device after the sync.

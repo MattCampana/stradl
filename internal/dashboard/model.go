@@ -46,18 +46,23 @@ type AgentInfo struct {
 	LastErrorSummary      string     `json:"lastErrorSummary,omitempty"` // short human line ("Storage token expired or invalid")
 	Version               string     `json:"version"`
 	PendingDesktopRestart int        `json:"pendingDesktopRestart"` // sessions that appear in the Claude sidebar after Claude restarts
-	// SyncDone of SyncTotal files are handled in the sync running now
-	// (SyncTotal 0: still comparing, or no sync running).
-	SyncDone  int `json:"syncDone,omitempty"`
-	SyncTotal int `json:"syncTotal,omitempty"`
+	// SyncDone of SyncTotal files are handled in SyncPhase ("compare" or
+	// "transfer") of the sync running now.
+	SyncPhase string `json:"syncPhase,omitempty"`
+	SyncDone  int    `json:"syncDone,omitempty"`
+	SyncTotal int    `json:"syncTotal,omitempty"`
+	// ICloudPending counts files the last sync skipped because they are only
+	// in iCloud (downloading; they sync as they arrive).
+	ICloudPending int `json:"icloudPending,omitempty"`
 }
 
 // Progress is GET /api/progress: whether a sync runs and how far it is, cheap
 // enough to poll every second.
 type Progress struct {
-	Syncing bool `json:"syncing"`
-	Done    int  `json:"done"`
-	Total   int  `json:"total"`
+	Syncing bool   `json:"syncing"`
+	Phase   string `json:"phase,omitempty"` // "compare" (checking files) or "transfer"
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
 }
 
 // ProgressProvider is implemented by providers attached to a running agent,

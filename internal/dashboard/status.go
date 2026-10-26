@@ -29,7 +29,8 @@ type agentStatus struct {
 	AgentVersion          string    `json:"agentVersion"`
 	Device                string    `json:"device"`
 	// Syncing is not written by agents yet; read in case a later one does.
-	Syncing bool `json:"syncing"`
+	Syncing       bool `json:"syncing"`
+	ICloudPending int  `json:"icloudPending"`
 }
 
 // notConfigured is the agent's status error until `stradl init` has run
@@ -98,6 +99,7 @@ func (p *localProvider) agentInfo(st agentStatus) AgentInfo {
 		LastErrorSummary:      errorSummary(st),
 		Version:               st.AgentVersion,
 		PendingDesktopRestart: st.PendingDesktopRestart,
+		ICloudPending:         st.ICloudPending,
 	}
 	if p.opts.Syncing != nil && p.opts.Syncing() {
 		info.Syncing = true

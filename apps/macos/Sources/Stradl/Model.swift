@@ -26,17 +26,21 @@ struct AgentInfo: Decodable {
     var lastErrorSummary: String?
     var version: String
     var pendingDesktopRestart: Int
+    var syncPhase: String?
     var syncDone: Int?
     var syncTotal: Int?
+    var icloudPending: Int?
 }
 
 /// GET /api/progress: the running sync, cheap to poll every second.
 struct SyncProgress: Decodable, Equatable {
     var syncing: Bool
+    var phase: String?   // "compare" (checking files) or "transfer"
     var done: Int
     var total: Int
 
-    static let idle = SyncProgress(syncing: false, done: 0, total: 0)
+    static let idle = SyncProgress(syncing: false, phase: nil, done: 0, total: 0)
+    var checking: Bool { phase == "compare" }
     /// 0…1 once the sync knows how many files it handles, else nil.
     var fraction: Double? { total > 0 ? min(1, Double(done) / Double(total)) : nil }
 }

@@ -192,6 +192,9 @@ func (s *Syncer) putStream(ctx context.Context, npath string, src io.Reader, ifM
 // info.Size() bytes, the size the caller recorded, and returns the new ETag
 // and the hash of what it read.
 func (s *Syncer) uploadFileStream(ctx context.Context, npath, abs string, info os.FileInfo, ifMatch string) (etag, hash string, err error) {
+	if err := checkInICloud(abs, info); err != nil {
+		return "", "", err
+	}
 	f, err := os.Open(abs)
 	if err != nil {
 		return "", "", err

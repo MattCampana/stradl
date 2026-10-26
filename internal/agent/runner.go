@@ -81,8 +81,9 @@ type Snapshot struct {
 	Status
 	Syncing    bool
 	AppRunning bool // Claude desktop app running at the last check
-	// SyncDone of SyncTotal files are handled in the sync running now
-	// (SyncTotal is 0 while it is still comparing).
+	// SyncDone of SyncTotal files are handled in SyncPhase (sync.PhaseCompare
+	// or sync.PhaseTransfer) of the sync running now.
+	SyncPhase           string
 	SyncDone, SyncTotal int
 }
 
@@ -104,7 +105,8 @@ type Runner struct {
 	status     Status
 	syncing    bool
 	appRunning bool
-	syncDone   int // progress of the sync running now
+	syncPhase  string // progress of the sync running now
+	syncDone   int
 	syncTotal  int
 
 	// Loop state, owned by the Run goroutine.
@@ -211,7 +213,7 @@ func (r *Runner) Snapshot() Snapshot {
 	defer r.mu.Unlock()
 	st := r.status
 	st.PendingDesktop = append([]PendingBatch(nil), r.status.PendingDesktop...)
-	return Snapshot{Status: st, Syncing: r.syncing, AppRunning: r.appRunning, SyncDone: r.syncDone, SyncTotal: r.syncTotal}
+	return Snapshot{Status: st, Syncing: r.syncing, AppRunning: r.appRunning, SyncPhase: r.syncPhase, SyncDone: r.syncDone, SyncTotal: r.syncTotal}
 }
 
 // SetPaused creates or removes the pause flag for p.
@@ -401,9 +403,9 @@ func (r *Runner) runSync(ctx context.Context, reason string) {
 	r.setSyncing(true)
 	start = r.o.Clock.Now()
 	sctx, cancel := context.WithTimeout(ctx, syncTimeout)
-	sctx = sync.WithProgress(sctx, func(done, total int) {
+	sctx = sync.WithProgress(sctx, func(phase string, done, total int) {
 		r.mu.Lock()
-		r.syncDone, r.syncTotal = done, total
+		r.syncPhase, r.syncDone, r.syncTotal = phase, done, total
 		r.mu.Unlock()
 	})
 	report, err := r.o.Sync(sctx, cfg)
@@ -472,6 +474,7 @@ func (r *Runner) finish(ctx context.Context, start, end time.Time, cfg *config.C
 			st.Deleted = len(report.Deleted)
 			st.Trashed = len(report.Trashed)
 			st.Warnings = report.Warnings
+			st.ICloudPending = len(report.InICloud)
 			newDesktop = len(report.NewDesktopSessions)
 			st.addPending(end, newDesktop)
 			if report.SidebarPending {
@@ -488,7 +491,7 @@ func (r *Runner) finish(ctx context.Context, start, end time.Time, cfg *config.C
 		r.retryAt = end.Add(r.backoff(cfg))
 	} else {
 		r.failures = 0
-		if report != nil && len(report.Deferred) > 0 {
+		if report != nil && len(report.Deferred)+len(report.InICloud) > 0 {
 			r.retryAt = end.Add(r.o.DeferredRetry)
 		}
 	}
@@ -640,7 +643,7 @@ func (r *Runner) update(fn func(st *Status)) {
 func (r *Runner) setSyncing(v bool) {
 	r.mu.Lock()
 	r.syncing = v
-	r.syncDone, r.syncTotal = 0, 0
+	r.syncPhase, r.syncDone, r.syncTotal = "", 0, 0
 	r.mu.Unlock()
 	r.changed()
 }
@@ -665,6 +668,9 @@ func (r *Runner) logSync(reason string, took time.Duration, rep *sync.SyncReport
 	}
 	for _, w := range rep.Warnings {
 		r.o.Log.Printf("  warning: %s", w)
+	}
+	if n := len(rep.InICloud); n > 0 {
+		r.o.Log.Printf("  only in iCloud: %s, downloading in the background; each syncs once it arrives (first: %s)", Plural(n, "file"), rep.InICloud[0])
 	}
 	for _, t := range rep.Trashed {
 		r.o.Log.Printf("  trashed: %s (deleted on another Mac; kept in ~/.stradl/trash for 30 days)", t)

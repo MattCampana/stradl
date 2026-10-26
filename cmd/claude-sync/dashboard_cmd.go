@@ -145,7 +145,7 @@ func startAgentDashboard(p agent.Paths, r *agent.Runner, logger *agent.Logger) (
 		syncing: func() bool { return r.Snapshot().Syncing },
 		progress: func() dashboard.Progress {
 			s := r.Snapshot()
-			return dashboard.Progress{Syncing: s.Syncing, Done: s.SyncDone, Total: s.SyncTotal}
+			return dashboard.Progress{Syncing: s.Syncing, Phase: s.SyncPhase, Done: s.SyncDone, Total: s.SyncTotal}
 		},
 	}
 	return serveAgentDashboard(p, prov, logger)
@@ -216,7 +216,7 @@ func (l *liveProvider) Overview(ctx context.Context) (*dashboard.Overview, error
 	}
 	if l.progress != nil {
 		pr := l.progress()
-		ov.Agent.SyncDone, ov.Agent.SyncTotal = pr.Done, pr.Total
+		ov.Agent.SyncPhase, ov.Agent.SyncDone, ov.Agent.SyncTotal = pr.Phase, pr.Done, pr.Total
 	}
 	if l.last == nil {
 		return ov, nil

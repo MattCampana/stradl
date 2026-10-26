@@ -186,7 +186,9 @@ struct SyncProgressBar: View {
                 ProgressView(value: f)
                     .progressViewStyle(.linear)
                     .animation(.easeOut(duration: 0.4), value: f)
-                Text("\(progress.done.formatted()) of \(progress.total.formatted()) files · \(Int((f * 100).rounded()))%")
+                Text(progress.checking
+                     ? "Checking files: \(progress.done.formatted()) of \(progress.total.formatted()) · \(Int((f * 100).rounded()))%"
+                     : "Syncing: \(progress.done.formatted()) of \(progress.total.formatted()) files · \(Int((f * 100).rounded()))%")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()

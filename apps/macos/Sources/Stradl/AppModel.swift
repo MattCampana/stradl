@@ -99,6 +99,7 @@ final class AppModel: ObservableObject {
         }
         let a = o.agent
         if progress.syncing || a.syncing {
+            if progress.total > 0 && progress.checking { return "Checking files… \(progress.done) of \(progress.total)" }
             if progress.total > 0 { return "Syncing… \(progress.done) of \(progress.total.plural("file"))" }
             return "Syncing…"
         }
