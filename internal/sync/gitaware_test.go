@@ -3,9 +3,9 @@ package sync
 import (
 	"fmt"
 	"os"
-	"runtime"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
