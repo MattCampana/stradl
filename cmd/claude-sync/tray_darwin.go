@@ -79,6 +79,9 @@ func runTray(opts agent.Options) error {
 
 		mStatus := systray.AddMenuItem("Starting…", "")
 		mStatus.Disable()
+		mAttempt := systray.AddMenuItem("", "") // after a failed sync only
+		mAttempt.Disable()
+		mAttempt.Hide()
 		mSync := systray.AddMenuItem("Sync Now", "Sync with your other Macs now")
 		mPause := systray.AddMenuItem("Pause Syncing", "Stop syncing until you resume")
 		systray.AddSeparator()
@@ -99,7 +102,14 @@ func runTray(opts agent.Options) error {
 		render := func() {
 			s := r.Snapshot()
 			s.Paused = agent.IsPaused(p) // the flag is the truth, even mid-sync
-			mStatus.SetTitle(agent.StatusLine(s, time.Now()))
+			now := time.Now()
+			mStatus.SetTitle(agent.StatusLine(s, now))
+			if line := agent.AttemptLine(s, now); line != "" {
+				mAttempt.SetTitle(line)
+				mAttempt.Show()
+			} else {
+				mAttempt.Hide()
+			}
 			if s.Paused {
 				mPause.SetTitle("Resume Syncing")
 			} else {
@@ -150,12 +160,19 @@ func runTray(opts agent.Options) error {
 							restarting.Store(false)
 							poke()
 						}()
-						rctx, rcancel := context.WithTimeout(ctx, 45*time.Second)
+						// Room for the question asked first when sessions are
+						// still working (up to two minutes), then the restart.
+						rctx, rcancel := context.WithTimeout(ctx, 3*time.Minute)
 						defer rcancel()
 						logger.Printf("restarting Claude to load new sessions")
-						if err := app.Restart(rctx); err != nil {
+						restarted, err := app.RestartIfConfirmed(rctx)
+						if err != nil {
 							logger.Printf("restart Claude: %v", err)
 							notify("Stradl", "Couldn't restart Claude: "+err.Error())
+							return
+						}
+						if !restarted {
+							logger.Printf("restart cancelled: Claude sessions are still working")
 							return
 						}
 						// Let the new process appear before re-checking.

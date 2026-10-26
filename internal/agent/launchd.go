@@ -127,22 +127,37 @@ func (l *Launchd) Install() error {
 	_, _ = l.Ctl.Run("bootout", l.Target()) // not loaded yet is fine
 
 	// bootout returns before launchd has fully let go of the old job, and
-	// bootstrap fails with an I/O error until it has; retry briefly.
+	// bootstrap fails with an I/O error until it has. A running agent takes
+	// up to 10s to stop gracefully, so keep retrying, with backoff, for
+	// longer than that: giving up early would leave no agent loaded at all.
 	sleep := l.Sleep
 	if sleep == nil {
 		sleep = time.Sleep
 	}
 	var out string
-	for attempt := 0; attempt < 10; attempt++ {
-		if attempt > 0 {
-			sleep(300 * time.Millisecond)
-		}
+	delay, waited := bootstrapFirstRetry, time.Duration(0)
+	for {
 		if out, err = l.Ctl.Run("bootstrap", l.Domain(), l.Paths.Plist); err == nil {
 			return nil
 		}
+		if waited >= bootstrapRetryFor {
+			break
+		}
+		d := min(delay, bootstrapRetryFor-waited)
+		sleep(d)
+		waited += d
+		delay = min(2*delay, bootstrapMaxRetry)
 	}
-	return fmt.Errorf("launchctl bootstrap failed: %v: %s", err, strings.TrimSpace(out))
+	return fmt.Errorf("launchctl bootstrap failed after %s: %v: %s", bootstrapRetryFor, err, strings.TrimSpace(out))
 }
+
+// Bootstrap retry schedule after bootout: 250ms, doubling up to 2s between
+// attempts, for 15s in all (more than the agent's 10s graceful stop).
+const (
+	bootstrapFirstRetry = 250 * time.Millisecond
+	bootstrapMaxRetry   = 2 * time.Second
+	bootstrapRetryFor   = 15 * time.Second
+)
 
 // Uninstall stops the job and removes the plist. Missing pieces are fine.
 func (l *Launchd) Uninstall() error {

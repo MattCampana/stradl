@@ -12,9 +12,16 @@ import (
 // Status is the agent's view of the last sync, persisted to status.json for
 // the menu bar and `stradl agent status`.
 type Status struct {
+	// LastSyncAt is when the last successful sync finished (no error and no
+	// file that failed); LastDurationMs is how long that sync took.
 	LastSyncAt     time.Time `json:"lastSyncAt,omitzero"`
 	LastDurationMs int64     `json:"lastDurationMs"`
-	LastError      string    `json:"lastError"`
+	// LastAttemptAt is when the last sync attempt finished, failed or not.
+	LastAttemptAt time.Time `json:"lastAttemptAt,omitzero"`
+	// LastError is the last attempt's failure ("" after a clean sync), and
+	// LastErrorKind sorts it by what the user can do about it.
+	LastError     string    `json:"lastError"`
+	LastErrorKind ErrorKind `json:"lastErrorKind,omitempty"`
 
 	Uploaded   int `json:"uploaded"`
 	Downloaded int `json:"downloaded"`
@@ -64,11 +71,39 @@ func ReadStatus(path string) (*Status, error) {
 // WriteStatus replaces the status file atomically, so a reader never sees a
 // half-written file.
 func WriteStatus(path string, st *Status) error {
-	data, err := json.MarshalIndent(st, "", "  ")
+	data, err := encodeStatus(st)
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, append(data, '\n'))
+	return writeFileAtomic(path, data)
+}
+
+func encodeStatus(st *Status) ([]byte, error) {
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// AttemptFailed reports whether the last sync attempt failed. Waiting for
+// `stradl init` is not a failure.
+func (s *Status) AttemptFailed() bool {
+	return s.LastError != "" && s.LastError != NotConfigured && !s.LastAttemptAt.IsZero()
+}
+
+// ErrorSummary is the short line for LastError, e.g. "Offline: will retry",
+// or "" when there is no error. Status files written before LastErrorKind
+// existed are sorted by their message.
+func (s *Status) ErrorSummary() string {
+	if s.LastError == "" {
+		return ""
+	}
+	kind := s.LastErrorKind
+	if kind == "" {
+		kind = classifyMessage(s.LastError)
+	}
+	return kind.Summary()
 }
 
 func writeFileAtomic(path string, data []byte) error {
@@ -110,7 +145,7 @@ func (s *Status) addPending(t time.Time, n int) {
 // resolution, so a batch from the same second as the launch is kept; the
 // worst case is one unnecessary restart prompt, never a missed one.
 func (s *Status) clearPendingBefore(appStart time.Time) bool {
-	kept := s.PendingDesktop[:0]
+	var kept []PendingBatch // a new slice: never rewrite one a copy may share
 	for _, b := range s.PendingDesktop {
 		if !appStart.After(b.At.Truncate(time.Second)) {
 			kept = append(kept, b)
@@ -118,9 +153,6 @@ func (s *Status) clearPendingBefore(appStart time.Time) bool {
 	}
 	changed := len(kept) != len(s.PendingDesktop)
 	s.PendingDesktop = kept
-	if len(kept) == 0 {
-		s.PendingDesktop = nil
-	}
 	s.recount()
 	return changed
 }
