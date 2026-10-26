@@ -10,6 +10,8 @@ import (
 // what is wrong, e.g. "Offline: will retry".
 func StatusLine(s Snapshot, now time.Time) string {
 	switch {
+	case s.Syncing && s.SyncTotal > 0:
+		return fmt.Sprintf("Syncing… %d of %s", s.SyncDone, Plural(s.SyncTotal, "file"))
 	case s.Syncing:
 		return "Syncing…"
 	case s.Paused:

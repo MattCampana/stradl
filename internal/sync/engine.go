@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	gosync "sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tawanorg/claude-sync/internal/storage"
@@ -754,6 +755,10 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	// path on a case-insensitive volume) run one at a time: the second then
 	// sees the first's write and merges or defers instead of renaming over it.
 	locks := &keyedLocks{m: make(map[string]*gosync.Mutex)}
+	progress := progressFrom(ctx)
+	total := len(files) + len(worktree) + len(gitMeta) + len(records)
+	var done atomic.Int64
+	progress(0, total)
 	for _, batch := range [][]job{files, worktree, gitMeta, records} {
 		sem := make(chan struct{}, defaultWorkers)
 		var wg gosync.WaitGroup
@@ -771,6 +776,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 				} else if err != nil {
 					rm.fail(j.npath, err)
 				}
+				progress(int(done.Add(1)), total)
 			}(j)
 		}
 		wg.Wait()

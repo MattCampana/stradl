@@ -78,6 +78,10 @@ func TestCompareVersions(t *testing.T) {
 		{"short version strings", "1.0", "1.0.0", 0},
 		{"both zeros", "0.0.0", "0.0.0", 0},
 		{"single component", "2", "1", 1},
+		{"prerelease before release", "2.2.0-rc.1", "2.2.0", -1},
+		{"release after prerelease", "2.2.0", "2.2.0-rc.1", 1},
+		{"dev build before next release", "2.1.3-15-gabc", "2.2.0", -1},
+		{"prereleases tie", "2.2.0-rc.1", "2.2.0-rc.2", 0},
 	}
 
 	for _, tt := range tests {

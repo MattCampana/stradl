@@ -143,6 +143,10 @@ func startAgentDashboard(p agent.Paths, r *agent.Runner, logger *agent.Logger) (
 			SyncNow:      func() error { r.SyncNow(); return nil },
 		}),
 		syncing: func() bool { return r.Snapshot().Syncing },
+		progress: func() dashboard.Progress {
+			s := r.Snapshot()
+			return dashboard.Progress{Syncing: s.Syncing, Done: s.SyncDone, Total: s.SyncTotal}
+		},
 	}
 	return serveAgentDashboard(p, prov, logger)
 }
@@ -191,6 +195,8 @@ func serveAgentDashboard(p agent.Paths, prov dashboard.Provider, logger *agent.L
 type liveProvider struct {
 	dashboard.Provider
 	syncing func() bool
+	// progress reports the agent's running sync; nil without an agent.
+	progress func() dashboard.Progress
 	// last reports this process's own last sync; nil when it runs none.
 	last func() (at time.Time, err error)
 }
@@ -207,6 +213,10 @@ func (l *liveProvider) Overview(ctx context.Context) (*dashboard.Overview, error
 	ov = &cp
 	if l.syncing != nil && l.syncing() {
 		ov.Agent.Syncing = true
+	}
+	if l.progress != nil {
+		pr := l.progress()
+		ov.Agent.SyncDone, ov.Agent.SyncTotal = pr.Done, pr.Total
 	}
 	if l.last == nil {
 		return ov, nil
@@ -290,4 +300,15 @@ func newStandaloneProvider(p agent.Paths) dashboard.Provider {
 		syncing: ss.running.Load,
 		last:    ss.last,
 	}
+}
+
+// Progress implements dashboard.ProgressProvider for the agent's dashboard.
+func (l *liveProvider) Progress() dashboard.Progress {
+	if l.progress != nil {
+		return l.progress()
+	}
+	if l.syncing != nil {
+		return dashboard.Progress{Syncing: l.syncing()}
+	}
+	return dashboard.Progress{}
 }

@@ -16,12 +16,21 @@ struct ActivityView: View {
                     Stat(value: "\((p.delete ?? 0) + (p.trash ?? 0))", label: "Deletes (to trash)", symbol: "trash")
                     Stat(value: "\(p.conflicts)", label: "Conflict copies", symbol: "exclamationmark.triangle")
                 }
-                if p.total == 0 {
+                if p.known == false {
+                    Card {
+                        Label("Storage didn't answer, so what's waiting to download isn't known yet. It updates on its own.", systemImage: "clock")
+                            .foregroundStyle(.secondary)
+                        ForEach(model.overview?.warnings ?? [], id: \.self) { w in
+                            Text(w).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
+                    }
+                }
+                if p.total == 0 && p.known != false {
                     Card {
                         Label("Nothing waiting. This Mac and your storage match.", systemImage: "checkmark.circle")
                             .foregroundStyle(.green)
                     }
-                } else {
+                } else if p.total > 0 {
                     let rows = p.files.filter { query.isEmpty || $0.path.localizedCaseInsensitiveContains(query) }
                     Table(rows) {
                         TableColumn("Action") { f in ActionBadge(action: f.action) }.width(110)

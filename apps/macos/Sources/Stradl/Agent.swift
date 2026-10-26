@@ -55,7 +55,8 @@ enum StradlCLI {
                     cont.resume(throwing: error)
                     return
                 }
-                let timer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+                let timedOut = TimeoutFlag()
+                let timer = DispatchWorkItem { if p.isRunning { timedOut.set(); p.terminate() } }
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
                 // Drain both pipes at once before waiting: a full pipe would
                 // block the command, and reading one to the end first could
@@ -70,7 +71,9 @@ enum StradlCLI {
                 errDone.wait()
                 p.waitUntilExit()
                 timer.cancel()
-                if p.terminationStatus == 0 {
+                if timedOut.isSet {
+                    cont.resume(throwing: Failure(message: "stradl \(args.joined(separator: " ")) didn't finish within \(Int(timeout)) seconds and was stopped."))
+                } else if p.terminationStatus == 0 {
                     cont.resume(returning: outData)
                 } else {
                     let msg = String(decoding: errData.isEmpty ? outData : errData, as: UTF8.self)
@@ -85,6 +88,14 @@ enum StradlCLI {
     static func json<T: Decodable>(_ type: T.Type, _ args: [String]) async throws -> T {
         try JSONDecoder.stradl.decode(T.self, from: try await run(args))
     }
+}
+
+/// Set once from the timeout timer, read after the process exits.
+private final class TimeoutFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func set() { lock.lock(); value = true; lock.unlock() }
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
 }
 
 /// Talks to the running agent's local dashboard API (127.0.0.1, random port,
@@ -127,6 +138,17 @@ enum AgentAPI {
             throw StradlCLI.Failure(message: String(decoding: data, as: UTF8.self))
         }
         return try JSONDecoder.stradl.decode(Overview.self, from: data)
+    }
+
+    static func progress() async throws -> SyncProgress {
+        guard let ep = endpoint() else { throw StradlCLI.Failure(message: "The Stradl agent isn't running.") }
+        var req = URLRequest(url: url(ep, "api/progress"))
+        req.timeoutInterval = 3
+        let (data, resp) = try await session.data(for: req)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
+            throw StradlCLI.Failure(message: String(decoding: data, as: UTF8.self))
+        }
+        return try JSONDecoder.stradl.decode(SyncProgress.self, from: data)
     }
 
     /// Asks the agent for an immediate sync. The API only takes requests from

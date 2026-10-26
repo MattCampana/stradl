@@ -29,6 +29,7 @@ const statusRefresh = 15 * time.Second
 // KeepAlive (SuccessfulExit=false) treats as "stay stopped".
 func runTray(opts agent.Options) error {
 	logger := opts.Log
+	go ensureAppInstalled(logger)
 	app := agent.NewDesktopApp()
 	// Restart Claude applies sidebar changes from other Macs in the moment
 	// between the old app quitting and the new one opening.
@@ -87,13 +88,11 @@ func runTray(opts agent.Options) error {
 		mAttempt := systray.AddMenuItem("", "") // after a failed sync only
 		mAttempt.Disable()
 		mAttempt.Hide()
-		// The Mac app, when it's installed; a nil channel otherwise.
-		var appClicked <-chan struct{}
-		stradlApp, haveApp := appPath()
-		if haveApp {
-			mApp := systray.AddMenuItem("Open Stradl…", "Your Circle, sessions, folders, settings and logs")
-			appClicked = mApp.ClickedCh
-		}
+		// The Mac app: shown while it's installed (checked on every redraw,
+		// so an app installed later appears without restarting the agent).
+		mApp := systray.AddMenuItem("Open Stradl…", "Your Circle, sessions, folders, settings and logs")
+		mApp.Hide()
+		appClicked := mApp.ClickedCh
 		// No dashboard (its server failed to start, which the log says):
 		// no menu item, and a nil channel that never fires.
 		var dashClicked <-chan struct{}
@@ -133,6 +132,11 @@ func runTray(opts agent.Options) error {
 				mPause.SetTitle("Resume Syncing")
 			} else {
 				mPause.SetTitle("Pause Syncing")
+			}
+			if _, ok := appPath(); ok {
+				mApp.Show()
+			} else {
+				mApp.Hide()
 			}
 			if line := agent.RestartLine(s); line != "" && !restarting.Load() {
 				mRestart.SetTitle(line)
@@ -202,7 +206,9 @@ func runTray(opts agent.Options) error {
 						r.RefreshDesktop(rctx)
 					}()
 				case <-appClicked:
-					openPath(logger, stradlApp)
+					if p, ok := appPath(); ok {
+						openPath(logger, p)
+					}
 				case <-dashClicked:
 					// Not openPath: its error line would put the key in the log.
 					if err := openBrowser(dashURL); err != nil {

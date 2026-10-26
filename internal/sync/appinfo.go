@@ -115,3 +115,22 @@ func (s *Syncer) ForgetDevice(ctx context.Context, idOrName string) (DeviceHeart
 	}
 	return match[0], nil
 }
+
+// FolderSyncable reports why a folder can't be a project folder, or nil when
+// it can: it must lie inside home (not be home itself) and outside Stradl's,
+// Claude's and the system's own folders.
+func FolderSyncable(cfg *config.Config, abs string) error {
+	claudeDir := config.ClaudeDir()
+	if cfg.ClaudeDirOverride != "" {
+		claudeDir = cfg.ClaudeDirOverride
+	}
+	s := &Syncer{cfg: cfg, home: cfg.HomeDir(), claudeDir: claudeDir}
+	rel, ok := homeRel(s.home, filepath.Clean(abs))
+	if !ok {
+		return fmt.Errorf("%s isn't inside your home folder; Stradl syncs folders in your home folder", abs)
+	}
+	if !s.folderAllowed(rel) {
+		return fmt.Errorf("%s can't sync: Stradl leaves out your home folder itself, ~/Library (except Claude's scratch folders), the Trash and Stradl's and Claude's own folders", abs)
+	}
+	return nil
+}

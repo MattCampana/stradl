@@ -116,10 +116,14 @@ func (a *DesktopApp) Restart(ctx context.Context) error {
 			}
 		}
 	}
+	// Claude has quit: reopen it even if ctx ran out meanwhile, so a restart
+	// never leaves it closed.
+	launch, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	if a.BeforeLaunch != nil {
-		a.BeforeLaunch(ctx)
+		a.BeforeLaunch(launch)
 	}
-	if _, err := a.Run(ctx, "/usr/bin/open", "-a", a.Name); err != nil {
+	if _, err := a.Run(launch, "/usr/bin/open", "-a", a.Name); err != nil {
 		return fmt.Errorf("failed to open %s: %w", a.Name, err)
 	}
 	return nil

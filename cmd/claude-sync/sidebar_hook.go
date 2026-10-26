@@ -15,7 +15,7 @@ import (
 // takes the sync lock, because ApplyPendingSidebar rewrites state the sync
 // pass also reads, and does nothing while the app runs. It reports whether
 // changes are still waiting.
-func applyPendingSidebar(_ context.Context, logger *agent.Logger) bool {
+func applyPendingSidebar(ctx context.Context, logger *agent.Logger) bool {
 	cfg, err := config.Load()
 	if err != nil {
 		return false
@@ -28,7 +28,15 @@ func applyPendingSidebar(_ context.Context, logger *agent.Logger) bool {
 	if cfg.StateDirOverride != "" {
 		lockPath = filepath.Join(cfg.StateDirOverride, config.LockFile)
 	}
-	release, err := sync.AcquireLock(lockPath, true, 2*time.Minute)
+	// Between Claude quitting and reopening, don't keep it closed for long
+	// behind a running sync: wait only as long as the caller allows.
+	wait := 2 * time.Minute
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl) - 5*time.Second; left < wait {
+			wait = max(left, time.Second)
+		}
+	}
+	release, err := sync.AcquireLock(lockPath, true, wait)
 	if err != nil {
 		logger.Printf("sidebar: waiting for the sync lock: %v", err)
 		return sync.SidebarPendingExists(cfg)

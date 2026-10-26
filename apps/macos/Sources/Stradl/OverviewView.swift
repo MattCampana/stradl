@@ -39,21 +39,31 @@ struct OverviewView: View {
                     Image(systemName: heroSymbol)
                         .font(.system(size: 24, weight: .semibold))
                         .foregroundStyle(heroColor)
-                        .symbolEffectIfAvailable(model.health == .working)
+                        .spinning(model.health == .working)
                 }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(model.statusLine).font(.title2.weight(.semibold))
+                    Text(model.statusLine).font(.title2.weight(.semibold)).monospacedDigit()
                     Text("\(o.thisDevice) · Stradl \(o.agent.version) · \(o.devices.count.plural("Mac")) in your Circle")
                         .foregroundStyle(.secondary)
+                    if model.progress.syncing || o.agent.syncing {
+                        SyncProgressBar(progress: model.progress)
+                            .padding(.top, 4)
+                    }
                     if let err = o.agent.lastError, !err.isEmpty {
                         Text(err).font(.callout).foregroundStyle(.orange).textSelection(.enabled).lineLimit(3)
                     }
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 8) {
-                    Button { model.syncNow() } label: { Label("Sync Now", systemImage: "arrow.triangle.2.circlepath") }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.busy.contains("sync"))
+                    Button { model.syncNow() } label: {
+                        Label {
+                            Text(model.progress.syncing ? "Syncing…" : "Sync Now")
+                        } icon: {
+                            Image(systemName: "arrow.triangle.2.circlepath").spinning(model.progress.syncing)
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.busy.contains("sync") || model.progress.syncing)
                     if o.agent.pendingDesktopRestart > 0 {
                         Button { model.restartClaude() } label: {
                             Label("Restart Claude to show \(o.agent.pendingDesktopRestart.plural("new session"))", systemImage: "arrow.clockwise")
@@ -162,6 +172,54 @@ struct Stat: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.separator, lineWidth: 0.5))
+    }
+}
+
+/// The bar under the status while a sync runs: how many files of how many,
+/// or an indeterminate bar while it is still comparing.
+struct SyncProgressBar: View {
+    var progress: SyncProgress
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let f = progress.fraction {
+                ProgressView(value: f)
+                    .progressViewStyle(.linear)
+                    .animation(.easeOut(duration: 0.4), value: f)
+                Text("\(progress.done.formatted()) of \(progress.total.formatted()) files · \(Int((f * 100).rounded()))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            } else {
+                ProgressView()
+                    .progressViewStyle(.linear)
+                Text("Comparing this Mac with your storage…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: 520, alignment: .leading)
+    }
+}
+
+extension View {
+    /// Turns the view continuously while active (the sync arrows).
+    func spinning(_ active: Bool) -> some View {
+        modifier(Spin(active: active))
+    }
+}
+
+private struct Spin: ViewModifier {
+    var active: Bool
+
+    func body(content: Content) -> some View {
+        if active {
+            TimelineView(.animation) { ctx in
+                content.rotationEffect(.degrees(ctx.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.2) / 1.2 * 360))
+            }
+        } else {
+            content
+        }
     }
 }
 

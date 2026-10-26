@@ -329,6 +329,7 @@ func (v *syncView) pendingSummary() Pending {
 		add(local, "upload")
 		return pd
 	}
+	pd.Known = true
 	pd.Upload = len(v.upload) + len(v.restore) + len(local)
 	pd.Download = len(v.download)
 	pd.Merge = len(v.merge)

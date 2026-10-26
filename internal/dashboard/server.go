@@ -173,12 +173,14 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/sessions/{id}", s.handleSession)
 	mux.HandleFunc("POST /api/sync", s.handleSync)
+	mux.HandleFunc("GET /api/progress", s.handleProgress)
 	// The same paths with any other method: a JSON 405, not the catch-all's
 	// 404.
 	mux.HandleFunc("/{$}", methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("/api/overview", methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("/api/sessions/{id}", methodNotAllowed("GET, HEAD"))
 	mux.HandleFunc("/api/sync", methodNotAllowed("POST"))
+	mux.HandleFunc("/api/progress", methodNotAllowed("GET, HEAD"))
 	notFound := func(w http.ResponseWriter, r *http.Request) { writeError(w, http.StatusNotFound, "not found") }
 	mux.HandleFunc("/static", notFound) // rather than a redirect to /static/
 	mux.HandleFunc("/", notFound)
@@ -322,6 +324,16 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ov)
+}
+
+// handleProgress reports a running sync's progress, from the agent when one
+// is attached (an empty Progress otherwise).
+func (s *Server) handleProgress(w http.ResponseWriter, r *http.Request) {
+	var pr Progress
+	if pp, ok := s.p.(ProgressProvider); ok {
+		pr = pp.Progress()
+	}
+	writeJSON(w, http.StatusOK, pr)
 }
 
 // validID matches what a session ID can be (Claude Code uses UUIDs), which

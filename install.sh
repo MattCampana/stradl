@@ -84,7 +84,6 @@ Environment:
   STRADL_VERSION   install this version (e.g. 1.2.3) instead of the latest
   STRADL_BASE_URL  download the release assets from this URL instead
   STRADL_NO_SETUP  set to 1 to behave like --no-setup
-  STRADL_APP_DIR   install Stradl.app here instead of /Applications
 EOF
 }
 
@@ -293,7 +292,8 @@ run_setup() {
 # install_app puts Stradl.app, the Mac app, in /Applications, or in
 # ~/Applications when /Applications isn't writable without a password. It is
 # optional: a release without it, or any problem here, leaves the
-# command-line install as it is and says so.
+# command-line install as it is and says so. (STRADL_APP_DIR, for tests,
+# installs it elsewhere.)
 install_app() {
   local base="$1" want got zip dir dest stage old
   [ "$OS" = darwin ] || return 0
@@ -324,12 +324,12 @@ install_app() {
   old="$dir/.Stradl.app.old.$$"
   if [ -e "$dest" ]; then mv "$dest" "$old" || { APP_STATE="not installed (couldn't replace $(pretty "$dest"))"; return 0; }; fi
   if ditto "$stage/Stradl.app" "$dest"; then
-    rm -rf "$old"
+    rm -rf "$old" 2>/dev/null || warn "couldn't remove $(pretty "$old")"
     APP_STATE="$(pretty "$dest")"
     info "Installed $(pretty "$dest")"
   else
-    rm -rf "$dest"
-    [ -e "$old" ] && mv "$old" "$dest"
+    rm -rf "$dest" 2>/dev/null || true
+    if [ -e "$old" ]; then mv "$old" "$dest" 2>/dev/null || true; fi
     APP_STATE="not installed (copy failed)"
   fi
 }
@@ -411,7 +411,7 @@ main() {
   STAGED=""
   info "Installed $(pretty "$BIN")"
 
-  install_app "$base"
+  install_app "$base" || true # optional: never fails the install
   ensure_path
 
   if [ "$setup" = 1 ]; then

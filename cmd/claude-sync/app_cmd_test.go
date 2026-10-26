@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,5 +68,66 @@ func TestConfigSetAndListEdits(t *testing.T) {
 		if run(bad...) == nil {
 			t.Errorf("config %v should fail", bad)
 		}
+	}
+}
+
+func TestExtraFoldersRoundTripAsTheAppSendsThem(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".stradl"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.ConfigFilePath(), []byte("scope: everything\nencryption_key_path: ~/.stradl/age-key.txt\nextra_folders:\n  - ~/work/site\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) error {
+		c := configCmd()
+		c.SetArgs(args)
+		return c.Execute()
+	}
+	abs := filepath.Join(home, "work", "site")
+	if err := run("add", "extra_folders", abs); err != nil { // already there, as ~/work/site
+		t.Fatal(err)
+	}
+	cfg, _ := config.Load()
+	if len(cfg.ExtraFolders) != 1 {
+		t.Fatalf("adding the same folder by its absolute path duplicated it: %v", cfg.ExtraFolders)
+	}
+	if err := run("remove", "extra_folders", abs); err != nil { // what `config show --json` reports
+		t.Fatalf("remove by the path the app sends: %v", err)
+	}
+	data, _ := os.ReadFile(config.ConfigFilePath())
+	if strings.Contains(string(data), "work/site") || !strings.Contains(string(data), "encryption_key_path: ~/.stradl/age-key.txt") {
+		t.Fatalf("config.yaml after remove:\n%s", data)
+	}
+	if run("add", "extra_folders", "/tmp") == nil || run("add", "extra_folders", home) == nil {
+		t.Fatal("folders outside home, or home itself, must be refused")
+	}
+}
+
+func TestDiagnosticsIncludesRedactedLog(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	p := filepath.Join(home, ".stradl", "agent.log")
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("first\nupload failed: https://a.blob.core.windows.net/c?sv=1&sig=SECRET123\nlast line\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, w, _ := os.Pipe()
+	old := os.Stdout
+	os.Stdout = w
+	c := diagnosticsCmd()
+	c.SetArgs(nil)
+	err := c.Execute()
+	_ = w.Close()
+	os.Stdout = old
+	out, _ := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "last line") || strings.Contains(string(out), "SECRET123") {
+		t.Fatalf("diagnostics output:\n%s", out)
 	}
 }

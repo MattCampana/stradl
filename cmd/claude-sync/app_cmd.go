@@ -311,6 +311,9 @@ Storage credentials are changed with 'stradl init'.`,
 					return fmt.Errorf("scope is everything, sessions or full")
 				}
 				cfg.Scope, cfg.ScopeExplicit = val, true
+				if val == config.ScopeEverything && cfg.MCPSync == nil {
+					cfg.SetMCPSync(true) // as init and the scope migration do
+				}
 			case key == "sync_interval_seconds":
 				n, err := strconv.Atoi(val)
 				if err != nil || n < 30 || n > 86400 {
@@ -356,11 +359,20 @@ Storage credentials are changed with 'stradl init'.`,
 				if err != nil {
 					return err
 				}
-				if key == "extra_folders" {
-					val = tildePath(val)
-				}
 				list := get(cfg)
-				i := slices.Index(*list, val)
+				same := func(e string) bool { return e == val }
+				if key == "extra_folders" {
+					// Load expands ~/ entries, so compare absolute paths, whichever
+					// form the value comes in.
+					val = absPath(val)
+					same = func(e string) bool { return filepath.Clean(absPath(e)) == filepath.Clean(val) }
+					if add {
+						if err := sync.FolderSyncable(cfg, val); err != nil {
+							return err
+						}
+					}
+				}
+				i := slices.IndexFunc(*list, same)
 				switch {
 				case add && i >= 0:
 					fmt.Printf("%s already has %s\n", key, val)
@@ -376,6 +388,9 @@ Storage credentials are changed with 'stradl init'.`,
 					return err
 				}
 				printSuccess(fmt.Sprintf("%s: %s %s", key, map[bool]string{true: "added", false: "removed"}[add], val))
+				if key == "extra_folders" && !add {
+					fmt.Println("It keeps syncing while a session works in it; nothing was deleted.")
+				}
 				return nil
 			},
 		}
@@ -384,24 +399,19 @@ Storage credentials are changed with 'stradl init'.`,
 	return cmd
 }
 
-// tildePath writes a path under home as ~/..., the form config.yaml keeps.
-func tildePath(p string) string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return p
+// absPath expands a leading ~/ and makes p absolute.
+func absPath(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, p[1:])
+		}
 	}
-	if strings.HasPrefix(p, "~/") {
-		return p
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
 	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return p
-	}
-	if rel, err := filepath.Rel(home, abs); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
-		return "~/" + filepath.ToSlash(rel)
-	}
-	return abs
+	return p
 }
+
 
 // --- folders -----------------------------------------------------------------
 
@@ -499,8 +509,7 @@ Claude is asked first, as the menu bar's Restart Claude does.`,
 				return err
 			}
 			if !restarted {
-				fmt.Println("Claude wasn't restarted: sessions are still working.")
-				return nil
+				return errors.New("not restarted: Claude has sessions still working, or the question went unanswered")
 			}
 			printSuccess("Restarted Claude")
 			return nil
@@ -520,8 +529,8 @@ func redactSecrets(s string) string {
 }
 
 func diagnosticsCmd() *cobra.Command {
-	var lines int
-	return &cobra.Command{
+	lines := 200
+	cmd := &cobra.Command{
 		Use:   "diagnostics",
 		Short: "Print a troubleshooting report (settings, status, recent log) with secrets removed",
 		Args:  cobra.NoArgs,
@@ -548,6 +557,8 @@ func diagnosticsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().IntVar(&lines, "lines", lines, "how many recent log lines to include")
+	return cmd
 }
 
 // tailLines returns the last n lines of a file.

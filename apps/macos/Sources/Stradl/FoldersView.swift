@@ -108,9 +108,9 @@ struct FolderRow: View {
                 Text("Not on this Mac").font(.caption).foregroundStyle(.orange)
             }
             if let entry = extraEntry {
-                Button("Stop Syncing") { stopSyncing(entry) }
+                Button("Remove from Extra Folders") { stopSyncing(entry) }
                     .controlSize(.small)
-                    .help("Remove this extra folder from Stradl (nothing is deleted)")
+                    .help("Stop adding this folder by hand. It keeps syncing while a session works in it; nothing is deleted.")
             }
             Button {
                 NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: folder.abs)])

@@ -38,6 +38,22 @@ func FormatSize(size int64) string {
 // CompareVersions performs a simple semver comparison.
 // Returns -1 if v1 < v2, 0 if equal, 1 if v1 > v2.
 func CompareVersions(v1, v2 string) int {
+	// A prerelease (2.2.0-rc.1) comes before its release (2.2.0), as in semver.
+	core1, pre1, _ := strings.Cut(strings.SplitN(v1, "+", 2)[0], "-")
+	core2, pre2, _ := strings.Cut(strings.SplitN(v2, "+", 2)[0], "-")
+	if c := compareCore(core1, core2); c != 0 {
+		return c
+	}
+	switch {
+	case pre1 == "" && pre2 != "":
+		return 1
+	case pre1 != "" && pre2 == "":
+		return -1
+	}
+	return 0
+}
+
+func compareCore(v1, v2 string) int {
 	parts1 := strings.Split(v1, ".")
 	parts2 := strings.Split(v2, ".")
 

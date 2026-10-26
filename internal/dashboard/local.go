@@ -305,9 +305,12 @@ func (p *localProvider) build(ctx context.Context, now time.Time) (*Overview, ma
 			if timedOut {
 				warn("Storage is slow to answer: pending changes are as of %s.", r.fetchedAt.In(p.loc).Format("15:04:05"))
 			}
-			if r.previewErr != nil {
+			switch {
+			case r.previewErr != nil && errors.Is(r.previewErr, context.DeadlineExceeded):
+				warn("Storage was slow to answer (a big sync may be running), so what's waiting to download is unknown for now.")
+			case r.previewErr != nil:
 				warn("Couldn't reach storage, so pending downloads are unknown: %s", shortError(r.previewErr))
-			} else {
+			default:
 				preview, previewAt = r.preview, r.fetchedAt
 			}
 			if r.beatsErr != nil && r.previewErr == nil {

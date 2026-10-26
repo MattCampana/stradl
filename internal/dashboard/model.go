@@ -46,6 +46,24 @@ type AgentInfo struct {
 	LastErrorSummary      string     `json:"lastErrorSummary,omitempty"` // short human line ("Storage token expired or invalid")
 	Version               string     `json:"version"`
 	PendingDesktopRestart int        `json:"pendingDesktopRestart"` // sessions that appear in the Claude sidebar after Claude restarts
+	// SyncDone of SyncTotal files are handled in the sync running now
+	// (SyncTotal 0: still comparing, or no sync running).
+	SyncDone  int `json:"syncDone,omitempty"`
+	SyncTotal int `json:"syncTotal,omitempty"`
+}
+
+// Progress is GET /api/progress: whether a sync runs and how far it is, cheap
+// enough to poll every second.
+type Progress struct {
+	Syncing bool `json:"syncing"`
+	Done    int  `json:"done"`
+	Total   int  `json:"total"`
+}
+
+// ProgressProvider is implemented by providers attached to a running agent,
+// which knows a sync's progress live.
+type ProgressProvider interface {
+	Progress() Progress
 }
 
 // Device is one Mac syncing into the container, from its heartbeat.
@@ -81,6 +99,9 @@ type Pending struct {
 	Trash     int           `json:"trash"`    // deleted on another Mac, to move to ~/.stradl/trash
 	Conflicts int           `json:"conflicts"`
 	Files     []PendingFile `json:"files"` // at most 200
+	// Known is false when storage didn't answer: then only this Mac's own
+	// changes are counted, and downloads are unknown.
+	Known bool `json:"known"`
 }
 
 // PendingFile is one file the next sync would touch.

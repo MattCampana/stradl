@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
     @Published var message: Banner?           // last action's outcome
     @Published var lastRefresh: Date?
     @Published var pane: Pane? = .overview      // the sidebar selection
+    @Published var progress: SyncProgress = .idle // the agent's running sync
 
     struct Banner: Identifiable, Equatable {
         var id = UUID()
@@ -22,11 +23,26 @@ final class AppModel: ObservableObject {
     }
 
     private var timer: Timer?
+    private var progressTimer: Timer?
 
     init() {
         Task { await refreshAll() }
         timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refreshOverview() }
+        }
+        // Progress is cheap to ask for: once a second, so the bar moves.
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.refreshProgress() }
+        }
+    }
+
+    func refreshProgress() async {
+        let was = progress.syncing
+        progress = (try? await AgentAPI.progress()) ?? .idle
+        if was != progress.syncing {
+            // A sync started or finished: show its effect now, not in 10 s.
+            await refreshOverview()
+            if !progress.syncing { await refreshFolders() }
         }
     }
 
@@ -45,6 +61,14 @@ final class AppModel: ObservableObject {
             overviewError = nil
         } catch {
             overviewError = error.localizedDescription
+            // The agent is gone (quit, stopped): drop what it last said rather
+            // than keep showing "Synced" in green. A slow answer keeps it.
+            let stopped = AgentAPI.endpoint() == nil ||
+                [URLError.cannotConnectToHost, .networkConnectionLost, .cannotFindHost].contains((error as? URLError)?.code)
+            if stopped {
+                overview = nil
+                await refreshConfig()
+            }
         }
         lastRefresh = Date()
     }
@@ -74,7 +98,10 @@ final class AppModel: ObservableObject {
             return overviewError == nil ? "Connecting…" : "The Stradl agent isn't running"
         }
         let a = o.agent
-        if a.syncing { return "Syncing…" }
+        if progress.syncing || a.syncing {
+            if progress.total > 0 { return "Syncing… \(progress.done) of \(progress.total.plural("file"))" }
+            return "Syncing…"
+        }
         if a.paused { return "Paused" }
         if let summary = a.lastErrorSummary, !summary.isEmpty { return summary }
         if let last = a.lastSyncAt { return "Synced \(last.ago) · \(o.totals.sessions.plural("session"))" }
@@ -84,7 +111,7 @@ final class AppModel: ObservableObject {
     enum Health { case good, working, attention, off }
     var health: Health {
         guard let a = overview?.agent else { return .off }
-        if a.syncing { return .working }
+        if a.syncing || progress.syncing { return .working }
         if a.paused { return .off }
         if let e = a.lastError, !e.isEmpty { return .attention }
         return .good

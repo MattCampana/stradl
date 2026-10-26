@@ -26,6 +26,19 @@ struct AgentInfo: Decodable {
     var lastErrorSummary: String?
     var version: String
     var pendingDesktopRestart: Int
+    var syncDone: Int?
+    var syncTotal: Int?
+}
+
+/// GET /api/progress: the running sync, cheap to poll every second.
+struct SyncProgress: Decodable, Equatable {
+    var syncing: Bool
+    var done: Int
+    var total: Int
+
+    static let idle = SyncProgress(syncing: false, done: 0, total: 0)
+    /// 0…1 once the sync knows how many files it handles, else nil.
+    var fraction: Double? { total > 0 ? min(1, Double(done) / Double(total)) : nil }
 }
 
 struct Device: Decodable, Identifiable, Hashable {
@@ -57,6 +70,8 @@ struct Pending: Decodable {
     var trash: Int?
     var conflicts: Int
     var files: [PendingFile]
+    /// False when storage didn't answer, so downloads are unknown.
+    var known: Bool?
 
     var total: Int { upload + download + merge + deferred + (delete ?? 0) + (trash ?? 0) }
 }

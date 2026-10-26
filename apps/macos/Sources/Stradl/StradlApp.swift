@@ -104,10 +104,14 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button { model.syncNow() } label: {
-                        Label("Sync Now", systemImage: "arrow.triangle.2.circlepath")
+                        Label {
+                            Text("Sync Now")
+                        } icon: {
+                            Image(systemName: "arrow.triangle.2.circlepath").spinning(model.progress.syncing)
+                        }
                     }
-                    .help("Sync with your other Macs now (⌘R)")
-                    .disabled(model.busy.contains("sync") || !model.agentRunning)
+                    .help(model.progress.syncing ? "Syncing now" : "Sync with your other Macs now (⌘R)")
+                    .disabled(model.busy.contains("sync") || model.progress.syncing || !model.agentRunning)
                     Button { model.togglePause() } label: {
                         Label(model.paused ? "Resume" : "Pause", systemImage: model.paused ? "play.fill" : "pause.fill")
                     }
@@ -131,13 +135,26 @@ struct SidebarFooter: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        HStack(spacing: 8) {
-            StatusDot(health: model.health)
-            Text(model.statusLine)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-            Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if model.progress.syncing {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.blue)
+                        .spinning(true)
+                } else {
+                    StatusDot(health: model.health)
+                }
+                Text(model.statusLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .monospacedDigit()
+                Spacer(minLength: 0)
+            }
+            if model.progress.syncing, let f = model.progress.fraction {
+                ProgressView(value: f).progressViewStyle(.linear).controlSize(.small)
+            }
         }
         .padding(12)
     }

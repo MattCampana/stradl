@@ -345,17 +345,81 @@ func Save(cfg *Config) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	data, err := yaml.Marshal(cfg)
+	data, err := yaml.Marshal(cfg.forDisk())
 	if err != nil {
 		return fmt.Errorf("failed to serialize config: %w", err)
 	}
 
+	// Write a temp file and rename it over the config: a failed or
+	// interrupted write never leaves a truncated config.yaml (and with it,
+	// lost storage credentials).
 	configPath := ConfigFilePath()
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
+	tmp, err := os.CreateTemp(configDir, ".config-*.yaml")
+	if err != nil {
 		return fmt.Errorf("failed to write config: %w", err)
 	}
-
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), configPath); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
 	return nil
+}
+
+// forDisk returns a copy of the config with paths under home written as ~/…,
+// the form Load expands: Load turns them absolute in memory, and without this
+// every save would rewrite them absolute on disk (which also broke matching
+// extra_folders entries the way the user wrote them).
+func (c *Config) forDisk() *Config {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return c
+	}
+	cp := *c
+	cp.EncryptionKey = TildePath(home, c.EncryptionKey)
+	if len(c.ExtraFolders) > 0 {
+		cp.ExtraFolders = make([]string, len(c.ExtraFolders))
+		for i, p := range c.ExtraFolders {
+			cp.ExtraFolders[i] = TildePath(home, p)
+		}
+	}
+	if len(c.PathMap) > 0 {
+		cp.PathMap = make(map[string]string, len(c.PathMap))
+		for p, name := range c.PathMap {
+			cp.PathMap[TildePath(home, p)] = name
+		}
+	}
+	return &cp
+}
+
+// TildePath writes p as ~/… when it lies inside home (as ~ for home itself),
+// and leaves any other path as it is.
+func TildePath(home, p string) string {
+	if p == "" || home == "" || strings.HasPrefix(p, "~") {
+		return p
+	}
+	clean := filepath.Clean(p)
+	if clean == filepath.Clean(home) {
+		return "~"
+	}
+	if rel, err := filepath.Rel(home, clean); err == nil && rel != "." && !strings.HasPrefix(rel, "..") && filepath.IsAbs(clean) {
+		return "~/" + filepath.ToSlash(rel)
+	}
+	return p
 }
 
 func Exists() bool {

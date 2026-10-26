@@ -81,6 +81,9 @@ type Snapshot struct {
 	Status
 	Syncing    bool
 	AppRunning bool // Claude desktop app running at the last check
+	// SyncDone of SyncTotal files are handled in the sync running now
+	// (SyncTotal is 0 while it is still comparing).
+	SyncDone, SyncTotal int
 }
 
 // Runner is the background sync loop. It syncs at start, then whenever local
@@ -101,6 +104,8 @@ type Runner struct {
 	status     Status
 	syncing    bool
 	appRunning bool
+	syncDone   int // progress of the sync running now
+	syncTotal  int
 
 	// Loop state, owned by the Run goroutine.
 	paused      bool
@@ -206,7 +211,7 @@ func (r *Runner) Snapshot() Snapshot {
 	defer r.mu.Unlock()
 	st := r.status
 	st.PendingDesktop = append([]PendingBatch(nil), r.status.PendingDesktop...)
-	return Snapshot{Status: st, Syncing: r.syncing, AppRunning: r.appRunning}
+	return Snapshot{Status: st, Syncing: r.syncing, AppRunning: r.appRunning, SyncDone: r.syncDone, SyncTotal: r.syncTotal}
 }
 
 // SetPaused creates or removes the pause flag for p.
@@ -396,6 +401,11 @@ func (r *Runner) runSync(ctx context.Context, reason string) {
 	r.setSyncing(true)
 	start = r.o.Clock.Now()
 	sctx, cancel := context.WithTimeout(ctx, syncTimeout)
+	sctx = sync.WithProgress(sctx, func(done, total int) {
+		r.mu.Lock()
+		r.syncDone, r.syncTotal = done, total
+		r.mu.Unlock()
+	})
 	report, err := r.o.Sync(sctx, cfg)
 	cancel()
 	end := r.o.Clock.Now()
@@ -630,6 +640,7 @@ func (r *Runner) update(fn func(st *Status)) {
 func (r *Runner) setSyncing(v bool) {
 	r.mu.Lock()
 	r.syncing = v
+	r.syncDone, r.syncTotal = 0, 0
 	r.mu.Unlock()
 	r.changed()
 }

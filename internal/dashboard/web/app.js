@@ -835,7 +835,11 @@
     const p = S.ov.pending;
     const any = PENDING_KINDS.some((k) => p[k.key] > 0);
     const out = [];
-    if (!any) {
+    if (!any && p.known === false) {
+      out.push(h('div', { class: 'card all-clear' },
+        h('div', { class: 'hero-icon' }, icon('i-clock')),
+        h('div', {}, h('strong', { text: 'Not known yet. ' }), "Storage didn't answer, so what's waiting to download is unknown; nothing here needs uploading.")));
+    } else if (!any) {
       out.push(h('div', { class: 'card all-clear' },
         h('div', { class: 'hero-icon' }, icon('i-check')),
         h('div', {}, h('strong', { text: 'Nothing waiting. ' }), 'The next sync has nothing to upload, download or merge.')));
