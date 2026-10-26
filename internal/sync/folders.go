@@ -65,7 +65,18 @@ var cwdFieldRe = regexp.MustCompile(`"cwd"\s*:\s*("(?:[^"\\]|\\.)*")`)
 var filePathFieldRe = regexp.MustCompile(`"(?:file_path|notebook_path)"\s*:\s*("(?:[^"\\]|\\.)*")`)
 
 // maxTouched bounds the folders of touched files kept per transcript.
-const maxTouched = 500
+const maxTouched = 2000
+
+// neverProject reports home-relative folders a touched file can't make a
+// project folder of: caches, toolchains and package stores, credentials.
+func neverProject(rel string) bool {
+	for _, p := range []string{"Library", ".Trash", ".claude", ".stradl", ".cache", ".npm", ".cargo", ".rustup", "go/pkg", ".gradle", ".m2", ".nvm", ".pyenv", ".local/share", ".bun", ".deno"} {
+		if rel == p || strings.HasPrefix(rel, p+"/") {
+			return true
+		}
+	}
+	return credentialRel(rel) || strings.Contains("/"+rel+"/", "/node_modules/")
+}
 
 // homeRel returns abs relative to home as a slash path, when abs lies strictly
 // inside home.
@@ -104,6 +115,14 @@ var credentialDirs = map[string]bool{
 	".docker": true, ".password-store": true, ".config/gcloud": true, ".config/gh": true,
 }
 
+// credentialRel reports whether a home-relative path is, or lies in, a
+// credential folder.
+func credentialRel(rel string) bool {
+	first, rest, _ := strings.Cut(rel, "/")
+	second, _, _ := strings.Cut(rest, "/")
+	return credentialDirs[first] || (rest != "" && credentialDirs[first+"/"+second])
+}
+
 // folderAllowed reports whether a home-relative folder may be a sync root.
 // Home itself never is, and neither is anything inside Stradl's or Claude's
 // own folders, credential folders (credentialDirs), the Trash, or ~/Library (where iCloud Drive and other cloud
@@ -112,11 +131,10 @@ func (s *Syncer) folderAllowed(rel string) bool {
 	if !isCanonicalRel(rel) {
 		return false
 	}
-	first, rest, _ := strings.Cut(rel, "/")
-	second, _, _ := strings.Cut(rest, "/")
-	if credentialDirs[first] || (rest != "" && credentialDirs[first+"/"+second]) {
+	if credentialRel(rel) {
 		return false // credentials stay on each Mac
 	}
+	first, _, _ := strings.Cut(rel, "/")
 	switch first {
 	case ".claude", ".stradl", ".claude-sync", ".Trash":
 		return false
@@ -154,6 +172,15 @@ func (s *Syncer) canonicalFolderIn(abs string, remoteRepos map[string]bool) stri
 	if s.folderGate(abs) != nil {
 		return "" // macOS hasn't let Stradl look there yet
 	}
+	if viaSymlink(s.home, abs) {
+		// A folder reached through a symbolic link syncs where it really
+		// is (inside home), never as the link.
+		real, ok := s.realUnderHome(abs)
+		if !ok {
+			return ""
+		}
+		return s.canonicalFolderIn(real, remoteRepos)
+	}
 	// The nearest enclosing repository below home wins; a dotfiles repository
 	// at home itself never swallows every folder.
 	for dir := abs; dir != filepath.Clean(s.home) && isWithin(s.home, dir); dir = filepath.Dir(dir) {
@@ -166,6 +193,46 @@ func (s *Syncer) canonicalFolderIn(abs string, remoteRepos map[string]bool) stri
 		}
 	}
 	return rel
+}
+
+// realUnderHome resolves symbolic links in abs and returns where it really
+// is, spelled under home; false when that is outside home or unresolvable.
+func (s *Syncer) realUnderHome(abs string) (string, bool) {
+	real, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", false
+	}
+	realHome, err := filepath.EvalSymlinks(s.home)
+	if err != nil {
+		return "", false
+	}
+	r, ok := homeRel(realHome, real)
+	if !ok {
+		return "", false
+	}
+	out := filepath.Join(s.home, filepath.FromSlash(r))
+	return out, !viaSymlink(s.home, out)
+}
+
+// viaSymlink reports whether a folder below home, or one on the way to it,
+// is a symbolic link.
+func viaSymlink(home, abs string) bool {
+	rel, ok := homeRel(home, abs)
+	if !ok {
+		return false
+	}
+	p := filepath.Clean(home)
+	for _, seg := range strings.Split(rel, "/") {
+		p = filepath.Join(p, seg)
+		fi, err := os.Lstat(p)
+		if err != nil {
+			return false // missing here: nothing to follow
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // discoverFolders returns the project folders to sync, relative to home: the
@@ -211,17 +278,30 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	// cd anywhere else (into ~/.ssh) doesn't make a project folder.
 	primary := append([]string(nil), candidates...)
 	for _, p := range later {
-		if !seen[p] && filepath.IsAbs(p) && insideAny(s.home, primary, filepath.Clean(p), fold) {
+		if seen[p] || !filepath.IsAbs(p) {
+			continue
+		}
+		p = filepath.Clean(p)
+		if viaSymlink(s.home, p) {
+			real, ok := s.realUnderHome(p)
+			if !ok {
+				continue
+			}
+			p = real // judged by where it really is
+		}
+		if insideAny(s.home, primary, p, fold) {
 			add(p)
 		}
 	}
 	// The folders the last sync covered stay, so a folder whose sessions
 	// are gone keeps syncing; a repository inside another folder stays only
-	// while a session (or a marker) needs it.
+	// while a session (or a marker) needs it, except for the local probe,
+	// which watches exactly what the last sync covered.
 	known := s.knownFolderList()
 	sort.SliceStable(known, func(i, j int) bool { return strings.Count(known[i], "/") < strings.Count(known[j], "/") })
+	probe := objects == nil && !useCache // the agent's local probe: no markers to go by
 	for _, rel := range known {
-		if !insideAny(s.home, candidates, filepath.Join(s.home, filepath.FromSlash(rel)), fold) || containsFold(candidates, rel, fold) {
+		if probe || !insideAny(s.home, candidates, filepath.Join(s.home, filepath.FromSlash(rel)), fold) || containsFold(candidates, rel, fold) {
 			add(filepath.Join(s.home, filepath.FromSlash(rel)))
 		}
 	}
@@ -481,7 +561,7 @@ func (s *Syncer) transcriptCwds(useCache bool) (first, later []string) {
 					if info, err := a.Info(); err == nil {
 						e := read(filepath.Join(sub, a.Name()), "projects/"+d.Name()+"/"+name+"/subagents/"+a.Name(), info)
 						later = append(later, e.Cwds...)
-						later = append(later, e.Touched...)
+						later = append(later, e.touchedDirs()...)
 					}
 				}
 				continue
@@ -498,7 +578,7 @@ func (s *Syncer) transcriptCwds(useCache bool) (first, later []string) {
 				first = append(first, e.Cwds[0])
 				later = append(later, e.Cwds[1:]...)
 			}
-			later = append(later, e.Touched...)
+			later = append(later, e.touchedDirs()...)
 		}
 	}
 	if useCache && s.state != nil {
@@ -577,10 +657,17 @@ func updateCwds(p string, e cwdEntry, size int64, home string) cwdEntry {
 				if json.Unmarshal(m[1], &p) != nil || !filepath.IsAbs(p) {
 					continue
 				}
-				if _, ok := homeRel(home, filepath.Dir(filepath.Clean(p))); !ok {
-					continue // never a project folder
+				dir := filepath.Dir(filepath.Clean(p))
+				if r, ok := homeRel(home, dir); !ok || neverProject(r) {
+					continue
 				}
-				if dir := filepath.Dir(filepath.Clean(p)); !seen["\x00"+dir] && len(touched) < maxTouched {
+				if len(cwds) > 0 {
+					// Inside where the session started: kept short.
+					if r, err := filepath.Rel(cwds[0], dir); err == nil && r != ".." && !strings.HasPrefix(r, "../") && !filepath.IsAbs(r) {
+						dir = "./" + filepath.ToSlash(r)
+					}
+				}
+				if !seen["\x00"+dir] && len(touched) < maxTouched {
 					seen["\x00"+dir] = true
 					touched = append(touched, dir)
 				}
@@ -614,11 +701,13 @@ func tailSum(f *os.File, pos int64) uint32 {
 // folderRoot builds the sync root for a home-relative project folder.
 func (s *Syncer) folderRoot(rel string) *syncRoot {
 	return &syncRoot{
-		dir:      filepath.Join(s.home, filepath.FromSlash(rel)),
-		prefix:   FoldersPrefix + rel + "/",
-		paths:    []string{"."},
-		include:  s.folderInclude,
-		skipDir:  s.folderSkipDir,
+		dir:    filepath.Join(s.home, filepath.FromSlash(rel)),
+		prefix: FoldersPrefix + rel + "/",
+		paths:  []string{"."},
+		// A credential folder inside it (~/.config/gh in ~/.config) stays
+		// on each Mac.
+		include:  func(r string) bool { return s.folderInclude(r) && !credentialRel(rel+"/"+r) },
+		skipDir:  func(r string) bool { return s.folderSkipDir(r) || credentialRel(rel+"/"+r) },
 		kind:     rootFolder,
 		label:    "~/" + rel,
 		perm:     0644,
@@ -649,12 +738,28 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 				outer.children[child] = true
 				outer.modules[m] = true
 				outer.moduleOf[child] = m
+				if len(s.cfg.FolderExclude) > 0 {
+					// folder_exclude patterns written for the outer folder
+					// ("lib/.env") still apply inside it.
+					inc, skip, c := inner.include, inner.skipDir, child
+					inner.include = func(r string) bool { return inc(r) && !s.cfg.IsFolderExcluded(c+"/"+r) }
+					inner.skipDir = func(r string) bool { return skip(r) || s.cfg.IsFolderExcluded(c+"/"+r) }
+				}
 			}
 		}
 	}
 	markers := make(map[string]bool)
 	for _, rel := range remoteFolderMarkers(objects) {
 		markers[rel] = true
+	}
+	for _, r := range folders {
+		// A registered submodule never belongs to the repository holding
+		// it, whatever its folder holds here (git tracks nothing under it).
+		for _, p := range submodulePaths(r.dir) {
+			if !r.children[p] {
+				r.nested[p] = true
+			}
+		}
 	}
 	for _, r := range folders {
 		rel := strings.TrimSuffix(strings.TrimPrefix(r.prefix, FoldersPrefix), "/")
@@ -732,13 +837,10 @@ func moduleDir(outerDir, childDir, child string) string {
 // that repository's data in this one's .git/modules (a submodule) as its.
 func (r *syncRoot) owns(rel string) bool {
 	if rest, ok := strings.CutPrefix(rel, ".git/modules/"); ok {
-		// Submodule data syncs only for a submodule a session needs.
-		for i := 0; i < len(rest); i++ {
-			if rest[i] == '/' && r.modules[rest[:i]] {
-				return true
-			}
-		}
-		return false
+		// Submodule data syncs only for a submodule a session needs, each
+		// nested submodule's on its own.
+		m := innermostModule(rest)
+		return m != "" && r.modules[m]
 	}
 	if strings.Contains(rel, "/.git/") || strings.HasSuffix(rel, "/.git") {
 		return false // another repository's git data, or a stray .git: never this folder's
@@ -755,8 +857,11 @@ func (r *syncRoot) owns(rel string) bool {
 // a needed submodule's data, or a folder on the way to it.
 func (r *syncRoot) wantsModuleDir(rest string) bool {
 	for c := range r.modules {
-		if rest == c || strings.HasPrefix(rest, c+"/") || strings.HasPrefix(c, rest+"/") {
-			return true
+		if rest == c || strings.HasPrefix(c, rest+"/") {
+			return true // the submodule's data, or a folder on the way to it
+		}
+		if tail, ok := strings.CutPrefix(rest, c+"/"); ok && tail != "modules" && !strings.HasPrefix(tail, "modules/") {
+			return true // inside it, outside its own submodules' data
 		}
 	}
 	return false
@@ -790,10 +895,61 @@ func plainDir(abs string) bool {
 	if err != nil || !fi.IsDir() {
 		return false
 	}
-	if _, err := os.Lstat(filepath.Join(abs, ".git")); err != nil {
-		return errors.Is(err, fs.ErrNotExist)
+	if _, err := os.Lstat(filepath.Join(abs, ".git")); err == nil {
+		return !isRepoDir(abs)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false
 	}
-	return !isRepoDir(abs)
+	// An empty folder isn't plain: it may be a submodule not checked out
+	// (`git submodule deinit`, or placed by placeSubmodules), and it has
+	// nothing of its own to protect.
+	f, err := os.Open(abs)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+	names, _ := f.Readdirnames(1)
+	return len(names) > 0
+}
+
+// submodulePaths returns the submodule paths a repository's .gitmodules
+// registers, relative to dir.
+func submodulePaths(dir string) []string {
+	f, err := os.Open(filepath.Join(dir, ".gitmodules"))
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, 1<<20))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if !ok || strings.TrimSpace(k) != "path" {
+			continue
+		}
+		p := path.Clean(strings.Trim(strings.TrimSpace(v), `"`))
+		if p == "." || p == ".." || strings.HasPrefix(p, "../") || strings.HasPrefix(p, "/") || hasGitSegment(p) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// folderTracked reports whether cwd is, or lies in, a project folder this
+// Mac has synced files of.
+func (s *Syncer) folderTracked(cwd string) bool {
+	rel, ok := homeRel(s.home, cwd)
+	for ok && rel != "." && rel != "" {
+		if s.state != nil && s.state.hasPrefix(FoldersPrefix+rel+"/") {
+			return true
+		}
+		rel = path.Dir(rel)
+	}
+	return false
 }
 
 // gitfileTarget returns where the .git file of the repository at dir points
@@ -943,6 +1099,9 @@ func (s *Syncer) gitfileBusy(dir string) error {
 	gitdir, err := gitfileTarget(dir)
 	if err != nil || gitdir == "" {
 		return nil
+	}
+	if _, ok := homeRel(s.home, gitdir); !ok {
+		return nil // another volume (whose first read macOS may ask about) or system folder: not checked
 	}
 	if err := s.folderGate(gitdir); err != nil {
 		return err

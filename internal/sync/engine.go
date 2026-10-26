@@ -82,6 +82,14 @@ type syncRoot struct {
 	// own yet (it has no marker), so they stopped updating when the Macs
 	// upgraded, and this Mac's copy is the reference (see chooseSide).
 	stale bool
+	// inherited marks a repository inside another folder syncing on its own
+	// for the first time with state from when it synced as part of that
+	// folder.
+	inherited bool
+	// populated is set when this pass found files of the root here, and
+	// syncedHere when this Mac's state has any (it synced the root, or the
+	// folder holding it, before).
+	populated, syncedHere bool
 }
 
 type localFile struct {
@@ -503,6 +511,11 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		case err != nil:
 			return nil, fmt.Errorf("failed to scan %s: %w", root.dir, err)
 		}
+		if root.kind == rootFolder && err == nil && !wasRoot[root.prefix] && insideFolder(roots, root) && s.state.hasPrefix(root.prefix) {
+			root.inherited = true
+		}
+		root.populated = len(files) > 0
+		root.syncedHere = root.kind == rootFolder && s.state.hasPrefix(root.prefix)
 		for rel, info := range files {
 			local[root.prefix+rel] = &localFile{root: root, rel: rel, abs: filepath.Join(root.dir, filepath.FromSlash(rel)), info: info}
 		}
@@ -670,7 +683,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			if restored {
 				kind = "restore"
 			}
-			looseRef := !hasState && root.kind == rootFolder && gitBranchRefRe.MatchString(np) && !s.repoSyncedBefore(np)
+			looseRef := !hasState && root.kind == rootFolder && isGitBranchRef(np) && !s.repoSyncedBefore(np)
 			jobs = append(jobs, job{np, kind, root, func() error {
 				if looseRef {
 					if settled, err := s.firstContactLooseRef(ctx, np, lf); settled || err != nil {
@@ -689,6 +702,17 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 				return nil
 			}})
 
+		case lf == nil && hasRemote && !hasState && root.kind == rootFolder && ((root.stale && root.populated && !root.syncedHere) || s.state.isIgnored(np, robj.ETag)):
+			// Only the stored copy of a stale repository has it, and this Mac
+			// has its own copy and never synced this one: a file this Mac's
+			// newer clone deleted, or git state from another Mac's old
+			// checkout (a merge in progress). It stays out on this Mac until
+			// someone changes it.
+			if !dryRun {
+				s.state.ignore(np, robj.ETag)
+			}
+			continue
+
 		case lf == nil && hasRemote:
 			if hasState && !remoteChanged {
 				if mirror {
@@ -700,7 +724,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 					continue
 				}
 				switch {
-				case root.kind == rootFolder && gitBranchRefRe.MatchString(np):
+				case root.kind == rootFolder && isGitBranchRef(np):
 					// A branch deleted here (or packed by gc) comes back
 					// while storage has it: another Mac's HEAD may name it,
 					// and a packed copy of it is merged on the way in.
@@ -805,6 +829,15 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		}})
 	}
 
+	if !dryRun {
+		s.state.pruneIgnored(func(np string) bool {
+			if _, _, in := active(np); !in {
+				return true
+			}
+			_, ok := remote[np]
+			return ok
+		})
+	}
 	jobs, report.Warnings = s.guardMassDeletes(jobs, roots, known)
 	report.Warnings = append(report.Warnings, lockWarnings...)
 	report.Warnings = append(report.Warnings, s.tccWarnings()...)
@@ -1194,7 +1227,7 @@ func (s *Syncer) fetch(ctx context.Context, npath, key string, repos *repoIndex,
 	if strings.HasPrefix(npath, DesktopPrefix) {
 		held := remoteControlled(data)
 		data = s.paths.ResolveContent("record.json", data)
-		data = finishDesktopDownload(data, home, repos)
+		data = finishDesktopDownload(data, home, repos, s.folderTracked)
 		if held {
 			return data, etag, errRemoteControlled
 		}
@@ -1636,7 +1669,7 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 			} else {
 				result, writeHere = remoteData, true
 				loser, origin = localData, ConflictFromThisMac
-				if strings.HasSuffix(npath, ".git/packed-refs") && s.state.GetFile(npath) == nil {
+				if _, inside, _ := gitDirSplit(npath); inside == "packed-refs" && s.state.GetFile(npath) == nil {
 					// First contact: keep the refs only this Mac has.
 					result = mergePackedRefs(remoteData, localData)
 					uploadThere = !bytes.Equal(result, remoteData)

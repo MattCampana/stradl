@@ -110,9 +110,6 @@ func gitFileState(abs string) gitFile {
 	return gitWork
 }
 
-// loose branch refs: <folder>/.git/refs/heads/<branch>
-var gitBranchRefRe = regexp.MustCompile(`(^|/)\.git/refs/heads/(.+)$`)
-
 var gitSHARe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 
 // keptBranchPrefix holds branches the sync creates for commits that would
@@ -129,21 +126,19 @@ const keptBranchPrefix = "stradl/"
 func (s *Syncer) keepLosingBranch(ctx context.Context, npath, abs string, winner, loser []byte, winnerIsRemote bool) {
 	gitDir, gitNP := "", ""
 	var lost, kept map[string]string // branch -> sha
-	if m := gitBranchRefRe.FindStringSubmatch(npath); m != nil {
+	dir, inside, _ := gitDirSplit(filepath.ToSlash(abs))
+	if branch, ok := gitBranchRef(npath); ok {
 		gitDir = refGitDir(abs)
-		lost = map[string]string{m[2]: strings.TrimSpace(string(loser))}
-		kept = map[string]string{m[2]: strings.TrimSpace(string(winner))}
-	} else if strings.HasSuffix(npath, ".git/HEAD") || strings.HasSuffix(npath, ".git/refs/stash") {
+		lost = map[string]string{branch: strings.TrimSpace(string(loser))}
+		kept = map[string]string{branch: strings.TrimSpace(string(winner))}
+	} else if inside == "HEAD" || inside == "refs/stash" {
 		// A detached HEAD, or the latest stash: commits no branch holds.
 		name := filepath.Base(abs)
-		gitDir = filepath.Dir(abs)
-		if name == "stash" {
-			gitDir = filepath.Dir(gitDir)
-		}
+		gitDir = filepath.FromSlash(dir)
 		lost = map[string]string{name: strings.TrimSpace(string(loser))}
 		kept = map[string]string{name: strings.TrimSpace(string(winner))}
-	} else if strings.HasSuffix(npath, ".git/packed-refs") {
-		gitDir, gitNP = filepath.Dir(abs), strings.TrimSuffix(npath, "packed-refs")
+	} else if inside == "packed-refs" {
+		gitDir, gitNP = filepath.FromSlash(dir), strings.TrimSuffix(npath, "packed-refs")
 		lost, kept = packedBranches(loser), packedBranches(winner)
 	}
 	if gitDir == "" {
@@ -199,12 +194,12 @@ func (s *Syncer) looseRef(ctx context.Context, gitNP, headsDir, branch string, r
 // Mac's ref goes to the conflicts folder and its commit stays reachable on a
 // stradl/ branch. It reports whether it settled the ref.
 func (s *Syncer) firstContactLooseRef(ctx context.Context, npath string, lf *localFile) (bool, error) {
-	m := gitBranchRefRe.FindStringSubmatch(npath)
-	i := strings.LastIndex(npath, ".git/refs/heads/")
-	if m == nil || i < 0 {
+	branch, ok := gitBranchRef(npath)
+	dir, _, _ := gitDirSplit(npath)
+	if !ok {
 		return false, nil
 	}
-	packedNP := npath[:i] + ".git/packed-refs"
+	packedNP := dir + "/packed-refs"
 	packed, _, err := s.fetch(ctx, packedNP, s.engineRemoteKey(packedNP), nil, s.home)
 	if errors.Is(err, storage.ErrNotFound) {
 		return false, nil
@@ -212,7 +207,7 @@ func (s *Syncer) firstContactLooseRef(ctx context.Context, npath string, lf *loc
 	if err != nil {
 		return false, err
 	}
-	ref := packedBranches(packed)[m[2]]
+	ref := packedBranches(packed)[branch]
 	local, err := os.ReadFile(lf.abs)
 	if err != nil || ref == "" || strings.TrimSpace(string(local)) == ref {
 		return false, err
@@ -294,16 +289,8 @@ func packedBranches(data []byte) map[string]string {
 // in a pass, so a ref never reaches a Mac before the objects it points to,
 // and conflicts in a working tree are judged against this Mac's own index.
 func gitMetadata(npath string) bool {
-	i := strings.Index(npath, "/.git/")
-	switch {
-	case i >= 0:
-		npath = npath[i+len("/.git/"):]
-	case strings.HasPrefix(npath, ".git/"):
-		npath = strings.TrimPrefix(npath, ".git/")
-	default:
-		return false
-	}
-	return !strings.HasPrefix(npath, "objects/") && !strings.Contains(npath, "/objects/")
+	_, inside, ok := gitDirSplit(npath)
+	return ok && !strings.HasPrefix(inside, "objects/")
 }
 
 // sideChoice says which copy of a non-mergeable file that differs on both
@@ -337,16 +324,17 @@ func (s *Syncer) chooseSide(npath string, lf *localFile, info os.FileInfo, local
 	if lf.root == nil || lf.root.kind != rootFolder {
 		return newest
 	}
-	if lf.root.stale {
-		// The copy in storage stopped updating long ago (see syncRoot.stale):
-		// this Mac's copy is the reference, the stored one goes aside.
+	if lf.root.stale && !lf.root.syncedHere {
+		// The copy in storage stopped updating long ago (see syncRoot.stale)
+		// and this Mac never synced this repository: this Mac's copy is the
+		// reference, git's files included, and the stored one goes aside.
 		return sideChoice{local: true, keep: true, aside: true}
 	}
 	if hasGitSegment(npath) {
 		if !s.repoSyncedBefore(npath) {
 			return sideChoice{keep: true} // aside: conflictsAside covers .git
 		}
-		if gitBranchRefRe.MatchString(npath) && localData != nil && remoteData != nil {
+		if isGitBranchRef(npath) && localData != nil && remoteData != nil {
 			if local, ok := gitFastForward(lf.abs, localData, remoteData); ok {
 				return sideChoice{local: local}
 			}
@@ -354,6 +342,12 @@ func (s *Syncer) chooseSide(npath string, lf *localFile, info os.FileInfo, local
 		return newest
 	}
 	if s.state.GetFile(npath) != nil {
+		if lf.root.inherited {
+			// Its state is from when it synced inside the folder holding
+			// it: both sides changed since mostly means both pulled, so the
+			// other copy goes aside instead of beside the file.
+			newest.aside = true
+		}
 		return newest
 	}
 	if isSymlink(info) {
@@ -369,11 +363,11 @@ func (s *Syncer) chooseSide(npath string, lf *localFile, info os.FileInfo, local
 // holding the .git path npath before this pass (it knows the repository's
 // HEAD). A repository it never synced takes the reference copy's git files.
 func (s *Syncer) repoSyncedBefore(npath string) bool {
-	i := strings.LastIndex("/"+npath, "/.git/")
-	if i < 0 {
+	dir, _, ok := gitDirSplit(npath)
+	if !ok {
 		return true
 	}
-	_, ok := s.known[npath[:i]+".git/HEAD"]
+	_, ok = s.known[dir+"/HEAD"]
 	return ok
 }
 
@@ -416,22 +410,20 @@ func gitFastForward(abs string, localData, remoteData []byte) (local, ok bool) {
 
 // refGitDir returns the .git directory holding the loose ref file at abs.
 func refGitDir(abs string) string {
-	slash := filepath.ToSlash(abs)
-	i := strings.LastIndex(slash, "/.git/refs/")
-	if i < 0 {
+	dir, inside, ok := gitDirSplit(filepath.ToSlash(abs))
+	if !ok || !strings.HasPrefix(inside, "refs/") {
 		return ""
 	}
-	return filepath.FromSlash(slash[:i+len("/.git")])
+	return filepath.FromSlash(dir)
 }
 
 // gitUnionPath reports git objects and refs (loose refs and the reflogs that
 // go with them), which keep union semantics (see unionPath).
 func gitUnionPath(npath string) bool {
-	i := strings.LastIndex("/"+npath, "/.git/")
-	if i < 0 {
+	_, inside, ok := gitDirSplit(npath)
+	if !ok {
 		return false
 	}
-	inside := npath[i+len(".git/"):]
 	return strings.HasPrefix(inside, "objects/") || strings.HasPrefix(inside, "refs/") || strings.HasPrefix(inside, "logs/refs/")
 }
 
@@ -441,11 +433,10 @@ func gitUnionPath(npath string) bool {
 // and linked worktrees' admin folders, which hold absolute paths into this
 // Mac's home and which `git worktree prune` deletes on any Mac lacking them.
 func gitPerMac(rel string) bool {
-	i := strings.LastIndex("/"+rel, "/.git/")
-	if i < 0 {
+	_, inside, ok := gitDirSplit(rel)
+	if !ok {
 		return false
 	}
-	inside := rel[i+len(".git/"):]
 	return inside == "index" || inside == "worktrees" || strings.HasPrefix(inside, "worktrees/")
 }
 
@@ -458,16 +449,14 @@ const reindexMarker = ".stradl-reindex"
 // folders, and git refuses a .git without refs/ and objects/), and when the
 // file is HEAD, a ref or packed-refs it marks the index for rebuilding.
 func (s *Syncer) wroteGitFile(abs string) {
-	slash := filepath.ToSlash(abs)
-	i := strings.LastIndex(slash, "/.git/")
-	if i < 0 {
+	dir, inside, ok := gitDirSplit(filepath.ToSlash(abs))
+	if !ok {
 		return
 	}
-	gitDir := filepath.FromSlash(slash[:i+len("/.git")])
+	gitDir := filepath.FromSlash(dir)
 	for _, d := range []string{"refs/heads", "refs/tags", "objects/info", "objects/pack"} {
 		_ = os.MkdirAll(filepath.Join(gitDir, filepath.FromSlash(d)), 0755)
 	}
-	inside := slash[i+len("/.git/"):]
 	if inside != "HEAD" && inside != "packed-refs" && !strings.HasPrefix(inside, "refs/heads/") {
 		return
 	}
@@ -504,6 +493,14 @@ func (s *Syncer) reindexRepos(roots []*syncRoot) {
 		}
 		if r.kind == rootFolder && !r.deferred {
 			gd := filepath.Join(r.dir, ".git")
+			if target, err := gitfileTarget(r.dir); err == nil && target != "" {
+				// A submodule: its git data is in the superproject's
+				// .git/modules (only inside home, past the privacy gate).
+				if _, ok := homeRel(s.home, target); !ok || s.folderGate(target) != nil {
+					continue
+				}
+				gd = target
+			}
 			if _, err := os.Stat(filepath.Join(gd, reindexMarker)); err == nil {
 				dirs[gd] = true
 			}
@@ -513,7 +510,10 @@ func (s *Syncer) reindexRepos(roots []*syncRoot) {
 		if _, err := os.Stat(filepath.Join(gitDir, "index.lock")); err == nil {
 			continue
 		}
-		work := filepath.Dir(gitDir)
+		work := gitWorkTree(gitDir)
+		if work == "" {
+			continue
+		}
 		if _, err := runGit(work, "--git-dir="+gitDir, "--work-tree="+work, "rev-parse", "--verify", "-q", "HEAD^{commit}"); err != nil {
 			continue // HEAD's commit hasn't arrived yet (or no commits): next pass
 		}
@@ -525,6 +525,24 @@ func (s *Syncer) reindexRepos(roots []*syncRoot) {
 		_ = os.Remove(filepath.Join(gitDir, reindexMarker))
 		placeSubmodules(work, gitDir, rootDirs)
 	}
+}
+
+// gitWorkTree returns the working tree of the git directory gitDir: the
+// folder holding a .git folder, or for a submodule's .git/modules/<name>
+// the core.worktree its config names ("" when unknown).
+func gitWorkTree(gitDir string) string {
+	if filepath.Base(gitDir) == ".git" {
+		return filepath.Dir(gitDir)
+	}
+	out, err := runGit(gitDir, "--git-dir="+gitDir, "config", "--get", "core.worktree")
+	wt := strings.TrimSpace(string(out))
+	if err != nil || wt == "" {
+		return ""
+	}
+	if !filepath.IsAbs(wt) {
+		wt = filepath.Join(gitDir, wt)
+	}
+	return filepath.Clean(wt)
 }
 
 // placeSubmodules creates the empty folder of each submodule HEAD records
@@ -571,8 +589,8 @@ func packedValue(gitDir, branch string) string {
 // as is it would override this Mac's branch. It returns the local value so
 // the caller can merge the two like any ref conflict.
 func shadowsPackedRef(npath, abs string) (string, bool) {
-	m := gitBranchRefRe.FindStringSubmatch(npath)
-	if m == nil {
+	branch, ok := gitBranchRef(npath)
+	if !ok {
 		return "", false
 	}
 	if _, err := os.Lstat(abs); err == nil {
@@ -582,14 +600,9 @@ func shadowsPackedRef(npath, abs string) (string, bool) {
 	if gitDir == "" {
 		return "", false
 	}
-	v := packedValue(gitDir, m[2])
+	v := packedValue(gitDir, branch)
 	return v, v != ""
 }
-
-// loose objects: <folder>/.git/objects/<2 hex>/<38 or 62 hex>
-var gitLooseObjectRe = regexp.MustCompile(`(^|/)\.git/objects/([0-9a-f]{2})/([0-9a-f]{38}|[0-9a-f]{62})$`)
-
-func gitLooseObject(npath string) bool { return gitLooseObjectRe.MatchString(npath) }
 
 // objectCheck is a loose object this Mac deleted that storage still has.
 type objectCheck struct {
@@ -605,19 +618,18 @@ type objectCheck struct {
 func (s *Syncer) missingObjects(checks []objectCheck, dryRun bool) []objectCheck {
 	byRepo := make(map[string][]objectCheck)
 	for _, c := range checks {
-		abs := filepath.ToSlash(filepath.Join(c.root.dir, filepath.FromSlash(c.rel)))
-		i := strings.LastIndex(abs, "/.git/objects/")
-		gitDir := filepath.FromSlash(abs[:i+len("/.git")])
+		dir, _, _ := gitDirSplit(filepath.ToSlash(filepath.Join(c.root.dir, filepath.FromSlash(c.rel))))
+		gitDir := filepath.FromSlash(dir)
 		byRepo[gitDir] = append(byRepo[gitDir], c)
 	}
 	var missing []objectCheck
 	for gitDir, cs := range byRepo {
 		var in strings.Builder
 		for _, c := range cs {
-			m := gitLooseObjectRe.FindStringSubmatch(c.np)
-			in.WriteString(m[2] + m[3] + "\n")
+			id, _ := gitLooseObjectID(c.np)
+			in.WriteString(id + "\n")
 		}
-		out, err := runGitInput(filepath.Dir(gitDir), in.String(), "--git-dir="+gitDir, "cat-file", "--batch-check=%(objectname)")
+		out, err := runGitInput(gitDir, in.String(), "--git-dir="+gitDir, "cat-file", "--batch-check=%(objectname)")
 		if err != nil {
 			continue // can't tell: leave them as they are
 		}
@@ -655,13 +667,11 @@ func runGitInput(dir, input string, args ...string) ([]byte, error) {
 // would leave "bad object HEAD". The write waits for a later pass instead.
 // Files that aren't refs, and Macs without git, always count as ready.
 func gitRefsReady(abs string, data []byte) bool {
-	slash := filepath.ToSlash(abs)
-	i := strings.LastIndex(slash, "/.git/")
-	if i < 0 {
+	dir, inside, ok := gitDirSplit(filepath.ToSlash(abs))
+	if !ok {
 		return true
 	}
-	gitDir := filepath.FromSlash(slash[:i+len("/.git")])
-	inside := slash[i+len("/.git/"):]
+	gitDir := filepath.FromSlash(dir)
 	var shas []string
 	switch {
 	case inside == "packed-refs":
@@ -680,7 +690,7 @@ func gitRefsReady(abs string, data []byte) bool {
 	for _, sha := range shas {
 		in.WriteString(sha + "^{commit}\n")
 	}
-	out, err := runGitInput(filepath.Dir(gitDir), in.String(), "--git-dir="+gitDir, "cat-file", "--batch-check=%(objectname)")
+	out, err := runGitInput(gitDir, in.String(), "--git-dir="+gitDir, "cat-file", "--batch-check=%(objectname)")
 	if err != nil {
 		return true // git couldn't answer (not a repository yet): don't block
 	}

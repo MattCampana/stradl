@@ -85,10 +85,12 @@ func prepareDesktopUpload(data []byte) []byte {
 // already resolved for this device, and makes sure its folder exists here. A
 // folder that is missing locally is replaced by this device's clone of the
 // same git repository when there is one; a missing non-repository folder under
-// home (such as an app scratch folder) is created empty so the session opens.
-// A repository with no local clone is left as is, and the app reports the
-// folder missing.
-func finishDesktopDownload(data []byte, home string, repos *repoIndex) []byte {
+// home (such as an app scratch folder) is created empty so the session opens,
+// unless it is a project folder sync tracks (tracked): one missing there was
+// deleted or moved on this Mac, and an empty folder in its place would make
+// its files look deleted. A repository with no local clone is left as is,
+// and the app reports the folder missing.
+func finishDesktopDownload(data []byte, home string, repos *repoIndex, tracked func(cwd string) bool) []byte {
 	m, ok := decodeRecord(data)
 	if !ok {
 		return data
@@ -115,7 +117,7 @@ func finishDesktopDownload(data []byte, home string, repos *repoIndex) []byte {
 				}
 				rewritePathFields(m, cwd, target)
 			}
-		case home != "" && isWithin(home, cwd) && filepath.Clean(cwd) != filepath.Clean(home):
+		case home != "" && isWithin(home, cwd) && filepath.Clean(cwd) != filepath.Clean(home) && (tracked == nil || !tracked(cwd)):
 			_ = os.MkdirAll(cwd, 0700)
 		}
 	}

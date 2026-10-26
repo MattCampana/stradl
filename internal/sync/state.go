@@ -49,11 +49,24 @@ type cwdEntry struct {
 	// Scanned bytes (transcripts only grow, so later reads resume there).
 	Cwds    []string `json:"cwds,omitempty"`
 	Scanned int64    `json:"scanned,omitempty"`
-	// Touched are the folders of files its tools read or edited.
+	// Touched are the folders of files its tools read or edited; "./x"
+	// is relative to the first of Cwds.
 	Touched []string `json:"touched,omitempty"`
 	// Tail checksums the bytes just before Scanned: a merge that inserts
 	// lines earlier in the file shifts them, and the file is read again.
 	Tail uint32 `json:"tail,omitempty"`
+}
+
+// touchedDirs returns Touched as absolute folders.
+func (e cwdEntry) touchedDirs() []string {
+	out := make([]string, 0, len(e.Touched))
+	for _, t := range e.Touched {
+		if r, ok := strings.CutPrefix(t, "./"); ok && len(e.Cwds) > 0 {
+			t = filepath.Join(e.Cwds[0], filepath.FromSlash(r))
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // adoptStorage ties the state to storage target id. When the state belonged
@@ -139,6 +152,35 @@ func (s *SyncState) pruneCwds(present map[string]bool) {
 	}
 }
 
+// ignore keeps the remote copy etag of npath off this Mac (see Ignored).
+func (s *SyncState) ignore(npath, etag string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Ignored == nil {
+		s.Ignored = make(map[string]string)
+	}
+	s.Ignored[npath] = etag
+}
+
+// isIgnored reports whether the remote copy etag of npath is kept off.
+func (s *SyncState) isIgnored(npath, etag string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.Ignored[npath]
+	return ok && e == etag
+}
+
+// pruneIgnored forgets ignored files keep reports false for.
+func (s *SyncState) pruneIgnored(keep func(npath string) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for np := range s.Ignored {
+		if !keep(np) {
+			delete(s.Ignored, np)
+		}
+	}
+}
+
 // MarkLocalDeleted records that npath was deleted on this device while the
 // remote copy (etag) stays in place.
 func (s *SyncState) MarkLocalDeleted(npath, etag string) {
@@ -196,6 +238,11 @@ type SyncState struct {
 	// one of the sources project folders are discovered from, so a sync reads
 	// only transcripts it hasn't seen before.
 	TranscriptCwds map[string]cwdEntry `json:"transcript_cwds,omitempty"`
+
+	// Ignored holds remote files kept off this Mac, by ETag: files only the
+	// stale stored copy of a repository has (see syncRoot.stale). One comes
+	// in once its remote copy changes.
+	Ignored map[string]string `json:"ignored,omitempty"`
 
 	// savePath is the custom path to save state to (if set)
 	savePath string     `json:"-"`

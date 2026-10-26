@@ -746,7 +746,7 @@ func TestClampMtimeKeepsPulledSessionsInsideRetention(t *testing.T) {
 
 func TestDesktopRecordDropsRuntimeFields(t *testing.T) {
 	in := []byte(`{"sessionId":"local_x","cwd":"/nope/does-not-exist","bridgeSessionIds":["b1"],"remoteControlAutoEligible":true,"toolSurfaceSnapshot":{"a":1},"title":"keep me","lastActivityAt":1792963248589}`)
-	out := finishDesktopDownload(in, "", nil)
+	out := finishDesktopDownload(in, "", nil, nil)
 	for _, k := range []string{"bridgeSessionIds", "remoteControlAutoEligible", "toolSurfaceSnapshot"} {
 		if bytes.Contains(out, []byte(k)) {
 			t.Fatalf("%s survived: %s", k, out)
