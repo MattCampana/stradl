@@ -44,3 +44,6 @@ Thumbs.db
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# SwiftPM build output for the Mac app
+apps/macos/.build/

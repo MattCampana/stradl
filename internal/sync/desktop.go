@@ -292,6 +292,9 @@ type repoIndex struct {
 	extra []string
 	once  gosync.Once
 	byURL map[string]string
+	// ready, when set, says whether a scan root may be read yet (macOS
+	// privacy prompts, see folderGate).
+	ready func(dir string) bool
 }
 
 // repoScanRoots are home-relative folders searched for clones.
@@ -322,6 +325,9 @@ func (r *repoIndex) build() {
 		roots = append(roots, filepath.Join(r.home, name))
 	}
 	for _, root := range roots {
+		if r.ready != nil && !r.ready(root) {
+			continue // ~/Documents or ~/Desktop before macOS allows it
+		}
 		r.scan(root, 0, seen)
 	}
 }

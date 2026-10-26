@@ -404,6 +404,9 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		files, err := s.scanRoot(root)
 		var busy *gitBusyError
 		switch {
+		case errors.Is(err, errAwaitingPermission):
+			root.deferred = true // reported once per protected folder below
+			continue
 		case errors.Is(err, errFolderMissing):
 			if s.state.hasPrefix(root.prefix) && !s.cfg.AllowMassDelete {
 				// It synced from here before: a rename, a re-clone in
@@ -483,6 +486,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	defer func() { s.modes = nil }()
 	homeDir := s.home
 	repos := newRepoIndex(homeDir)
+	repos.ready = func(dir string) bool { return s.folderGate(dir) == nil }
 
 	var jobs []job
 	var objectChecks []objectCheck
@@ -696,6 +700,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 
 	jobs, report.Warnings = s.guardMassDeletes(jobs, roots, known)
 	report.Warnings = append(report.Warnings, lockWarnings...)
+	report.Warnings = append(report.Warnings, s.tccWarnings()...)
 
 	if dryRun {
 		for _, j := range jobs {

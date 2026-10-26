@@ -130,6 +130,9 @@ func (s *Syncer) canonicalFolder(abs string) string {
 	if !ok || !s.folderAllowed(rel) {
 		return ""
 	}
+	if s.folderGate(abs) != nil {
+		return "" // macOS hasn't let Stradl look there yet
+	}
 	// The nearest enclosing repository below home wins; a dotfiles repository
 	// at home itself never swallows every folder.
 	for dir := abs; dir != filepath.Clean(s.home) && isWithin(s.home, dir); dir = filepath.Dir(dir) {
@@ -437,6 +440,9 @@ func (s *Syncer) folderSkipDir(rel string) bool {
 // files missing from a partial scan would look deleted.
 func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 	files := make(map[string]os.FileInfo)
+	if err := s.folderGate(root.dir); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(root.dir); os.IsNotExist(err) {
 		return files, errFolderMissing
 	}

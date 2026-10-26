@@ -3,6 +3,7 @@ package sync
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -508,5 +509,43 @@ func TestNewFileDownloadNeverReplacesAFileCreatedMeanwhile(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(p); string(data) != "made here during the pass\n" {
 		t.Fatalf("file replaced: %q", data)
+	}
+}
+
+func TestProtectedFolderWaitsForMacOSWithoutStallingTheSync(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS privacy prompts")
+	}
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	a.write("Desktop/site/index.html", "<h1>hi</h1>\n")
+	a.s.cfg.ExtraFolders = []string{filepath.Join(a.home, "Desktop", "site")}
+	a.writeSession("proj", "s1", a.line("proj", "u1", "", time.Now(), "hello"))
+
+	answer := make(chan error)
+	oldRead, oldWait := tccRead, tccWait
+	tccRead = func(dir string) error { return <-answer }
+	tccWait = 50 * time.Millisecond
+	defer func() { tccRead, tccWait = oldRead, oldWait }()
+	tccMu.Lock()
+	tccProbes = map[string]*tccProbe{}
+	tccMu.Unlock()
+
+	r := a.sync() // macOS's question is unanswered
+	if len(keysWithPrefix(store, FoldersPrefix+"Desktop/")) != 0 {
+		t.Fatal("read a protected folder before macOS answered")
+	}
+	if len(keysWithPrefix(store, "projects/")) == 0 {
+		t.Fatal("the session didn't sync while the folder waited")
+	}
+	if len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "Desktop") {
+		t.Fatalf("want one Desktop warning: %v", r.Warnings)
+	}
+	close(answer) // Allow
+	time.Sleep(20 * time.Millisecond)
+	r = a.sync()
+	if len(r.Warnings) != 0 || len(keysWithPrefix(store, FoldersPrefix+"Desktop/site/")) == 0 {
+		t.Fatalf("the folder should sync once allowed: %+v", r)
 	}
 }
