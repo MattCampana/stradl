@@ -351,12 +351,12 @@ func TestGS6aLinkedWorktreeInsideRepo(t *testing.T) {
 	gsGit(t, w.repoA, "worktree", "add", "-q", ".claude/worktrees/wt", "-b", "wt")
 	w.a.write("code/repo/.claude/worktrees/wt/notes.md", "work in the worktree\n")
 	gsSync(t, 2, w.a, w.b)
-	// The worktree's files arrive; its .git pointer (an absolute path into
-	// alice's home) and the main repository's worktrees/ admin folder stay
-	// on alice, so bob's copy is a plain folder and git on bob never prunes
-	// alice's worktree.
-	if got := w.b.read("code/repo/.claude/worktrees/wt/notes.md"); got != "work in the worktree\n" {
-		t.Fatalf("the worktree's files didn't reach bob: %q", got)
+	// A worktree is a repository of its own inside the repo: it syncs only
+	// when a session works in it, and its pointers into alice's home and the
+	// main repository's worktrees/ admin folder never leave alice, so git on
+	// bob never prunes alice's worktree.
+	if w.b.exists("code/repo/.claude/worktrees/wt/notes.md") {
+		t.Fatal("a worktree no session works in shouldn't sync")
 	}
 	if w.b.exists("code/repo/.claude/worktrees/wt/.git") || w.b.exists("code/repo/.git/worktrees") {
 		t.Fatal("alice's worktree pointers reached bob")

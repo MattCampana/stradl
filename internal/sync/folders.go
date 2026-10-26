@@ -185,13 +185,27 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 			candidates = append(candidates, c)
 		}
 	}
-	return chooseFolders(candidates, remote, homeCaseInsensitive(s.home))
+	// Git repositories among them: one inside another folder still syncs as
+	// its own (see linkFolderRoots).
+	repo := make(map[string]bool)
+	remoteRepos := make(map[string]bool)
+	for _, o := range objects {
+		if rel, ok := strings.CutSuffix(strings.TrimPrefix(o.Key, FoldersPrefix), "/.git/HEAD.age"); ok && strings.HasPrefix(o.Key, FoldersPrefix) {
+			remoteRepos[rel] = true
+		}
+	}
+	for _, c := range candidates {
+		repo[c] = remoteRepos[c] || isRepoDir(filepath.Join(s.home, filepath.FromSlash(c)))
+	}
+	return chooseFolders(candidates, remote, homeCaseInsensitive(s.home), repo)
 }
 
 // chooseFolders collapses case variants (on a case-insensitive volume) and
-// nested folders. Among spellings of one folder, one already in remote storage
-// wins, then the first in sort order, so every Mac picks the same spelling.
-func chooseFolders(candidates []string, remote map[string]bool, foldCase bool) []string {
+// nested folders, except git repositories (repo), which stay separate even
+// inside another folder. Among spellings of one folder, one already in remote
+// storage wins, then the first in sort order, so every Mac picks the same
+// spelling.
+func chooseFolders(candidates []string, remote map[string]bool, foldCase bool, repo map[string]bool) []string {
 	fold := func(p string) string {
 		if foldCase {
 			return strings.ToLower(p)
@@ -232,7 +246,7 @@ func chooseFolders(candidates []string, remote map[string]bool, foldCase bool) [
 		for i := 0; i < len(k) && !covered; i++ {
 			covered = k[i] == '/' && kept[k[:i]]
 		}
-		if covered {
+		if covered && !repo[best[k]] {
 			continue
 		}
 		kept[k] = true
@@ -401,15 +415,95 @@ func firstCwd(p string) string {
 // folderRoot builds the sync root for a home-relative project folder.
 func (s *Syncer) folderRoot(rel string) *syncRoot {
 	return &syncRoot{
-		dir:     filepath.Join(s.home, filepath.FromSlash(rel)),
-		prefix:  FoldersPrefix + rel + "/",
-		paths:   []string{"."},
-		include: s.folderInclude,
-		skipDir: s.folderSkipDir,
-		kind:    rootFolder,
-		label:   "~/" + rel,
-		perm:    0644,
+		dir:      filepath.Join(s.home, filepath.FromSlash(rel)),
+		prefix:   FoldersPrefix + rel + "/",
+		paths:    []string{"."},
+		include:  s.folderInclude,
+		skipDir:  s.folderSkipDir,
+		kind:     rootFolder,
+		label:    "~/" + rel,
+		perm:     0644,
+		children: make(map[string]bool),
+		nested:   make(map[string]bool),
 	}
+}
+
+// linkFolderRoots tells each project folder which git repositories inside it
+// are not its own: folder roots inside it (children), and repositories that
+// other Macs' files show inside it (an older Stradl synced them along with
+// the folder) but that no session here needs (nested). The scan adds the
+// nested repositories it finds on disk.
+func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo) {
+	var folders []*syncRoot
+	for _, r := range roots {
+		if r.kind == rootFolder {
+			folders = append(folders, r)
+		}
+	}
+	for _, outer := range folders {
+		for _, inner := range folders {
+			if inner != outer && strings.HasPrefix(inner.prefix, outer.prefix) {
+				outer.children[strings.TrimSuffix(strings.TrimPrefix(inner.prefix, outer.prefix), "/")] = true
+			}
+		}
+	}
+	for _, obj := range objects {
+		if !strings.HasPrefix(obj.Key, FoldersPrefix) {
+			continue
+		}
+		np, ok, _ := s.npathForKey(obj.Key)
+		if !ok {
+			continue
+		}
+		root, rel := s.rootFor(roots, np)
+		if root == nil || root.kind != rootFolder {
+			continue
+		}
+		// rel = <dir>/.git/... names a repository at <dir> inside the root.
+		if i := strings.Index("/"+rel, "/.git/"); i > 0 {
+			root.nested[rel[:i-1]] = true
+		}
+	}
+}
+
+// owns reports whether rel, inside this project folder, belongs to it rather
+// than to a git repository inside it (see children and nested), counting
+// that repository's data in this one's .git/modules (a submodule) as its.
+func (r *syncRoot) owns(rel string) bool {
+	if rest, ok := strings.CutPrefix(rel, ".git/modules/"); ok {
+		// Submodule data syncs only for a submodule a session needs, which
+		// git keeps under its path: .git/modules/<path>/...
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == '/' && r.children[rest[:i]] {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; i < len(rel); i++ {
+		if rel[i] == '/' && (r.children[rel[:i]] || r.nested[rel[:i]]) {
+			return false
+		}
+	}
+	return true
+}
+
+// wantsModuleDir reports whether the scan descends into .git/modules/<rest>:
+// a needed submodule's data, or a folder on the way to it.
+func (r *syncRoot) wantsModuleDir(rest string) bool {
+	for c := range r.children {
+		if rest == c || strings.HasPrefix(rest, c+"/") || strings.HasPrefix(c, rest+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// isRepoDir reports whether the folder at abs is a git repository: a clone
+// (.git folder), a submodule or a linked worktree (.git file).
+func isRepoDir(abs string) bool {
+	_, err := os.Lstat(filepath.Join(abs, ".git"))
+	return err == nil
 }
 
 // folderInclude reports whether a file inside a project folder syncs.
@@ -475,6 +569,21 @@ func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 			}
 			if root.skipDir != nil && root.skipDir(rel) {
 				return filepath.SkipDir
+			}
+			if root.kind == rootFolder {
+				switch {
+				case root.children[rel]:
+					return filepath.SkipDir // synced as its own folder
+				case strings.HasPrefix(rel, ".git/modules/"):
+					if !root.wantsModuleDir(strings.TrimPrefix(rel, ".git/modules/")) {
+						return filepath.SkipDir // a submodule no session needs
+					}
+				case !hasGitSegment(rel) && isRepoDir(p):
+					// Another repository inside this folder that no session
+					// works in: it doesn't sync.
+					root.nested[rel] = true
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}

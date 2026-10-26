@@ -69,7 +69,7 @@ Every upload says "replace the version I last saw" (an `If-Match` precondition).
 
 ## Project folders
 
-Every folder a session works in syncs, found from the working folder of each sidebar entry and transcript, plus any you list in `extra_folders`. A folder inside a git repository syncs the whole repository. Each folder lands at the same path under home on every Mac (`~/code/app` here is `~/code/app` there), and one that doesn't exist yet is created. Your home folder itself, `~/Library` (where iCloud Drive lives), the Trash and Stradl's and Claude's own folders never sync as project folders.
+Every folder a session works in syncs, found from the working folder of each sidebar entry and transcript, plus any you list in `extra_folders`. A folder inside a git repository syncs the whole repository. Every git repository syncs on its own and only when a session works in it: a folder full of clones syncs its own files, not the clones inside it, and a repository with submodules syncs a submodule (and its git data) only if a session works in that submodule. Each folder lands at the same path under home on every Mac (`~/code/app` here is `~/code/app` there), and one that doesn't exist yet is created. Your home folder itself, `~/Library` (where iCloud Drive lives), the Trash and Stradl's and Claude's own folders never sync as project folders.
 
 Set `folder_sync: false` to turn this off, and use `folder_exclude` for patterns to leave out:
 
