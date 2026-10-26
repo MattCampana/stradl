@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -56,10 +57,6 @@ type gitBusyError struct {
 
 func (e *gitBusyError) Error() string { return errGitBusy.Error() + " (" + e.lock + ")" }
 func (e *gitBusyError) Unwrap() error { return errGitBusy }
-
-// folderSourceLimit bounds how much of a transcript is read looking for its
-// first working folder.
-const folderSourceLimit = 4 << 20
 
 var cwdFieldRe = regexp.MustCompile(`"cwd"\s*:\s*("(?:[^"\\]|\\.)*")`)
 
@@ -122,7 +119,12 @@ func (s *Syncer) folderAllowed(rel string) bool {
 // canonicalFolder turns a working folder into the project folder that syncs
 // it, relative to home: the root of the git repository it lies in, else the
 // folder itself. It returns "" when the folder can't be synced.
-func (s *Syncer) canonicalFolder(abs string) string {
+func (s *Syncer) canonicalFolder(abs string) string { return s.canonicalFolderIn(abs, nil) }
+
+// canonicalFolderIn is canonicalFolder that also counts as a repository a
+// folder other Macs sync as one (remoteRepos, home-relative): a repository
+// inside another stays its own on a Mac that doesn't have it yet.
+func (s *Syncer) canonicalFolderIn(abs string, remoteRepos map[string]bool) string {
 	if s.home == "" || !filepath.IsAbs(abs) {
 		return ""
 	}
@@ -137,8 +139,9 @@ func (s *Syncer) canonicalFolder(abs string) string {
 	// The nearest enclosing repository below home wins; a dotfiles repository
 	// at home itself never swallows every folder.
 	for dir := abs; dir != filepath.Clean(s.home) && isWithin(s.home, dir); dir = filepath.Dir(dir) {
-		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
-			if r, ok := homeRel(s.home, dir); ok && s.folderAllowed(r) {
+		r, ok := homeRel(s.home, dir)
+		if isRepoDir(dir) || (ok && remoteRepos[r]) {
+			if ok && s.folderAllowed(r) {
 				return r
 			}
 			break
@@ -155,6 +158,7 @@ func (s *Syncer) canonicalFolder(abs string) string {
 // already in remote storage; and a folder inside another is covered by the
 // outer one.
 func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []string {
+	remoteRepos := remoteRepoFolders(objects)
 	var candidates []string
 	seen := make(map[string]bool) // thousands of transcripts share a few folders
 	add := func(abs string) {
@@ -162,7 +166,7 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 			return
 		}
 		seen[abs] = true
-		if rel := s.canonicalFolder(abs); rel != "" {
+		if rel := s.canonicalFolderIn(abs, remoteRepos); rel != "" {
 			candidates = append(candidates, rel)
 		}
 	}
@@ -180,7 +184,7 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	}
 	remote := make(map[string]bool)
 	for _, rel := range remoteFolderMarkers(objects) {
-		if c := s.canonicalFolder(filepath.Join(s.home, filepath.FromSlash(rel))); c != "" {
+		if c := s.canonicalFolderIn(filepath.Join(s.home, filepath.FromSlash(rel)), remoteRepos); c != "" {
 			remote[c] = true
 			candidates = append(candidates, c)
 		}
@@ -188,12 +192,6 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	// Git repositories among them: one inside another folder still syncs as
 	// its own (see linkFolderRoots).
 	repo := make(map[string]bool)
-	remoteRepos := make(map[string]bool)
-	for _, o := range objects {
-		if rel, ok := strings.CutSuffix(strings.TrimPrefix(o.Key, FoldersPrefix), "/.git/HEAD.age"); ok && strings.HasPrefix(o.Key, FoldersPrefix) {
-			remoteRepos[rel] = true
-		}
-	}
 	for _, c := range candidates {
 		repo[c] = remoteRepos[c] || isRepoDir(filepath.Join(s.home, filepath.FromSlash(c)))
 	}
@@ -242,15 +240,21 @@ func chooseFolders(candidates []string, remote map[string]bool, foldCase bool, r
 	kept := make(map[string]bool)
 	var out []string
 	for _, k := range keys {
-		covered := false
+		covered, at := false, 0
 		for i := 0; i < len(k) && !covered; i++ {
-			covered = k[i] == '/' && kept[k[:i]]
+			covered, at = k[i] == '/' && kept[k[:i]], i
 		}
 		if covered && !repo[best[k]] {
 			continue
 		}
+		name := best[k]
+		if covered && foldCase && len(best[k]) == len(k) {
+			// Spell it under the folder holding it as that folder is spelled,
+			// so its files keep the keys they synced under inside it.
+			name = best[k[:at]] + best[k][at:]
+		}
 		kept[k] = true
-		out = append(out, best[k])
+		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out
@@ -339,17 +343,15 @@ func (s *Syncer) transcriptCwds(useCache bool) []string {
 			} else {
 				e, ok = memCwds.get(np)
 			}
-			if !ok || (e.Cwd == "" && e.Size != info.Size()) {
-				e = cwdEntry{Size: info.Size(), Cwd: firstCwd(filepath.Join(projects, d.Name(), name))}
+			if !ok || e.Size != info.Size() || (e.Scanned == 0 && info.Size() > 0) {
+				e = updateCwds(filepath.Join(projects, d.Name(), name), e, info.Size())
 				if useCache && s.state != nil {
 					s.state.setCachedCwd(np, e)
 				} else {
 					memCwds.set(np, e)
 				}
 			}
-			if e.Cwd != "" {
-				out = append(out, e.Cwd)
-			}
+			out = append(out, e.Cwds...)
 		}
 	}
 	if useCache && s.state != nil {
@@ -379,37 +381,53 @@ func (c *cwdCache) set(np string, e cwdEntry) {
 	c.m[np] = e
 }
 
-// firstCwd returns the first "cwd" recorded in a transcript, reading at most
-// folderSourceLimit bytes.
-func firstCwd(p string) string {
+// updateCwds brings a transcript's cached working folders up to date: a
+// session can start in one folder and work in others (a repository inside
+// it, say), and each one it worked in is needed. A transcript only grows, so
+// reading resumes where the last read stopped, at the end of the last whole
+// line; one that shrank (replaced) is read again from the start.
+func updateCwds(p string, e cwdEntry, size int64) cwdEntry {
+	from := e.Scanned
+	cwds := e.Cwds
+	if from > size || (from == 0 && len(cwds) == 0) || (from == 0 && e.Cwd != "") {
+		from, cwds = 0, nil
+	}
+	seen := make(map[string]bool, len(cwds))
+	for _, c := range cwds {
+		seen[c] = true
+	}
 	f, err := os.Open(p)
 	if err != nil {
-		return ""
+		return cwdEntry{Size: size, Cwds: cwds, Scanned: from}
 	}
 	defer func() { _ = f.Close() }()
-	buf := make([]byte, 256<<10)
-	var window []byte
-	read := 0
-	for read < folderSourceLimit {
-		n, err := f.Read(buf)
-		read += n
-		window = append(window, buf[:n]...)
-		if m := cwdFieldRe.FindSubmatch(window); m != nil {
+	if _, err := f.Seek(from, io.SeekStart); err != nil {
+		return cwdEntry{Size: size, Cwds: cwds, Scanned: from}
+	}
+	r := bufio.NewReaderSize(f, 256<<10)
+	pos := from
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) == 0 || line[len(line)-1] != '\n' {
+			break // end of file, or a line still being written
+		}
+		pos += int64(len(line))
+		for _, m := range cwdFieldRe.FindAllSubmatch(line, -1) {
 			var cwd string
-			if json.Unmarshal(m[1], &cwd) == nil {
-				return cwd
+			if json.Unmarshal(m[1], &cwd) == nil && cwd != "" && !seen[cwd] {
+				seen[cwd] = true
+				cwds = append(cwds, cwd)
 			}
-			return ""
 		}
 		if err != nil {
-			return ""
-		}
-		// Keep a tail in case the field straddles two reads.
-		if len(window) > 64<<10 {
-			window = append([]byte(nil), window[len(window)-64<<10:]...)
+			break
 		}
 	}
-	return ""
+	first := ""
+	if len(cwds) > 0 {
+		first = cwds[0]
+	}
+	return cwdEntry{Size: size, Cwd: first, Cwds: cwds, Scanned: pos}
 }
 
 // folderRoot builds the sync root for a home-relative project folder.
@@ -425,6 +443,7 @@ func (s *Syncer) folderRoot(rel string) *syncRoot {
 		perm:     0644,
 		children: make(map[string]bool),
 		nested:   make(map[string]bool),
+		modules:  make(map[string]bool),
 	}
 }
 
@@ -443,9 +462,15 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 	for _, outer := range folders {
 		for _, inner := range folders {
 			if inner != outer && strings.HasPrefix(inner.prefix, outer.prefix) {
-				outer.children[strings.TrimSuffix(strings.TrimPrefix(inner.prefix, outer.prefix), "/")] = true
+				child := strings.TrimSuffix(strings.TrimPrefix(inner.prefix, outer.prefix), "/")
+				outer.children[child] = true
+				outer.modules[moduleDir(outer.dir, inner.dir, child)] = true
 			}
 		}
+	}
+	markers := make(map[string]bool)
+	for _, rel := range remoteFolderMarkers(objects) {
+		markers[rel] = true
 	}
 	for _, obj := range objects {
 		if !strings.HasPrefix(obj.Key, FoldersPrefix) {
@@ -459,11 +484,61 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 		if root == nil || root.kind != rootFolder {
 			continue
 		}
-		// rel = <dir>/.git/... names a repository at <dir> inside the root.
+		// <dir>/.git/... or a <dir>/.git file (a submodule's) names a
+		// repository at <dir> inside the root; one other Macs sync as its own
+		// folder is a child, not nested.
+		dir := ""
 		if i := strings.Index("/"+rel, "/.git/"); i > 0 {
-			root.nested[rel[:i-1]] = true
+			dir = rel[:i-1]
+		} else if d, ok := strings.CutSuffix(rel, "/.git"); ok {
+			dir = d
+		}
+		outerRel := strings.TrimSuffix(strings.TrimPrefix(root.prefix, FoldersPrefix), "/")
+		if dir != "" && !root.children[dir] && !markers[outerRel+"/"+dir] {
+			root.nested[dir] = true
 		}
 	}
+}
+
+// remoteRepoFolders lists the home-relative folders other Macs sync as git
+// repositories: those with a .git/HEAD, or a .git file (a submodule).
+func remoteRepoFolders(objects []storage.ObjectInfo) map[string]bool {
+	out := make(map[string]bool)
+	for _, o := range objects {
+		k, ok := strings.CutPrefix(o.Key, FoldersPrefix)
+		if !ok {
+			continue
+		}
+		if rel, ok := strings.CutSuffix(k, "/.git/HEAD.age"); ok {
+			out[rel] = true
+		} else if rel, ok := strings.CutSuffix(k, "/.git.age"); ok {
+			out[rel] = true
+		}
+	}
+	return out
+}
+
+// moduleDir returns where, under outer's .git/modules, git keeps the data of
+// the submodule at child (relative to outer): what its .git file points to,
+// else its path (git's default name).
+func moduleDir(outerDir, childDir, child string) string {
+	data, err := os.ReadFile(filepath.Join(childDir, ".git"))
+	if err != nil || len(data) > 4096 {
+		return child
+	}
+	gitdir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir:")
+	if !ok {
+		return child
+	}
+	gitdir = strings.TrimSpace(gitdir)
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(childDir, gitdir)
+	}
+	rel, err := filepath.Rel(filepath.Join(outerDir, ".git", "modules"), filepath.Clean(gitdir))
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return child
+	}
+	return filepath.ToSlash(rel)
 }
 
 // owns reports whether rel, inside this project folder, belongs to it rather
@@ -471,10 +546,9 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 // that repository's data in this one's .git/modules (a submodule) as its.
 func (r *syncRoot) owns(rel string) bool {
 	if rest, ok := strings.CutPrefix(rel, ".git/modules/"); ok {
-		// Submodule data syncs only for a submodule a session needs, which
-		// git keeps under its path: .git/modules/<path>/...
+		// Submodule data syncs only for a submodule a session needs.
 		for i := 0; i < len(rest); i++ {
-			if rest[i] == '/' && r.children[rest[:i]] {
+			if rest[i] == '/' && r.modules[rest[:i]] {
 				return true
 			}
 		}
@@ -491,7 +565,7 @@ func (r *syncRoot) owns(rel string) bool {
 // wantsModuleDir reports whether the scan descends into .git/modules/<rest>:
 // a needed submodule's data, or a folder on the way to it.
 func (r *syncRoot) wantsModuleDir(rest string) bool {
-	for c := range r.children {
+	for c := range r.modules {
 		if rest == c || strings.HasPrefix(rest, c+"/") || strings.HasPrefix(c, rest+"/") {
 			return true
 		}
@@ -540,6 +614,9 @@ func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 	}
 	if _, err := os.Stat(root.dir); os.IsNotExist(err) {
 		return files, errFolderMissing
+	}
+	if busy := gitfileBusy(root.dir); busy != nil {
+		return nil, busy
 	}
 	own := []string{filepath.Clean(s.claudeDir), filepath.Clean(s.stateDir())}
 	err := filepath.WalkDir(root.dir, func(p string, d fs.DirEntry, err error) error {
@@ -611,6 +688,46 @@ func (s *Syncer) scanFolder(root *syncRoot) (map[string]os.FileInfo, error) {
 		return nil, err
 	}
 	return files, nil
+}
+
+// gitfileBusy checks, for a repository whose .git is a file (a submodule or
+// a linked worktree), the git data that file points to for lock files: git
+// keeps them there, outside the folder the scan walks.
+func gitfileBusy(dir string) *gitBusyError {
+	fi, err := os.Lstat(filepath.Join(dir, ".git"))
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > 4096 {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".git"))
+	if err != nil {
+		return nil
+	}
+	gitdir, ok := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir:")
+	if !ok {
+		return nil
+	}
+	gitdir = strings.TrimSpace(gitdir)
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(dir, gitdir)
+	}
+	var busy *gitBusyError
+	_ = filepath.WalkDir(gitdir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || busy != nil {
+			return filepath.SkipDir
+		}
+		if d.IsDir() && d.Name() == "modules" && p != gitdir {
+			return filepath.SkipDir // nested submodules check their own
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".lock") {
+			busy = &gitBusyError{lock: p}
+			if info, err := d.Info(); err == nil {
+				busy.since = info.ModTime()
+			}
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return busy
 }
 
 // errFolderMissing reports a project folder that doesn't exist on this Mac.

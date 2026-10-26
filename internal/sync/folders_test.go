@@ -629,6 +629,10 @@ func TestDiscoverFoldersDedupesNestedAndRejectsUnsafeFolders(t *testing.T) {
 	if got := chooseFolders([]string{"code/X", "Code/x"}, map[string]bool{"code/X": true}, true, nil); strings.Join(got, ",") != "code/X" {
 		t.Fatalf("case variants = %v", got)
 	}
+	// ...spelled under its folder as that folder is spelled.
+	if got := chooseFolders([]string{"Code/Work", "code/work/app"}, nil, true, map[string]bool{"code/work/app": true}); strings.Join(got, ",") != "Code/Work,Code/Work/app" {
+		t.Fatalf("nested repository on a case-insensitive volume = %v", got)
+	}
 	if got := chooseFolders([]string{"code/X", "Code/x"}, nil, false, nil); len(got) != 2 {
 		t.Fatalf("a case-sensitive volume keeps both: %v", got)
 	}

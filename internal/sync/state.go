@@ -44,7 +44,11 @@ type FileState struct {
 // once it grows; a found cwd never changes.
 type cwdEntry struct {
 	Size int64  `json:"size"`
-	Cwd  string `json:"cwd,omitempty"`
+	Cwd  string `json:"cwd,omitempty"` // the first; entries written before Cwds have only this
+	// Cwds are every working folder the transcript records, read up to
+	// Scanned bytes (transcripts only grow, so later reads resume there).
+	Cwds    []string `json:"cwds,omitempty"`
+	Scanned int64    `json:"scanned,omitempty"`
 }
 
 // adoptStorage ties the state to storage target id. When the state belonged

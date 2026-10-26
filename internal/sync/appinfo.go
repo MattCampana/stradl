@@ -59,13 +59,41 @@ func FolderStats(cfg *config.Config) ([]FolderStat, error) {
 			st.Git = true
 		}
 		prefix := FoldersPrefix + rel + "/"
+		hasChild := false
+		for _, other := range folders {
+			hasChild = hasChild || strings.HasPrefix(other, rel+"/")
+		}
+		repoAt := make(map[string]bool)
+		inNested := func(inner string) bool {
+			for i := 0; i < len(inner); i++ {
+				if inner[i] != '/' {
+					continue
+				}
+				d := inner[:i]
+				if d == ".git" || strings.HasSuffix(d, "/.git") {
+					return false
+				}
+				is, ok := repoAt[d]
+				if !ok {
+					is = isRepoDir(filepath.Join(abs, filepath.FromSlash(d)))
+					repoAt[d] = is
+				}
+				if is {
+					return true // a repository no session needs (listed ones own their files)
+				}
+			}
+			return false
+		}
 		for np, fs := range snap {
 			if !strings.HasPrefix(np, prefix) || fs.LocalDeleted || owner(np) != rel {
 				continue
 			}
 			// State can still hold files that no longer sync (build output
-			// added to the excluded names later): count what syncs now.
-			if inner := np[len(prefix):]; !s.folderInclude(inner) || cfg.IsBuildArtifact(inner) {
+			// added to the excluded names later, or a repository inside the
+			// folder that syncs only when needed): count what syncs now.
+			inner := np[len(prefix):]
+			if !s.folderInclude(inner) || cfg.IsBuildArtifact(inner) || inNested(inner) ||
+				(strings.HasPrefix(inner, ".git/modules/") && !hasChild) {
 				continue
 			}
 			st.Files++

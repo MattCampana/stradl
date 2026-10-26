@@ -72,6 +72,9 @@ type syncRoot struct {
 	// which don't sync at all. Both are slash paths relative to dir.
 	children map[string]bool
 	nested   map[string]bool
+	// modules are where (under this root's .git/modules) git keeps the data
+	// of child repositories that are submodules; only those sync.
+	modules map[string]bool
 }
 
 type localFile struct {
@@ -399,6 +402,17 @@ type job struct {
 	run   func() error
 }
 
+// insideDeferred reports whether root is inside a project folder sitting
+// this pass out.
+func insideDeferred(roots []*syncRoot, root *syncRoot) bool {
+	for _, r := range roots {
+		if r != root && r.kind == rootFolder && r.deferred && strings.HasPrefix(root.prefix, r.prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error) {
 	report := &SyncReport{}
 	rm := &reportMu{r: report}
@@ -416,10 +430,17 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	}
 	roots := s.syncRoots(objects, true)
 
-	// Scan first: a project folder git is working in sits the pass out.
+	// Scan first: a project folder git is working in sits the pass out, and
+	// so does every repository inside it (folders before the ones they hold).
 	local := make(map[string]*localFile)
 	var lockWarnings []string
-	for _, root := range roots {
+	order := append([]*syncRoot(nil), roots...)
+	sort.SliceStable(order, func(i, j int) bool { return order[i].prefix < order[j].prefix })
+	for _, root := range order {
+		if root.kind == rootFolder && insideDeferred(order, root) {
+			root.deferred = true
+			continue
+		}
 		files, err := s.scanRoot(root)
 		var busy *gitBusyError
 		switch {
