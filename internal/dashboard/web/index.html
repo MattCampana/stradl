@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>stradl dashboard</title>
+<link rel="icon" href="/static/mark.svg" type="image/svg+xml" media="(prefers-color-scheme: light)">
+<link rel="icon" href="/static/mark-dark.svg" type="image/svg+xml" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false">
+  <symbol id="i-sync" viewBox="0 0 24 24"><path d="M19.5 10.5A7.5 7.5 0 0 0 6 6.6L4 8.5"/><path d="M4 4.5v4h4"/><path d="M4.5 13.5A7.5 7.5 0 0 0 18 17.4l2-1.9"/><path d="M20 19.5v-4h-4"/></symbol>
+  <symbol id="i-laptop" viewBox="0 0 24 24"><rect x="4.5" y="5" width="15" height="10.5" rx="1.5"/><path d="M2.5 19h19"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+  <symbol id="i-prompt" viewBox="0 0 24 24"><path d="M5.5 5h13A1.5 1.5 0 0 1 20 6.5v8a1.5 1.5 0 0 1-1.5 1.5H12l-4.5 3.5V16h-2A1.5 1.5 0 0 1 4 14.5v-8A1.5 1.5 0 0 1 5.5 5z"/></symbol>
+  <symbol id="i-reply" viewBox="0 0 24 24"><path d="M5 5v6a4 4 0 0 0 4 4h10"/><path d="m15 11 4 4-4 4"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4.5 19.5h4l10.3-10.3a2.1 2.1 0 0 0-3-3L5.5 16.5z"/><path d="m14 8 2.5 2.5"/></symbol>
+  <symbol id="i-write" viewBox="0 0 24 24"><path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5"/><path d="M12 11.5v5M9.5 14h5"/></symbol>
+  <symbol id="i-command" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="m7.5 9.5 3 2.5-3 2.5M12.5 15h4"/></symbol>
+  <symbol id="i-compact" viewBox="0 0 24 24"><path d="M4.5 12h15"/><path d="m9 4.5 3 3 3-3M9 19.5l3-3 3 3"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 19V5.5M6.5 11 12 5.5l5.5 5.5"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 5v13.5M6.5 13l5.5 5.5 5.5-5.5"/></symbol>
+  <symbol id="i-merge" viewBox="0 0 24 24"><circle cx="7" cy="5.5" r="2"/><circle cx="7" cy="18.5" r="2"/><circle cx="17" cy="12" r="2"/><path d="M7 7.5v9M7 7.5c0 3 2.5 4.5 8 4.5"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.7 4.8 3.3 17.6A1.5 1.5 0 0 0 4.6 20h14.8a1.5 1.5 0 0 0 1.3-2.4L13.3 4.8a1.5 1.5 0 0 0-2.6 0z"/><path d="M12 10v4M12 17h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+  <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="7" cy="5.5" r="2"/><circle cx="7" cy="18.5" r="2"/><circle cx="17" cy="7.5" r="2"/><path d="M7 7.5v9M17 9.5a5 5 0 0 1-5 5H7"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6A1.5 1.5 0 0 0 14 4.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"/></symbol>
+  <symbol id="i-restart" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3L4.5 9"/><path d="M4.5 4.5V9H9"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4" rx="1"/><path d="M5 8.5v10A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-10M10 12.5h4"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 6.5v11M15 6.5v11"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2h7.4a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3.5H7.5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5"/></symbol>
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2"/><path d="M9.5 4.5v15"/></symbol>
+</svg>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="/" aria-label="stradl dashboard home">
+      <svg class="lockup" xmlns="http://www.w3.org/2000/svg" viewBox="27 27 364.7 78.84" role="img" aria-label="stradl"><path class="lk-ink" d="M27 80.58C27 75.624 27 73.145 27.965 71.252A8.85 8.85 0 0 1 31.832 67.385C33.725 66.42 36.204 66.42 41.16 66.42L49.272 66.42A17.148 17.148 0 0 0 66.42 83.568L66.42 91.68C66.42 96.636 66.42 99.115 65.455 101.008A8.85 8.85 0 0 1 61.588 104.875C59.695 105.84 57.216 105.84 52.26 105.84L41.16 105.84C36.204 105.84 33.725 105.84 31.832 104.875A8.85 8.85 0 0 1 27.965 101.008C27 99.115 27 96.636 27 91.68Z"/><path class="lk-ink" d="M66.42 41.16C66.42 36.204 66.42 33.725 67.385 31.832A8.85 8.85 0 0 1 71.252 27.965C73.145 27 75.624 27 80.58 27L91.68 27C96.636 27 99.115 27 101.008 27.965A8.85 8.85 0 0 1 104.875 31.832C105.84 33.725 105.84 36.204 105.84 41.16L105.84 52.26C105.84 57.216 105.84 59.695 104.875 61.588A8.85 8.85 0 0 1 101.008 65.455C99.115 66.42 96.636 66.42 91.68 66.42L83.568 66.42A17.148 17.148 0 0 0 66.42 49.272Z"/><circle class="lk-dot" cx="66.42" cy="66.42" r="14.191"/><path class="lk-ink" transform="translate(134.24 103.17)" d="M27.6 1.5Q17.8 1.5 11.6 -3.3Q5.4 -8.1 4 -16H14.7Q15.7 -11.8 19.3 -9.8Q22.9 -7.7 28.3 -7.7Q33.2 -7.7 36 -9.7Q38.8 -11.7 38.8 -15.2Q38.8 -17.3 37.8 -18.6Q36.9 -19.8 33.8 -21Q30.6 -22.1 24.3 -23.8Q17.3 -25.7 13.3 -27.7Q9.2 -29.8 7.5 -32.6Q5.7 -35.3 5.7 -39.3Q5.7 -44.2 8.4 -47.8Q11 -51.5 15.7 -53.5Q20.4 -55.5 26.7 -55.5Q33 -55.5 37.8 -53.5Q42.7 -51.6 45.7 -47.5Q48.7 -43.5 49.3 -38.7H38.6Q38 -42.5 34.9 -44.3Q31.8 -46.1 26.8 -46.3Q22.1 -46.5 19.1 -44.7Q16.2 -42.9 16.2 -39.8Q16.2 -38 17.3 -36.8Q18.5 -35.6 21.7 -34.4Q25 -33.2 31.3 -31.6Q38.1 -29.9 42.1 -27.8Q46.1 -25.7 47.8 -22.7Q49.6 -19.8 49.6 -15.6Q49.6 -7.7 43.7 -3.1Q37.9 1.5 27.6 1.5ZM89.1 0Q84 1 79.1 0.8Q74.2 0.7 70.4 -1.1Q66.5 -2.8 64.5 -6.6Q62.8 -9.9 62.7 -13.4Q62.6 -16.8 62.6 -21.2V-69H73V-21.8Q73 -18.5 73.1 -16.1Q73.2 -13.7 74.1 -12.1Q75.9 -9 79.9 -8.5Q83.8 -8.1 89.1 -8.9ZM52.2 -45.6V-54H89.1V-45.6ZM98 0V-54H107.4V-40.9L106.1 -42.6Q107 -45.2 108.6 -47.4Q110.2 -49.5 112.4 -50.9Q114.4 -52.5 116.9 -53.3Q119.5 -54.1 122.1 -54.3Q124.8 -54.4 127.2 -54V-44.2Q124.6 -44.9 121.3 -44.6Q118.1 -44.3 115.4 -42.5Q112.9 -40.9 111.4 -38.5Q109.9 -36.2 109.2 -33.3Q108.6 -30.4 108.6 -27.3V0ZM148 1.5Q142.1 1.5 138 -0.7Q133.9 -2.9 131.9 -6.6Q129.8 -10.3 129.8 -14.7Q129.8 -18.8 131.3 -21.9Q132.7 -25 135.5 -27.2Q138.4 -29.4 142.6 -30.7Q146.1 -31.8 150.7 -32.6Q155.2 -33.4 160.3 -34.1Q165.3 -34.7 170.2 -35.5L166.5 -33.3Q166.5 -39.7 163.8 -42.8Q161 -45.8 154.3 -45.8Q150 -45.8 146.5 -43.9Q142.9 -41.9 141.5 -37.3L131.8 -40.3Q133.7 -47.3 139.4 -51.4Q145 -55.5 154.3 -55.5Q161.6 -55.5 167 -53Q172.3 -50.5 174.8 -45.2Q176.1 -42.5 176.4 -39.6Q176.7 -36.6 176.7 -33.3V0H167.5V-12.3L169.3 -10.8Q165.9 -4.6 160.8 -1.5Q155.6 1.5 148 1.5ZM149.9 -7Q154.4 -7 157.6 -8.6Q160.8 -10.2 162.7 -12.7Q164.6 -15.1 165.3 -17.7Q166.1 -20.1 166.2 -23.1Q166.3 -26.2 166.3 -27.9L169.7 -26.7Q164.8 -25.9 160.8 -25.4Q156.7 -24.8 153.4 -24.2Q150.2 -23.6 147.6 -22.8Q145.5 -22.1 143.8 -21Q142.1 -20 141.1 -18.4Q140.1 -16.9 140.1 -14.8Q140.1 -12.7 141.2 -10.9Q142.2 -9.2 144.4 -8.1Q146.6 -7 149.9 -7ZM208.2 1.5Q200.7 1.5 195.2 -2.3Q189.7 -6 186.7 -12.5Q183.8 -18.9 183.8 -27Q183.8 -35.2 186.8 -41.6Q189.8 -48.1 195.3 -51.8Q200.8 -55.5 208.4 -55.5Q216 -55.5 221.3 -51.8Q226.5 -48 229.2 -41.6Q231.9 -35.2 231.9 -27Q231.9 -18.9 229.2 -12.5Q226.5 -6 221.2 -2.3Q215.9 1.5 208.2 1.5ZM209.7 -8Q214.8 -8 218 -10.4Q221.3 -12.8 222.8 -17.1Q224.3 -21.5 224.3 -27Q224.3 -32.6 222.8 -36.9Q221.3 -41.2 218.1 -43.6Q214.9 -46 210 -46Q204.8 -46 201.4 -43.5Q198.1 -40.9 196.5 -36.6Q194.9 -32.3 194.9 -27Q194.9 -21.7 196.5 -17.4Q198.1 -13 201.4 -10.5Q204.6 -8 209.7 -8ZM224.3 0V-38.8H223.1V-72H233.6V0ZM247 0V-73.5H257.5V0Z"/></svg>
+    </a>
+    <span class="tagline">Musical chairs for your Claude sessions.</span>
+    <div class="top-actions">
+      <span id="status" class="pill pill-idle" role="status" aria-live="polite"><span class="pill-dot" aria-hidden="true"></span><span class="pill-text">Loading…</span></span>
+      <button id="sync-btn" class="btn btn-primary" type="button" disabled>
+        <svg class="ico" aria-hidden="true"><use href="#i-sync"/></svg><span>Sync now</span>
+      </button>
+    </div>
+  </div>
+</header>
+
+<div id="banners" class="wrap banners" aria-live="polite"></div>
+
+<main id="main" class="wrap" tabindex="-1">
+  <section id="summary" class="summary" aria-label="Sync summary" aria-busy="true">
+    <div class="hero">
+      <div class="sk sk-title"></div>
+      <div class="sk sk-line w60"></div>
+    </div>
+    <div class="tiles">
+      <div class="tile sk-tile"></div><div class="tile sk-tile"></div><div class="tile sk-tile"></div><div class="tile sk-tile"></div>
+    </div>
+  </section>
+
+  <section id="macs" class="section" aria-labelledby="macs-h">
+    <div class="sec-head">
+      <div><h2 id="macs-h">Your Macs</h2><p class="sec-sub" id="macs-sub">Every Mac syncing into your storage</p></div>
+    </div>
+    <div id="macs-body" class="devices">
+      <div class="card sk-card"></div><div class="card sk-card"></div><div class="card sk-card"></div>
+    </div>
+  </section>
+
+  <section id="week" class="section" aria-labelledby="week-h">
+    <div class="sec-head">
+      <div><h2 id="week-h">Last 7 days</h2><p class="sec-sub" id="week-sub">What you worked on, day by day</p></div>
+      <div id="week-chart" class="week-chart"></div>
+    </div>
+    <div id="week-body" class="days">
+      <div class="card sk-card tall"></div><div class="card sk-card tall"></div>
+    </div>
+  </section>
+
+  <section id="all" class="section" aria-labelledby="all-h">
+    <div class="sec-head">
+      <div><h2 id="all-h">All sessions</h2><p class="sec-sub" id="all-sub">Every Claude Code session on this Mac and its sync state</p></div>
+    </div>
+    <div class="toolbar" role="search">
+      <label class="search">
+        <svg class="ico" aria-hidden="true"><use href="#i-search"/></svg>
+        <span class="sr-only">Search sessions</span>
+        <input id="f-q" type="search" placeholder="Search titles, projects and prompts" autocomplete="off" spellcheck="false">
+        <kbd class="kbd" aria-hidden="true">/</kbd>
+      </label>
+      <label class="select"><span class="sr-only">Project</span><select id="f-project"><option value="">All projects</option></select></label>
+      <label class="select"><span class="sr-only">Mac</span><select id="f-mac"><option value="">All Macs</option></select></label>
+      <label class="select"><span class="sr-only">Sync state</span><select id="f-state">
+        <option value="">Any state</option>
+        <option value="synced">Synced</option>
+        <option value="pending">Waiting to sync</option>
+        <option value="held">Open in Claude</option>
+        <option value="conflict">Conflict</option>
+        <option value="not-synced">Not synced</option>
+      </select></label>
+      <label class="toggle"><input id="f-archived" type="checkbox"><span class="toggle-track" aria-hidden="true"></span><span>Include archived</span></label>
+    </div>
+    <div class="table-card card">
+      <table class="sessions" aria-describedby="all-count">
+        <thead>
+          <tr>
+            <th scope="col" data-sort="title" class="c-title"><button type="button" class="th-btn">Session<svg class="ico sort-ico" aria-hidden="true"><use href="#i-chevron"/></svg></button></th>
+            <th scope="col" data-sort="project" class="c-project"><button type="button" class="th-btn">Project<svg class="ico sort-ico" aria-hidden="true"><use href="#i-chevron"/></svg></button></th>
+            <th scope="col" data-sort="last" class="c-last" aria-sort="descending"><button type="button" class="th-btn">Last activity<svg class="ico sort-ico" aria-hidden="true"><use href="#i-chevron"/></svg></button></th>
+            <th scope="col" data-sort="turns" class="c-turns"><button type="button" class="th-btn">Turns<svg class="ico sort-ico" aria-hidden="true"><use href="#i-chevron"/></svg></button></th>
+            <th scope="col" data-sort="state" class="c-state"><button type="button" class="th-btn">State<svg class="ico sort-ico" aria-hidden="true"><use href="#i-chevron"/></svg></button></th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr class="sk-row"><td colspan="5"><div class="sk sk-line"></div></td></tr>
+          <tr class="sk-row"><td colspan="5"><div class="sk sk-line w80"></div></td></tr>
+          <tr class="sk-row"><td colspan="5"><div class="sk sk-line w60"></div></td></tr>
+        </tbody>
+      </table>
+      <div id="table-foot" class="table-foot"><span id="all-count" class="muted"></span></div>
+    </div>
+  </section>
+
+  <section id="pending" class="section" aria-labelledby="pending-h">
+    <div class="sec-head">
+      <div><h2 id="pending-h">Pending</h2><p class="sec-sub">What the next sync will do</p></div>
+    </div>
+    <div id="pending-body"><div class="card sk-card"></div></div>
+  </section>
+</main>
+
+<footer class="wrap foot">
+  <div id="totals" class="totals"></div>
+  <p class="privacy"><svg class="ico" aria-hidden="true"><use href="#i-lock"/></svg>Everything on this page stays on this Mac.</p>
+</footer>
+
+<div id="drawer" class="drawer-root" hidden>
+  <div class="scrim" data-close></div>
+  <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="d-title" tabindex="-1">
+    <div class="drawer-bar">
+      <span class="muted small">Session</span>
+      <span class="drawer-hint muted small"><kbd class="kbd">Esc</kbd> to close</span>
+      <button type="button" class="icon-btn" data-close aria-label="Close session details"><svg class="ico" aria-hidden="true"><use href="#i-x"/></svg></button>
+    </div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </aside>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
