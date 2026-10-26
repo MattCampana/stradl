@@ -8,8 +8,8 @@
 #   OUTDIR   directory that receives the tarballs and checksums.txt
 #
 # Writes stradl_<os>_<arch>.tar.gz for darwin/linux x arm64/amd64, each holding
-# a single `stradl` executable plus LICENSE, and checksums.txt in
-# `shasum -a 256` format. These names are the contract install.sh and
+# a single `stradl` executable plus LICENSE, Stradl.app.zip (the Mac app,
+# universal), and checksums.txt in `shasum -a 256` format. These names are the contract install.sh and
 # `stradl update` download against, so don't rename them casually.
 #
 # Runs on macOS only: the darwin builds need cgo (the menu bar links AppKit)
@@ -127,6 +127,19 @@ build darwin arm64
 build darwin amd64
 build linux arm64
 build linux amd64
+
+# Stradl.app, the native Mac window (universal), as Stradl.app.zip. install.sh
+# puts it in Applications and `stradl update` keeps it current. A host without
+# Swift ships the release without it, and both skip it.
+if command -v swift >/dev/null 2>&1 && command -v ditto >/dev/null 2>&1; then
+  echo "==> Stradl.app"
+  VERSION="$VERSION" "$ROOT/scripts/build-app.sh" "$WORK/app" >/dev/null
+  rm -f "$OUTDIR/Stradl.app.zip"
+  ditto -c -k --sequesterRsrc --keepParent "$WORK/app/Stradl.app" "$OUTDIR/Stradl.app.zip"
+  ASSETS+=("Stradl.app.zip")
+else
+  echo "build-release: warning: swift not found; releasing without Stradl.app" >&2
+fi
 
 (cd "$OUTDIR" && shasum -a 256 "${ASSETS[@]}" >checksums.txt)
 

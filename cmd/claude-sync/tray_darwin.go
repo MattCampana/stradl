@@ -87,6 +87,13 @@ func runTray(opts agent.Options) error {
 		mAttempt := systray.AddMenuItem("", "") // after a failed sync only
 		mAttempt.Disable()
 		mAttempt.Hide()
+		// The Mac app, when it's installed; a nil channel otherwise.
+		var appClicked <-chan struct{}
+		stradlApp, haveApp := appPath()
+		if haveApp {
+			mApp := systray.AddMenuItem("Open Stradl…", "Your Circle, sessions, folders, settings and logs")
+			appClicked = mApp.ClickedCh
+		}
 		// No dashboard (its server failed to start, which the log says):
 		// no menu item, and a nil channel that never fires.
 		var dashClicked <-chan struct{}
@@ -194,6 +201,8 @@ func runTray(opts agent.Options) error {
 						}
 						r.RefreshDesktop(rctx)
 					}()
+				case <-appClicked:
+					openPath(logger, stradlApp)
 				case <-dashClicked:
 					// Not openPath: its error line would put the key in the log.
 					if err := openBrowser(dashURL); err != nil {

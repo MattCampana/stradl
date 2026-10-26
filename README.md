@@ -25,6 +25,7 @@ Stradl keeps every Claude Code session on every one of your Macs, along with eve
 - **Conversations never fork silently.** Continue the same session on two Macs before they sync and Stradl merges both sides, so every turn survives.
 - **Your storage, your keys.** Sessions are compressed and encrypted on your Mac with [age](https://age-encryption.org) before they leave it. Azure (or R2, S3, GCS, WebDAV) only ever sees ciphertext.
 - **Set and forget.** A small menu bar app syncs in the background, at login, after you wake your Mac, and whenever a session changes.
+- **A real Mac app when you want to look.** Stradl.app in your Applications folder shows your Circle (every Mac syncing into your storage), your sessions, the project folders that sync, what the next sync will do, every setting, and the log.
 
 ## Install
 
@@ -59,12 +60,29 @@ Repeat on your other Macs with the same storage details and the same passphrase.
 
 ## Using it
 
+### The Stradl app
+
+Open **Stradl** from Applications (or **Open Stradl…** in the menu bar):
+
+| Section | What it shows |
+|---------|---------------|
+| **Overview** | Whether you're in sync, this week's sessions, and your Circle at a glance; Sync Now and Restart Claude |
+| **Circle** | Every Mac syncing into your storage: its name, version, last sync and what it worked on this week. Each Mac checks in after every sync; remove one you retired with a right-click |
+| **Sessions** | Every session on this Mac, searchable, with its sync state, prompts, files touched and a copyable `claude --resume` command |
+| **Folders** | The project folders that sync, git repositories marked, with size and last change; add any other folder |
+| **Next Sync** | What the next sync will upload, download, merge, hold or move to the trash |
+| **Settings** | What syncs (scope, project folders, sidebar, MCP servers, build output), extra folders, patterns to leave out, this Mac's name in the Circle, how often to check, start at login, pause |
+| **Logs** | The agent's log, live, with search, a problems-only filter and **Copy Diagnostics** (a report for troubleshooting, secrets removed) |
+
+### The menu bar
+
 Look for the Stradl mark in the menu bar:
 
 | Menu item | What it does |
 |-----------|--------------|
 | **Synced 2 min ago · 9 sessions** | Status at a glance |
-| **Open Dashboard…** | Your Macs, this week's sessions and the sync state of each one, in your browser |
+| **Open Stradl…** | The Stradl app (when it's installed) |
+| **Open Dashboard…** | Your Circle, this week's sessions and the sync state of each one, in your browser |
 | **Sync Now** | Sync immediately |
 | **Pause Syncing** | Stop syncing until you resume (handy on a metered connection) |
 | **Restart Claude to show N new sessions** | Appears when sessions arrive from another Mac; see below |
@@ -88,6 +106,11 @@ Look for the Stradl mark in the menu bar:
 |---------|---|
 | `stradl sync` | Two-way sync now (`--allow-mass-delete` to confirm a large delete) |
 | `stradl status` | Agent status, last sync, and what's waiting to sync |
+| `stradl circle` | The Macs in your Circle (`forget <name>` removes a retired one) |
+| `stradl folders` | The project folders that sync |
+| `stradl config show` / `set` / `add` / `remove` | See or change settings without editing YAML |
+| `stradl claude restart` | Restart Claude so its sidebar shows what arrived |
+| `stradl diagnostics` | A troubleshooting report with secrets removed |
 | `stradl dashboard` | Open the dashboard in your browser (`--no-open` prints its address) |
 | `stradl diff` | The files the next sync would upload, download, merge, delete or move to the trash |
 | `stradl agent install` / `uninstall` | Start or stop the background app at login |
@@ -120,6 +143,7 @@ Remote changes are detected by version tags, not timestamps, so a Mac with a wro
 ## Limitations
 
 - **Build output isn't synced** (`node_modules`, `.venv`, `__pycache__`, `.next` and the like): each Mac rebuilds its own. Set `sync_build_artifacts: true` in `~/.stradl/config.yaml` to include it, and `folder_exclude` to leave out more.
+- **Folders in Desktop, Documents or Downloads need your OK once.** macOS asks whether Stradl may read them the first time; click **Allow**. Until then those folders wait (everything else keeps syncing), and if you clicked Don't Allow, turn it on in System Settings → Privacy & Security → Files & Folders.
 - **A folder git is working in waits.** While git holds a lock in a repository (a commit or checkout in progress), that folder sits the sync out and catches up on the next one.
 - **macOS only** for the menu bar app. Linux builds run the same sync engine headless (`stradl agent run --headless`).
 - **A project you haven't cloned on a Mac** can't be opened there; the session still syncs, and the Claude app tells you the folder is missing. Stradl looks for clones in `~/code`, `~/Code`, `~/src`, `~/dev`, `~/Developer`, `~/Projects`, `~/projects`, `~/repos`, `~/git`, `~/GitHub`, `~/github`, `~/work`, `~/Work`, `~/workspace`, `~/Documents` and `~/Desktop`, up to four levels deep, and matches them by git remote. Clone the repo into one of those folders, or map the folder you use with `path_map` in `~/.stradl/config.yaml` (see [How it works](docs/how-it-works.md#different-usernames-different-folders)).

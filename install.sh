@@ -38,6 +38,7 @@ UPDATED_PROFILES=""
 KNOWN_PROFILES=""
 PATH_STATE=""
 SETUP_STATE=""
+APP_STATE=""
 SETUP_FAILED=0
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -83,6 +84,7 @@ Environment:
   STRADL_VERSION   install this version (e.g. 1.2.3) instead of the latest
   STRADL_BASE_URL  download the release assets from this URL instead
   STRADL_NO_SETUP  set to 1 to behave like --no-setup
+  STRADL_APP_DIR   install Stradl.app here instead of /Applications
 EOF
 }
 
@@ -288,6 +290,50 @@ run_setup() {
   fi
 }
 
+# install_app puts Stradl.app, the Mac app, in /Applications, or in
+# ~/Applications when /Applications isn't writable without a password. It is
+# optional: a release without it, or any problem here, leaves the
+# command-line install as it is and says so.
+install_app() {
+  local base="$1" want got zip dir dest stage old
+  [ "$OS" = darwin ] || return 0
+  command -v ditto >/dev/null 2>&1 || return 0
+  want="$(awk '{ n = $2; sub(/^\*/, "", n); if (n == "Stradl.app.zip") { print $1; exit } }' "$TMP/checksums.txt")"
+  [ -n "$want" ] || return 0 # this release has no app
+  zip="$TMP/Stradl.app.zip"
+  if ! curl -fsSL --proto "=https,http" --retry 3 --connect-timeout 20 -o "$zip" "$base/Stradl.app.zip"; then
+    APP_STATE="not installed (download failed); the menu bar app works without it"
+    return 0
+  fi
+  got="$(sha256 "$zip")"
+  if [ "$(lower "$want")" != "$(lower "$got")" ]; then
+    APP_STATE="not installed (checksum mismatch)"
+    return 0
+  fi
+  dir="${STRADL_APP_DIR:-/Applications}"
+  [ -w "$dir" ] || [ -n "${STRADL_APP_DIR:-}" ] || dir="$HOME/Applications"
+  mkdir -p "$dir" || { APP_STATE="not installed (can't create $(pretty "$dir"))"; return 0; }
+  stage="$TMP/app"
+  mkdir -p "$stage"
+  if ! ditto -x -k "$zip" "$stage" || [ ! -d "$stage/Stradl.app" ]; then
+    APP_STATE="not installed (couldn't unpack it)"
+    return 0
+  fi
+  xattr -dr com.apple.quarantine "$stage/Stradl.app" 2>/dev/null || true
+  dest="$dir/Stradl.app"
+  old="$dir/.Stradl.app.old.$$"
+  if [ -e "$dest" ]; then mv "$dest" "$old" || { APP_STATE="not installed (couldn't replace $(pretty "$dest"))"; return 0; }; fi
+  if ditto "$stage/Stradl.app" "$dest"; then
+    rm -rf "$old"
+    APP_STATE="$(pretty "$dest")"
+    info "Installed $(pretty "$dest")"
+  else
+    rm -rf "$dest"
+    [ -e "$old" ] && mv "$old" "$dest"
+    APP_STATE="not installed (copy failed)"
+  fi
+}
+
 main() {
   local setup=1
   case "${STRADL_NO_SETUP:-}" in
@@ -365,6 +411,7 @@ main() {
   STAGED=""
   info "Installed $(pretty "$BIN")"
 
+  install_app "$base"
   ensure_path
 
   if [ "$setup" = 1 ]; then
@@ -381,6 +428,9 @@ main() {
   printf '  %sbinary%s  %s\n' "$DIM" "$RESET" "$(pretty "$BIN")"
   printf '  %sPATH%s    %s\n' "$DIM" "$RESET" "$PATH_STATE"
   printf '  %ssetup%s   %s\n' "$DIM" "$RESET" "$SETUP_STATE"
+  if [ -n "$APP_STATE" ]; then
+    printf '  %sapp%s     %s\n' "$DIM" "$RESET" "$APP_STATE"
+  fi
   if [ "$PATH_STATE" != "already on PATH" ]; then
     # shellcheck disable=SC2016 # printed for the user to paste, unexpanded
     printf '\nTo use it in this terminal now:\n  export PATH="$HOME/.local/bin:$PATH"\n'

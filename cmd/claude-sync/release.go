@@ -374,6 +374,9 @@ func runUpdate(ctx context.Context, checkOnly bool, execPath string) error {
 
 	if latestVersion == currentVersion || util.CompareVersions(currentVersion, latestVersion) >= 0 {
 		fmt.Printf("%s✓%s Already up to date (v%s)\n", colorGreen, colorReset, currentVersion)
+		if _, installed := appPath(); !installed && !checkOnly {
+			updateApp(ctx, release) // the command is current; the app may be missing
+		}
 		return nil
 	}
 
@@ -400,6 +403,7 @@ func runUpdate(ctx context.Context, checkOnly bool, execPath string) error {
 	}
 
 	fmt.Printf("%s✓%s Updated stradl v%s → v%s\n", colorGreen, colorReset, currentVersion, latestVersion)
+	updateApp(ctx, release)
 	restartAgentAfterUpdate()
 	return nil
 }
