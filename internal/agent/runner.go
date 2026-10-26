@@ -659,7 +659,7 @@ func (r *Runner) logSync(reason string, took time.Duration, rep *sync.SyncReport
 		r.o.Log.Printf("  trashed: %s (deleted on another Mac; kept in ~/.stradl/trash for 30 days)", t)
 	}
 	for _, c := range rep.Conflicts {
-		r.o.Log.Printf("  conflict: %s (other version kept as .conflict copy)", c)
+		r.o.Log.Printf("  conflict: %s (other version kept beside it or in ~/.stradl/conflicts)", c)
 	}
 }
 

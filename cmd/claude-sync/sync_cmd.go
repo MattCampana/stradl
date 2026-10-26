@@ -109,7 +109,7 @@ func printSyncReport(r *sync.SyncReport, took time.Duration) {
 	line("✗", colorCyan, len(r.Deleted), "deleted on every Mac (deleted here)")
 	line("⌫", colorCyan, len(r.Trashed), "moved to ~/.stradl/trash (deleted on another Mac)")
 	line("…", colorDim, len(r.Deferred), "waiting for an open session or a git command to finish")
-	line("!", colorYellow, len(r.Conflicts), "conflicts kept as .conflict copies")
+	line("!", colorYellow, len(r.Conflicts), "conflicts: the other version kept (.conflict or .from- copy, or ~/.stradl/conflicts)")
 	line("?", colorYellow, len(r.Skipped), "skipped (unknown path token; check path_map)")
 	if n := len(r.NewDesktopSessions); n > 0 {
 		printWarning(fmt.Sprintf("%d new session(s) from other devices: restart the Claude app to see them in the sidebar.", n))
