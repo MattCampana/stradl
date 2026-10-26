@@ -1,0 +1,19 @@
+# golangci-lint v2 settings, used by `make lint` and the CI lint job.
+version: "2"
+
+linters:
+  # The standard set, spelled out so a golangci-lint upgrade can't change it
+  # silently. staticcheck includes what used to be gosimple and stylecheck.
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  exclusions:
+    generated: lax
+    presets:
+      # Unchecked errors from fmt.Print*, Close, os.Remove and friends: the
+      # CLI writes to a terminal, and there is nothing useful to do on failure.
+      - std-error-handling
