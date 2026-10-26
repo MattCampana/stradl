@@ -9,6 +9,7 @@ struct StradlApp: App {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 860, minHeight: 560)
+                .task { await Snapshots.runIfAsked(model) }
         }
         .windowToolbarStyle(.unified)
         .commands {
@@ -61,11 +62,10 @@ enum Pane: String, CaseIterable, Identifiable {
 
 struct ContentView: View {
     @EnvironmentObject var model: AppModel
-    @State private var section: Pane? = .overview
 
     var body: some View {
         NavigationSplitView {
-            List(Pane.allCases, selection: $section) { s in
+            List(Pane.allCases, selection: $model.pane) { s in
                 Label(s.rawValue, systemImage: s.symbol)
                     .badge(badge(for: s))
                     .tag(s)
@@ -78,8 +78,8 @@ struct ContentView: View {
                     BannerView(banner: banner) { model.message = nil }
                 }
                 Group {
-                    switch section ?? .overview {
-                    case .overview: OverviewView(section: $section)
+                    switch model.pane ?? .overview {
+                    case .overview: OverviewView(section: $model.pane)
                     case .circle: CircleView()
                     case .sessions: SessionsView()
                     case .folders: FoldersView()
@@ -90,7 +90,7 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .navigationTitle(section?.rawValue ?? "Stradl")
+            .navigationTitle(model.pane?.rawValue ?? "Stradl")
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button { model.syncNow() } label: {

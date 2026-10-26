@@ -143,8 +143,14 @@ final class LogTail: ObservableObject {
 
     private func level(_ s: String) -> LogLine.Level {
         let l = s.lowercased()
-        if l.contains("error") || l.contains("failed") || l.contains("fatal") { return .error }
-        if l.contains("warning") || l.contains("conflict") || l.contains("deferred") || l.contains("trashed") { return .warning }
+        if l.contains("sync failed") || l.contains("  error:") || l.contains("fatal") || l.contains("panic:")
+            || l.range(of: #"errors=[1-9]"#, options: .regularExpression) != nil {
+            return .error
+        }
+        if l.contains("warning") || l.contains("  conflict:") || l.contains("trashed:") || l.contains("couldn't")
+            || l.range(of: #"conflicts=[1-9]"#, options: .regularExpression) != nil {
+            return .warning
+        }
         return .info
     }
 }

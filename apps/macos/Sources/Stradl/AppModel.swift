@@ -13,6 +13,7 @@ final class AppModel: ObservableObject {
     @Published var busy: Set<String> = []     // actions in flight, by name
     @Published var message: Banner?           // last action's outcome
     @Published var lastRefresh: Date?
+    @Published var pane: Pane? = .overview      // the sidebar selection
 
     struct Banner: Identifiable, Equatable {
         var id = UUID()
@@ -133,6 +134,12 @@ final class AppModel: ObservableObject {
     func stopAgent() {
         perform("agent", success: "Stradl stopped and won't start at login") {
             try await StradlCLI.run(["agent", "uninstall"], timeout: 60)
+        }
+    }
+
+    func update() {
+        perform("update", success: "Stradl is up to date") {
+            try await StradlCLI.run(["update"], timeout: 300)
         }
     }
 

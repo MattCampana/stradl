@@ -119,11 +119,19 @@ struct SettingsForm: View {
             .onAppear { deviceName = c.deviceName }
             .onChange(of: c.deviceName) { deviceName = $0 }
         } else if let err = model.configError {
+            let outdated = err.contains("unknown command")
             VStack(spacing: 12) {
-                Image(systemName: "gearshape.2").font(.system(size: 36)).foregroundStyle(.secondary)
-                Text("Settings aren't available").font(.title3.weight(.semibold))
-                Text(err).foregroundStyle(.secondary).multilineTextAlignment(.center).textSelection(.enabled)
-                Button("Try Again") { Task { await model.refreshConfig() } }
+                Image(systemName: outdated ? "arrow.down.circle" : "gearshape.2").font(.system(size: 36)).foregroundStyle(.secondary)
+                Text(outdated ? "Update Stradl to change settings here" : "Settings aren't available").font(.title3.weight(.semibold))
+                Text(outdated ? "The stradl command on this Mac is older than this app." : err)
+                    .foregroundStyle(.secondary).multilineTextAlignment(.center).textSelection(.enabled)
+                if outdated {
+                    Button("Update Stradl") { model.update() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.busy.contains("update"))
+                } else {
+                    Button("Try Again") { Task { await model.refreshConfig() } }
+                }
             }
             .frame(maxWidth: .infinity)
             .padding(40)
