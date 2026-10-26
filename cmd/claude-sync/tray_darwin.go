@@ -49,6 +49,7 @@ func runTray(opts agent.Options) error {
 	opts.AppStart = app.StartTime
 	r := agent.NewRunner(opts)
 	p := opts.Paths
+	dashURL, stopDashboard := startAgentDashboard(p, r, logger)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -63,6 +64,7 @@ func runTray(opts agent.Options) error {
 				case <-time.After(10 * time.Second):
 				}
 			}
+			stopDashboard()
 		})
 	}
 
@@ -82,6 +84,13 @@ func runTray(opts agent.Options) error {
 		mAttempt := systray.AddMenuItem("", "") // after a failed sync only
 		mAttempt.Disable()
 		mAttempt.Hide()
+		// No dashboard (its server failed to start, which the log says):
+		// no menu item, and a nil channel that never fires.
+		var dashClicked <-chan struct{}
+		if dashURL != "" {
+			mDash := systray.AddMenuItem("Open Dashboard…", "See your Macs, this week's sessions and what is synced")
+			dashClicked = mDash.ClickedCh
+		}
 		mSync := systray.AddMenuItem("Sync Now", "Sync with your other Macs now")
 		mPause := systray.AddMenuItem("Pause Syncing", "Stop syncing until you resume")
 		systray.AddSeparator()
@@ -182,6 +191,11 @@ func runTray(opts agent.Options) error {
 						}
 						r.RefreshDesktop(rctx)
 					}()
+				case <-dashClicked:
+					// Not openPath: its error line would put the key in the log.
+					if err := openBrowser(dashURL); err != nil {
+						logger.Printf("open dashboard: %v", err)
+					}
 				case <-mLog.ClickedCh:
 					openPath(logger, p.Log)
 				case <-mFolder.ClickedCh:

@@ -90,6 +90,23 @@ Because the app only reads its sidebar at launch, sessions that arrive while it 
 
 It writes its status to `~/.stradl/status.json` and logs to `~/.stradl/agent.log`. Pausing writes `~/.stradl/paused`, which `stradl agent resume` removes.
 
+## Dashboard
+
+The agent also serves a dashboard: **Open Dashboard…** in the menu bar, or `stradl dashboard` in Terminal. It shows:
+
+- **Your Macs:** every Mac syncing into your storage, when each last synced, its Stradl version, and how many sessions it changed this week. After every successful sync each Mac writes a small encrypted heartbeat to `_metadata/devices/` in storage (its name, version, last sync, session count, and the sessions it changed in the last 7 days); the engine never syncs those as files.
+- **Last 7 days:** the sessions you worked on, grouped by day, with up to three of that day's prompts, the files Claude edited or wrote, the Macs involved and the time range. Days with nothing collapse to one line.
+- **All sessions:** every session on this Mac, searchable and filterable by project, Mac, sync state and archived, with a drawer for each session's details, a timeline of its prompts, replies, edits and commands, and the `claude --resume` command to pick it up in Terminal.
+- **Pending:** what the next sync would upload, download, merge or hold for a session that is open in Claude, from the same dry run as `stradl diff`.
+
+Each session's state is one of **synced**, **waiting to upload** or **download**, **merging** (changed on two Macs; the next sync merges them), **open in Claude** (held, per [Live sessions](#live-sessions)), **conflict** (a `.conflict` copy is waiting for `stradl conflicts`), or **not synced**.
+
+Everything is read on this Mac: transcripts, the sync state and the agent's status. The page refreshes every 15 seconds while it is visible, and **Sync now** asks the agent for an immediate sync.
+
+The server listens on `127.0.0.1` only, on a random port, and every request needs a random 256-bit key. The agent records the address, key included, in `~/.stradl/dashboard.json` (0600) for the menu bar and `stradl dashboard`, and removes it when it exits; a new key is made each time the agent starts. Opening the address trades the key for an `HttpOnly`, `SameSite=Strict` cookie and drops it from the address bar. Requests that name any other host are refused, which stops DNS-rebinding attacks, and **Sync now** only works from the dashboard's own page. The page loads nothing from the network: no fonts, scripts or images from anywhere else, enforced by a strict Content-Security-Policy.
+
+Without a running agent, `stradl dashboard` serves the dashboard itself until you press Ctrl-C, and its **Sync now** runs a sync in that process. `stradl dashboard --no-open` prints the address instead of opening the browser.
+
 ## Files
 
 ```
@@ -98,6 +115,7 @@ It writes its status to `~/.stradl/status.json` and logs to `~/.stradl/agent.log
 ├── age-key.txt     encryption identity derived from your passphrase (0600)
 ├── state.json      per-file hash, ETag and sync state
 ├── status.json     the agent's last result (read by the menu bar and `stradl status`)
+├── dashboard.json  the running agent's dashboard address and key (0600)
 ├── agent.log       background agent log
 └── sync.lock       held while a sync runs
 ```

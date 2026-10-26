@@ -141,11 +141,15 @@ func acquireAgentLock(ctx context.Context, p agent.Paths, stderr io.Writer, tty 
 	})
 }
 
-// runHeadless runs the sync loop until SIGINT or SIGTERM.
+// runHeadless runs the sync loop, and the dashboard, until SIGINT or
+// SIGTERM.
 func runHeadless(opts agent.Options) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return agent.NewRunner(opts).Run(ctx)
+	r := agent.NewRunner(opts)
+	_, stopDashboard := startAgentDashboard(opts.Paths, r, opts.Log)
+	defer stopDashboard()
+	return r.Run(ctx)
 }
 
 func newLaunchd(p agent.Paths, exe string) *agent.Launchd {

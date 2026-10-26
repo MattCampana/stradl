@@ -63,10 +63,13 @@ Look for the Stradl mark in the menu bar:
 | Menu item | What it does |
 |-----------|--------------|
 | **Synced 2 min ago · 9 sessions** | Status at a glance |
+| **Open Dashboard…** | Your Macs, this week's sessions and the sync state of each one, in your browser |
 | **Sync Now** | Sync immediately |
 | **Pause Syncing** | Stop syncing until you resume (handy on a metered connection) |
 | **Restart Claude to show N new sessions** | Appears when sessions arrive from another Mac; see below |
 | **Open Log** | `~/.stradl/agent.log` |
+
+**The dashboard shows what is synced and what you worked on.** Choose **Open Dashboard…** (or run `stradl dashboard`) for a page with every Mac syncing into your storage and when each last synced, the last 7 days of sessions day by day (prompts, files touched, which Mac), a searchable list of every session on this Mac with its sync state, and what the next sync will do. It runs on this Mac only, at a private `127.0.0.1` address, and nothing on it leaves the Mac.
 
 **New sessions from another Mac appear after Claude restarts.** The Claude desktop app reads its sidebar when it launches, so Stradl lets you know when new sessions arrive and offers to restart Claude for you. Sessions already in your sidebar update in place.
 
@@ -80,6 +83,7 @@ Look for the Stradl mark in the menu bar:
 |---------|---|
 | `stradl sync` | Two-way sync now |
 | `stradl status` | Agent status, last sync, and what's waiting to sync |
+| `stradl dashboard` | Open the dashboard in your browser (`--no-open` prints its address) |
 | `stradl diff` | The files the next sync would upload, download or merge |
 | `stradl agent install` / `uninstall` | Start or stop the background app at login |
 | `stradl agent pause` / `resume` | Pause or resume background syncing |
