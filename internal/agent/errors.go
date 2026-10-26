@@ -22,6 +22,8 @@ const (
 	ErrorAuth        ErrorKind = "auth"         // storage rejected the credentials
 	ErrorNoContainer ErrorKind = "no-container" // the container or bucket is gone
 	ErrorOffline     ErrorKind = "offline"      // storage unreachable; retrying fixes it
+	ErrorICloud      ErrorKind = "icloud"       // files iCloud keeps only in the cloud couldn't be read
+	ErrorPermission  ErrorKind = "permission"   // macOS refused access to some files
 	ErrorOther       ErrorKind = "other"
 )
 
@@ -36,6 +38,10 @@ func (k ErrorKind) Summary() string {
 		return "Storage container not found"
 	case ErrorOffline:
 		return "Offline: will retry"
+	case ErrorICloud:
+		return "Some files are only in iCloud: will retry"
+	case ErrorPermission:
+		return "macOS blocked access to some files"
 	}
 	return "Sync error (see log)"
 }
@@ -56,8 +62,12 @@ func (k ErrorKind) rank() int {
 		return 2
 	case ErrorOffline:
 		return 3
+	case ErrorPermission:
+		return 4
+	case ErrorICloud:
+		return 5
 	}
-	return 4
+	return 6
 }
 
 // ClassifyError sorts the error a whole sync failed with. A sync fails as a
@@ -96,10 +106,26 @@ func classify(err error) ErrorKind {
 	if k := classifyMessage(err.Error()); k != ErrorOffline && k != ErrorOther {
 		return k
 	}
+	// Local file problems first: a syscall.Errno also satisfies net.Error,
+	// so checking for network errors by that interface would call a file
+	// macOS won't let us read "offline".
+	switch {
+	case errors.Is(err, syscall.EDEADLK):
+		// What macOS answers when a process may not download a file iCloud
+		// keeps only in the cloud ("Optimize Mac Storage").
+		return ErrorICloud
+	case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+		return ErrorPermission
+	}
 	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if _, isErrno := netErr.(syscall.Errno); !isErrno {
+			return ErrorOffline
+		}
+	}
 	var urlErr *url.Error
 	switch {
-	case errors.As(err, &netErr), errors.As(err, &urlErr),
+	case errors.As(err, &urlErr),
 		errors.Is(err, context.DeadlineExceeded),
 		errors.Is(err, syscall.ECONNREFUSED), errors.Is(err, syscall.ECONNRESET),
 		errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.EHOSTUNREACH):
@@ -117,6 +143,8 @@ var (
 	noContainerText = []string{"containernotfound", "nosuchbucket"}
 	offlineText     = []string{"no such host", "connection refused", "connection reset", "network is unreachable",
 		"no route to host", "host is down", "timeout", "deadline exceeded"}
+	icloudText     = []string{"resource deadlock avoided"}
+	permissionText = []string{"operation not permitted", "permission denied"}
 )
 
 // classifyMessage sorts an error by its text alone, for errors that have
@@ -138,6 +166,10 @@ func classifyMessage(msg string) ErrorKind {
 		return ErrorAuth
 	case has(noContainerText):
 		return ErrorNoContainer
+	case has(icloudText):
+		return ErrorICloud
+	case has(permissionText):
+		return ErrorPermission
 	case has(offlineText):
 		return ErrorOffline
 	}

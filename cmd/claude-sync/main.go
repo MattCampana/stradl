@@ -58,6 +58,11 @@ const tagline = "Musical chairs for your Claude sessions."
 const upstreamAttribution = "Built on tawanorg/claude-sync (MIT)"
 
 func main() {
+	// Before anything reads a file: a project folder in an iCloud-synced
+	// Desktop can hold files that live only in the cloud until read. If macOS
+	// refuses, those files fail one by one and the log says so.
+	_ = allowICloudDownloads()
+
 	rootCmd := &cobra.Command{
 		Use:   "stradl",
 		Short: "Musical chairs for your Claude sessions",

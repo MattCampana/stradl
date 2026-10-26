@@ -64,6 +64,8 @@ var errorSummaries = map[string]string{
 	"auth":         "Storage token expired or invalid",
 	"no-container": "Storage container not found",
 	"offline":      "Offline: will retry",
+	"icloud":       "Some files are only in iCloud: will retry",
+	"permission":   "macOS blocked access to some files",
 }
 
 // errorSummary is the short line for the agent's last error.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -181,6 +182,10 @@ func TestClassifyError(t *testing.T) {
 		{"url error", &url.Error{Op: "Get", URL: "https://x", Err: errors.New("EOF")}, ErrorOffline},
 		{"net.Error", fmt.Errorf("list: %w", netErr{}), ErrorOffline},
 		{"refused", fmt.Errorf("dial: %w", syscall.ECONNREFUSED), ErrorOffline},
+		{"iCloud-only file", fmt.Errorf("x.md: %w", &fs.PathError{Op: "read", Path: "/Users/m/Desktop/x.md", Err: syscall.EDEADLK}), ErrorICloud},
+		{"iCloud-only by text", errors.New("1008 files failed to sync; first: read /Users/m/Desktop/x.md: resource deadlock avoided"), ErrorICloud},
+		{"macOS refused", &fs.PathError{Op: "open", Path: "/Users/m/Desktop", Err: syscall.EPERM}, ErrorPermission},
+		{"disk full is not offline", &fs.PathError{Op: "write", Path: "/x", Err: syscall.ENOSPC}, ErrorOther},
 		{"unreachable", fmt.Errorf("dial: %w", syscall.ENETUNREACH), ErrorOffline},
 		{"timeout", context.DeadlineExceeded, ErrorOffline},
 		{"refused by text", errors.New("dial tcp 127.0.0.1:10000: connect: connection refused"), ErrorOffline},
