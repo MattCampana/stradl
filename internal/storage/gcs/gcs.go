@@ -2,6 +2,7 @@ package gcs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,9 +40,14 @@ func New(cfg *appstorage.StorageConfig) (appstorage.Storage, error) {
 			home, _ := os.UserHomeDir()
 			credPath = home + credPath[1:]
 		}
-		opts = append(opts, option.WithCredentialsFile(credPath))
+		data, err := os.ReadFile(credPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read GCS credentials file: %w", err)
+		}
+		opts = append(opts, option.WithAuthCredentialsJSON(credentialsType(data), data))
 	} else if cfg.CredentialsJSON != "" {
-		opts = append(opts, option.WithCredentialsJSON([]byte(cfg.CredentialsJSON)))
+		data := []byte(cfg.CredentialsJSON)
+		opts = append(opts, option.WithAuthCredentialsJSON(credentialsType(data), data))
 	}
 	// If no credentials specified, the client will use Application Default Credentials
 
@@ -181,4 +187,24 @@ func (c *Client) BucketExists(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("failed to check bucket: %w", err)
 	}
 	return true, nil
+}
+
+// credentialsType reads the "type" field of a Google credentials JSON file so
+// service accounts, user credentials and workload identity federation configs
+// all keep working (the typed option replaces the deprecated untyped one).
+func credentialsType(data []byte) option.CredentialsType {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(data, &probe)
+	switch probe.Type {
+	case "authorized_user":
+		return option.AuthorizedUser
+	case "external_account":
+		return option.ExternalAccount
+	case "impersonated_service_account":
+		return option.ImpersonatedServiceAccount
+	default:
+		return option.ServiceAccount
+	}
 }

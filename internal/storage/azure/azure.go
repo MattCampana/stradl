@@ -279,7 +279,7 @@ func classify(err error) error {
 	case bloberror.HasCode(err, bloberror.ConditionNotMet):
 		return fmt.Errorf("%w: %w", storage.ErrPreconditionFailed, err)
 	case bloberror.HasCode(err, bloberror.AuthenticationFailed):
-		return fmt.Errorf("Azure rejected the credentials; the SAS token may have expired (extend its stored access policy in the portal, or rerun init with a new token): %w", err)
+		return fmt.Errorf("the Azure storage service rejected the credentials; the SAS token may have expired (extend its stored access policy in the portal, or rerun init with a new token): %w", err)
 	case bloberror.HasCode(err, bloberror.AuthorizationPermissionMismatch, bloberror.AuthorizationFailure):
 		return fmt.Errorf("the SAS token lacks a required permission (it needs read, add, create, write, delete and list): %w", err)
 	}
