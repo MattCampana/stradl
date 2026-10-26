@@ -86,6 +86,47 @@ func TestSyncWaitsForRunningSync(t *testing.T) {
 	})
 }
 
+func TestSyncAllowMassDeleteReachesTheEngine(t *testing.T) {
+	installSyncSpy(t, false)
+	var got []bool
+	old := syncOnce
+	syncOnce = func(ctx context.Context, cfg *config.Config, q, wait bool) (*sync.SyncReport, error) {
+		got = append(got, cfg.AllowMassDelete)
+		return &sync.SyncReport{}, nil
+	}
+	t.Cleanup(func() { syncOnce = old })
+	if err := execute(syncCmd()); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute(syncCmd(), "--allow-mass-delete"); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] || !got[1] {
+		t.Fatalf("AllowMassDelete per run = %v, want [false true]", got)
+	}
+}
+
+func TestPrintSyncReportShowsDeletesTrashAndWarnings(t *testing.T) {
+	out := captureStdout(t, func() {
+		printSyncReport(&sync.SyncReport{
+			Deleted:  []string{"_folders/code/app/old.go"},
+			Trashed:  []string{"skills/x/SKILL.md", "plans/p.md"},
+			Warnings: []string{"~/code/big: 15 of 20 synced files would be deleted at once, so none were."},
+		}, time.Second)
+	})
+	for _, want := range []string{"1 deleted on every Mac", "2 moved to ~/.stradl/trash", "15 of 20 synced files"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report is missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Everything is in sync") {
+		t.Errorf("a pass with deletions isn't idle:\n%s", out)
+	}
+	if !pendingWork(&sync.SyncReport{Warnings: []string{"w"}}) || pendingWork(&sync.SyncReport{}) {
+		t.Error("pendingWork should count warnings and nothing else when idle")
+	}
+}
+
 func TestMigrateHoldsSyncLock(t *testing.T) {
 	installSyncSpy(t, false) // a config whose key is missing
 	release, err := sync.AcquireLock(config.LockFilePath(), false, 0)

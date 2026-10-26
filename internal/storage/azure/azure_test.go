@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"sort"
@@ -278,5 +280,116 @@ func TestSASTokenAuth(t *testing.T) {
 	ok, err = mustNew(t, &missing).BucketExists(ctx)
 	if err != nil || ok {
 		t.Fatalf("missing container = %v, %v; want false, nil", ok, err)
+	}
+}
+
+func TestConditionalDelete(t *testing.T) {
+	c := mustNew(t, newContainer(t))
+	ctx := context.Background()
+	const key = "_folders/code/app/main.go.age"
+
+	e1, err := c.UploadIf(ctx, key, []byte("v1"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e2, err := c.UploadIf(ctx, key, []byte("v2"), e1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A device that last saw v1 must not delete v2.
+	if err := c.DeleteIf(ctx, key, e1); !errors.Is(err, storage.ErrPreconditionFailed) {
+		t.Fatalf("stale delete error = %v, want ErrPreconditionFailed", err)
+	}
+	if data, _ := c.Download(ctx, key); string(data) != "v2" {
+		t.Fatalf("a stale delete removed or changed the blob: %q", data)
+	}
+	// The listed ETag (unquoted) deletes the current version.
+	listed, err := c.List(ctx, "_folders/")
+	if err != nil || len(listed) != 1 || listed[0].ETag != e2 {
+		t.Fatalf("list = %v, %v", listed, err)
+	}
+	if err := c.DeleteIf(ctx, key, listed[0].ETag); err != nil {
+		t.Fatalf("delete current version: %v", err)
+	}
+	if _, err := c.Head(ctx, key); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("blob survived the delete: %v", err)
+	}
+	// Already gone is not an error; a missing ETag is.
+	if err := c.DeleteIf(ctx, key, e2); err != nil {
+		t.Fatalf("delete of a missing blob = %v, want nil", err)
+	}
+	if err := c.DeleteIf(ctx, key, ""); err == nil {
+		t.Fatal("DeleteIf without an ETag must refuse")
+	}
+}
+
+// failingReader yields n bytes from r, then fails.
+type failingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (f *failingReader) Read(p []byte) (int, error) {
+	if f.n <= 0 {
+		return 0, errors.New("disk read failed")
+	}
+	if int64(len(p)) > f.n {
+		p = p[:f.n]
+	}
+	n, err := f.r.Read(p)
+	f.n -= int64(n)
+	return n, err
+}
+
+func TestStreamUploadAndDownload(t *testing.T) {
+	c := mustNew(t, newContainer(t))
+	ctx := context.Background()
+	const key = "_folders/code/big/data.bin.age"
+
+	// Larger than one staged block, so the upload commits a block list.
+	data := make([]byte, 9<<20+123)
+	_, _ = rand.NewChaCha8([32]byte{7}).Read(data)
+
+	e1, err := c.UploadStream(ctx, key, bytes.NewReader(data), "")
+	if err != nil || e1 == "" {
+		t.Fatalf("stream create: etag=%q err=%v", e1, err)
+	}
+	if _, err := c.UploadStream(ctx, key, bytes.NewReader([]byte("clobber")), ""); !errors.Is(err, storage.ErrPreconditionFailed) {
+		t.Fatalf("second create-only stream error = %v, want ErrPreconditionFailed", err)
+	}
+
+	rc, etag, err := c.DownloadStream(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(rc)
+	_ = rc.Close()
+	if err != nil || !bytes.Equal(got, data) || etag != e1 {
+		t.Fatalf("stream download: %d bytes, etag %q (want %q), err %v", len(got), etag, e1, err)
+	}
+	listed, _ := c.List(ctx, "")
+	if len(listed) != 1 || listed[0].ETag != e1 || listed[0].Size != int64(len(data)) {
+		t.Fatalf("list after stream upload = %+v", listed)
+	}
+
+	// A read error mid-upload commits nothing.
+	if _, err := c.UploadStream(ctx, key, &failingReader{r: bytes.NewReader(data), n: 5 << 20}, e1); err == nil {
+		t.Fatal("a failing reader must fail the upload")
+	}
+	if h, err := c.Head(ctx, key); err != nil || h.ETag != e1 {
+		t.Fatalf("a failed upload replaced the blob: %+v %v", h, err)
+	}
+
+	// Compare-and-swap: a stale ETag loses, the current one wins.
+	e2, err := c.UploadStream(ctx, key, bytes.NewReader(data[:1000]), e1)
+	if err != nil || e2 == e1 {
+		t.Fatalf("stream update: %q %v", e2, err)
+	}
+	if _, err := c.UploadStream(ctx, key, bytes.NewReader([]byte("stale")), e1); !errors.Is(err, storage.ErrPreconditionFailed) {
+		t.Fatalf("stale stream update error = %v, want ErrPreconditionFailed", err)
+	}
+	if _, _, err := c.DownloadStream(ctx, "missing.age"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("missing blob stream error = %v, want ErrNotFound", err)
 	}
 }

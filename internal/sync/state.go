@@ -31,6 +31,20 @@ type FileState struct {
 	// delete stays local: the remote copy is kept for the other devices and is
 	// not re-downloaded here unless another device changes it.
 	LocalDeleted bool `json:"local_deleted,omitempty"`
+
+	// Mode is the file's permission bits when it was reconciled (0 when not
+	// tracked, as for desktop records and state written before modes synced).
+	// A chmod alone, such as making a script executable, then counts as a
+	// local change.
+	Mode uint32 `json:"mode,omitempty"`
+}
+
+// cwdEntry caches the first working folder recorded in a top-level transcript,
+// keyed by its sync path. Size lets a transcript with no cwd yet be read again
+// once it grows; a found cwd never changes.
+type cwdEntry struct {
+	Size int64  `json:"size"`
+	Cwd  string `json:"cwd,omitempty"`
 }
 
 // adoptStorage ties the state to storage target id. When the state belonged
@@ -65,6 +79,54 @@ func (s *SyncState) SetReconciled(npath string, info os.FileInfo, hash, etag str
 		ModTime:    info.ModTime(),
 		Uploaded:   time.Now(),
 		RemoteETag: etag,
+		Mode:       trackedMode(npath, info),
+	}
+}
+
+// trackedMode returns the permission bits recorded for npath, or 0 for a
+// desktop record: the desktop app rewrites those with its own mode.
+func trackedMode(npath string, info os.FileInfo) uint32 {
+	if strings.HasPrefix(npath, DesktopPrefix) || info.Mode()&os.ModeSymlink != 0 {
+		return 0 // a link's own mode is meaningless
+	}
+	return uint32(info.Mode().Perm())
+}
+
+// setMode updates the recorded mode of a tracked file (0 forgets it).
+func (s *SyncState) setMode(npath string, mode uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if f, ok := s.Files[npath]; ok {
+		f.Mode = mode
+	}
+}
+
+// cachedCwd returns the cached first cwd of a transcript.
+func (s *SyncState) cachedCwd(npath string) (cwdEntry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.TranscriptCwds[npath]
+	return e, ok
+}
+
+// setCachedCwd records the first cwd of a transcript.
+func (s *SyncState) setCachedCwd(npath string, e cwdEntry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.TranscriptCwds == nil {
+		s.TranscriptCwds = make(map[string]cwdEntry)
+	}
+	s.TranscriptCwds[npath] = e
+}
+
+// pruneCwds forgets cached transcripts that are no longer present.
+func (s *SyncState) pruneCwds(present map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for p := range s.TranscriptCwds {
+		if !present[p] {
+			delete(s.TranscriptCwds, p)
+		}
 	}
 }
 
@@ -106,6 +168,11 @@ type SyncState struct {
 	// Their ETags and hashes mean nothing against another container, so the
 	// file states are dropped when the target changes (see NewSyncer).
 	StorageID string `json:"storage_id,omitempty"`
+
+	// TranscriptCwds caches each top-level transcript's first working folder,
+	// one of the sources project folders are discovered from, so a sync reads
+	// only transcripts it hasn't seen before.
+	TranscriptCwds map[string]cwdEntry `json:"transcript_cwds,omitempty"`
 
 	// savePath is the custom path to save state to (if set)
 	savePath string     `json:"-"`
@@ -177,7 +244,11 @@ func (s *SyncState) Save() error {
 		return fmt.Errorf("failed to create state directory: %w", err)
 	}
 
+	// Hold the lock while serializing: a long sync saves its progress while
+	// workers are still recording files.
+	s.mu.Lock()
 	data, err := json.MarshalIndent(s, "", "  ")
+	s.mu.Unlock()
 	if err != nil {
 		return fmt.Errorf("failed to serialize state: %w", err)
 	}
@@ -339,15 +410,16 @@ func GetLocalFiles(claudeDir string, syncPaths []string, excludeFn ...func(strin
 				// Normalize to forward slashes for consistent matching
 				relPath = filepath.ToSlash(relPath)
 
-				// Skip excluded directories entirely
+				// Skip excluded directories entirely (never the root itself)
 				if fi.IsDir() {
-					if isExcluded != nil && isExcluded(relPath) {
+					if relPath != "." && isExcluded != nil && isExcluded(relPath) {
 						return filepath.SkipDir
 					}
 					return nil
 				}
-				// Skip symlinks
-				if fi.Mode()&os.ModeSymlink != 0 {
+				// Skip symlinks, and sockets, pipes and devices (such as git's
+				// fsmonitor socket), which have no content to sync
+				if !fi.Mode().IsRegular() {
 					return nil
 				}
 				// Skip excluded files
@@ -362,8 +434,8 @@ func GetLocalFiles(claudeDir string, syncPaths []string, excludeFn ...func(strin
 				return nil, fmt.Errorf("failed to walk %s: %w", syncPath, err)
 			}
 		} else {
-			// Skip symlinks
-			if info.Mode()&os.ModeSymlink != 0 {
+			// Skip symlinks and other non-regular files
+			if !info.Mode().IsRegular() {
 				continue
 			}
 			// Skip excluded files

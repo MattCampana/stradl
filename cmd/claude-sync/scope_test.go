@@ -8,11 +8,11 @@ import (
 )
 
 // TestResolveScope covers resolveScope: explicit valid values pass through,
-// an empty value defaults to sessions (Stradl syncs sessions, not plugins or
-// settings), and an unrecognized value is rejected.
+// an empty value defaults to everything (every Mac ends up identical), and an
+// unrecognized value is rejected.
 func TestResolveScope(t *testing.T) {
 	t.Run("valid values pass through unchanged", func(t *testing.T) {
-		for _, in := range []string{config.ScopeFull, config.ScopeSessions} {
+		for _, in := range []string{config.ScopeEverything, config.ScopeFull, config.ScopeSessions} {
 			got, err := resolveScope(in)
 			if err != nil {
 				t.Errorf("resolveScope(%q) returned error: %v", in, err)
@@ -23,10 +23,10 @@ func TestResolveScope(t *testing.T) {
 		}
 	})
 
-	t.Run("empty defaults to sessions without prompting", func(t *testing.T) {
+	t.Run("empty defaults to everything without prompting", func(t *testing.T) {
 		got, err := resolveScope("")
-		if err != nil || got != config.ScopeSessions {
-			t.Errorf("resolveScope(\"\") = %q, %v; want %q", got, err, config.ScopeSessions)
+		if err != nil || got != config.ScopeEverything {
+			t.Errorf("resolveScope(\"\") = %q, %v; want %q", got, err, config.ScopeEverything)
 		}
 	})
 

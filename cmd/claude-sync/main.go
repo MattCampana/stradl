@@ -217,8 +217,12 @@ Supported providers:
   - s3-compatible: Any S3-compatible provider via custom endpoint (Backblaze B2, MinIO, Wasabi, ...)
   - webdav:        WebDAV (Nextcloud, ownCloud, etc. - self-hosted)
 
-New setups sync sessions only (conversation history, plans and tasks); pass
---scope full to also sync settings, plugins, skills and agents. Rerunning init
+New setups sync everything: all of ~/.claude except login credentials and
+per-Mac caches and logs, MCP servers, and every project folder your sessions
+use, git history included (build output such as node_modules stays on each
+Mac). Pass --scope full to sync only the settings, plugins, skills, agents and
+sessions in ~/.claude, or --scope sessions for conversation history alone.
+Rerunning init
 replaces the storage settings and key but keeps everything else in the config
 (path_map, desktop_sync, sync paths, excludes, MCP sync, the sync interval, and
 the scope unless --scope is given).
@@ -251,7 +255,7 @@ Examples:
 
 	// Provider selection
 	cmd.Flags().StringVar(&opts.provider, "provider", "", "Storage provider: azure, r2, s3, gcs, s3-compatible, or webdav")
-	cmd.Flags().StringVar(&opts.scope, "scope", "", "Sync scope: 'sessions' (default, conversation history only) or 'full' (also settings, plugins, skills, agents)")
+	cmd.Flags().StringVar(&opts.scope, "scope", "", "Sync scope: 'everything' (default: all of ~/.claude, MCP servers and project folders), 'full' (~/.claude settings, plugins, skills, agents and sessions) or 'sessions' (conversation history only)")
 	cmd.Flags().StringVar(&opts.bucket, "bucket", "", "Bucket name (the container for Azure, default \""+defaultAzureContainer+"\")")
 	cmd.Flags().BoolVar(&opts.usePassphrase, "passphrase", false, "Derive encryption key from passphrase")
 	cmd.Flags().BoolVarP(&opts.force, "force", "f", false, "Overwrite existing config/key without prompting")
@@ -357,17 +361,17 @@ func initPassphraseOnly(ctx context.Context, keyPath string) error {
 	return nil
 }
 
-// resolveScope validates a --scope value. Returns "full" or "sessions". An
-// empty value means "sessions": Stradl syncs portable conversation data, not
-// machine-specific settings and plugins, unless asked to with --scope full.
+// resolveScope validates a --scope value. Returns "everything", "full" or
+// "sessions". An empty value means "everything": every Mac ends up identical
+// unless asked otherwise.
 func resolveScope(scope string) (string, error) {
 	switch scope {
-	case config.ScopeFull, config.ScopeSessions:
+	case config.ScopeEverything, config.ScopeFull, config.ScopeSessions:
 		return scope, nil
 	case "":
-		return config.ScopeSessions, nil
+		return config.ScopeEverything, nil
 	default:
-		return "", fmt.Errorf("invalid --scope %q (use \"sessions\" or \"full\")", scope)
+		return "", fmt.Errorf("invalid --scope %q (use \"everything\", \"full\" or \"sessions\")", scope)
 	}
 }
 
@@ -564,8 +568,13 @@ func initFullSetup(ctx context.Context, keyPath string, opts initOptions) error 
 	cfg.EncryptionKey = "~/" + config.ConfigDir + "/" + config.AgeKeyFile
 	// Storage now names the target, so the legacy top-level R2 fields go.
 	cfg.AccountID, cfg.AccessKeyID, cfg.SecretAccessKey, cfg.Bucket, cfg.Endpoint = "", "", "", "", ""
-	if opts.scope != "" || cfg.Scope == "" {
+	if opts.scope != "" {
+		cfg.Scope, cfg.ScopeExplicit = scope, true
+	} else if cfg.Scope == "" {
 		cfg.Scope = scope
+	}
+	if cfg.Scope == config.ScopeEverything && cfg.MCPSync == nil {
+		cfg.SetMCPSync(true) // everything includes the MCP servers in ~/.claude.json
 	}
 
 	if err := config.Save(cfg); err != nil {
@@ -578,8 +587,11 @@ func initFullSetup(ctx context.Context, keyPath string, opts initOptions) error 
 	// Done
 	fmt.Println()
 	fmt.Println(colorGreen + "  Setup complete!" + colorReset)
-	if cfg.Scope == config.ScopeSessions {
-		printInfo("Syncing sessions only (use 'stradl init --scope full' to include settings and plugins)")
+	switch cfg.Scope {
+	case config.ScopeSessions:
+		printInfo("Syncing sessions only (use 'stradl init --scope everything' to sync everything)")
+	case config.ScopeFull:
+		printInfo("Syncing ~/.claude settings and sessions (use 'stradl init --scope everything' to include project folders)")
 	}
 	fmt.Println()
 	printInfo("Next:")
@@ -2544,6 +2556,11 @@ func runPathsList() error {
 		scopeLabel = config.ScopeFull
 	}
 
+	if cfg.IsEverything() {
+		printEverythingPaths(cfg, status.Excludes)
+		return nil
+	}
+
 	// List what actually syncs, not the raw config list. Under sessions scope
 	// the effective set is the intersection with SessionSyncPaths, so showing
 	// cfg.SyncPaths verbatim would advertise paths that are never uploaded.
@@ -2587,6 +2604,38 @@ func runPathsList() error {
 	return nil
 }
 
+// printEverythingPaths is `paths list` under the "everything" scope, where
+// sync paths don't apply.
+func printEverythingPaths(cfg *config.Config, excludes []string) {
+	fmt.Printf("\n%sSyncing everything%s (scope: %s):\n", colorBold, colorReset, config.ScopeEverything)
+	fmt.Printf("  %s+%s all of ~/.claude, except login credentials and per-Mac caches, logs and process records\n", colorGreen, colorReset)
+	if cfg.IsMCPSyncEnabled() {
+		fmt.Printf("  %s+%s MCP servers from ~/.claude.json\n", colorGreen, colorReset)
+	}
+	if cfg.IsFolderSyncEnabled() {
+		fmt.Printf("  %s+%s every project folder your sessions use, git history included\n", colorGreen, colorReset)
+		for _, f := range cfg.ExtraFolders {
+			fmt.Printf("  %s+%s %s (extra_folders)\n", colorCyan, colorReset, f)
+		}
+	} else {
+		fmt.Printf("  %s-%s project folders (folder_sync is off)\n", colorYellow, colorReset)
+	}
+	if !cfg.SyncBuildArtifacts {
+		fmt.Printf("\n%sLeft on each Mac%s (sync_build_artifacts: true includes them):\n", colorBold, colorReset)
+		fmt.Printf("  %s-%s %s\n", colorYellow, colorReset, strings.Join(config.BuildArtifacts, ", "))
+	}
+	if len(excludes)+len(cfg.FolderExclude) > 0 {
+		fmt.Printf("\n%sExclude Filters%s:\n", colorBold, colorReset)
+		for _, e := range excludes {
+			fmt.Printf("  %s-%s %s\n", colorYellow, colorReset, e)
+		}
+		for _, e := range cfg.FolderExclude {
+			fmt.Printf("  %s-%s %s (project folders)\n", colorYellow, colorReset, e)
+		}
+	}
+	fmt.Println()
+}
+
 func pathsAddCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "add <path>",
@@ -2600,6 +2649,14 @@ conflicting exclude is automatically removed.`,
 			cfg, err := config.Load()
 			if err != nil {
 				return err
+			}
+
+			if cfg.IsEverything() {
+				if err := paths.ValidatePath(args[0]); err != nil {
+					return fmt.Errorf("invalid sync path: %w", err)
+				}
+				fmt.Printf("%s✓%s %s already syncs: the %q scope covers all of ~/.claude\n", colorGreen, colorReset, args[0], config.ScopeEverything)
+				return nil
 			}
 
 			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir(), cfg.Scope)
@@ -2628,6 +2685,7 @@ conflicting exclude is automatically removed.`,
 
 			cfg.SyncPaths = mgr.SyncPaths()
 			cfg.Exclude = mgr.Excludes()
+			cfg.ScopeExplicit = true // a hand-picked path list is a choice of scope
 			if err := config.Save(cfg); err != nil {
 				return err
 			}
@@ -2657,6 +2715,12 @@ Custom paths are simply removed from the list.`,
 				return err
 			}
 
+			if cfg.IsEverything() {
+				fmt.Printf("%s!%s The %q scope syncs all of ~/.claude without a path list.\n", colorYellow, colorReset, config.ScopeEverything)
+				fmt.Printf("  To stop syncing %s, run %sstradl paths exclude %s%s.\n", args[0], colorCyan, args[0], colorReset)
+				return nil
+			}
+
 			mgr := paths.NewManager(cfg.SyncPaths, cfg.Exclude, config.ClaudeDir(), cfg.Scope)
 
 			if !mgr.HasPath(args[0]) {
@@ -2679,6 +2743,7 @@ Custom paths are simply removed from the list.`,
 			result := mgr.Remove(args[0])
 			cfg.SyncPaths = mgr.SyncPaths()
 			cfg.Exclude = mgr.Excludes()
+			cfg.ScopeExplicit = true
 			if err := config.Save(cfg); err != nil {
 				return err
 			}

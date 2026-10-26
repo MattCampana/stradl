@@ -5,9 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"sort"
-	"strings"
 
 	"github.com/tawanorg/claude-sync/internal/config"
 	"github.com/tawanorg/claude-sync/internal/storage"
@@ -29,24 +27,25 @@ func LocalFingerprint(cfg *config.Config) (string, error) {
 //
 // The set of live sessions is folded in too: Sync defers remote changes to a
 // transcript while its process runs, so a session ending must count as a
-// local change for those deferred updates to land promptly.
+// local change for those deferred updates to land promptly. So is each
+// project folder git is busy in: the fingerprint moves when git finishes.
+//
+// Project folders come from the same local sources Sync discovers them from,
+// plus the list the last sync recorded (which includes folders learned from
+// other Macs).
 func (s *Syncer) LocalFingerprint() (string, error) {
 	var lines []string
-	for _, root := range s.roots() {
-		var exclude func(string) bool
-		if root.prefix == "" {
-			exclude = s.isExcluded
+	for _, root := range s.syncRoots(nil, false) {
+		files, err := s.scanRoot(root)
+		if err != nil && root.kind == rootFolder {
+			lines = append(lines, "d\x00"+root.prefix+"\x00"+err.Error())
+			continue
 		}
-		files, err := GetLocalFiles(root.dir, root.paths, exclude)
 		if err != nil {
 			return "", fmt.Errorf("failed to scan %s: %w", root.dir, err)
 		}
 		for rel, info := range files {
-			rel = strings.TrimPrefix(rel, "./")
-			if !root.inScope(rel) {
-				continue
-			}
-			lines = append(lines, fmt.Sprintf("f\x00%s%s\x00%d\x00%d", root.prefix, rel, info.Size(), info.ModTime().UnixNano()))
+			lines = append(lines, fmt.Sprintf("f\x00%s%s\x00%d\x00%d\x00%o", root.prefix, rel, info.Size(), info.ModTime().UnixNano(), info.Mode().Perm()))
 		}
 	}
 	for id := range liveSessionIDs(s.claudeDir) {
@@ -58,21 +57,24 @@ func (s *Syncer) LocalFingerprint() (string, error) {
 // RemoteFingerprint summarizes the remote objects Sync would consider by key
 // and ETag, using a single List call. Objects outside this device's scope,
 // reserved metadata and keys with a path token this device can't map are
-// left out, as Sync ignores them too.
+// left out, as Sync ignores them too; the shared modes manifest is included,
+// so a chmod on another Mac reaches this one promptly.
 func (s *Syncer) RemoteFingerprint(ctx context.Context) (string, error) {
 	objects, err := s.storage.List(ctx, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to list remote objects: %w", err)
 	}
-	roots := s.roots()
+	roots := s.syncRoots(objects, false)
 	lines := make([]string, 0, len(objects))
 	for _, obj := range objects {
 		np, ok, _ := s.npathForKey(obj.Key)
-		if !ok {
+		if !ok && obj.Key != ModesManifestKey {
 			continue
 		}
-		if root, rel := s.rootFor(roots, np); root == nil || !root.inScope(rel) {
-			continue
+		if ok {
+			if root, rel := s.rootFor(roots, np); root == nil || !root.inScope(rel) {
+				continue
+			}
 		}
 		version := obj.ETag
 		if version == "" {
@@ -116,7 +118,7 @@ func newScopeSyncer(cfg *config.Config) *Syncer {
 	if cfg.ClaudeDirOverride != "" {
 		claudeDir = cfg.ClaudeDirOverride
 	}
-	homeDir, _ := os.UserHomeDir()
+	homeDir := cfg.HomeDir()
 	mapper, err := NewPathMapper(homeDir, cfg.PathMap)
 	if err != nil {
 		// An invalid path_map makes NewSyncer fail too; fall back to the

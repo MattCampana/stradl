@@ -28,6 +28,11 @@ func previewSync(ctx context.Context) (*sync.SyncReport, error) {
 	return s.Preview(ctx)
 }
 
+// pendingWork reports whether a preview found anything to do or report.
+func pendingWork(r *sync.SyncReport) bool {
+	return r.Changed() || len(r.Deferred)+len(r.Skipped)+len(r.Warnings) > 0
+}
+
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
@@ -54,7 +59,7 @@ func statusCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("%sWaiting to sync%s\n", colorBold, colorReset)
-			if !r.Changed() && len(r.Deferred) == 0 && len(r.Skipped) == 0 {
+			if !pendingWork(r) {
 				printSuccess("✓ Nothing: this Mac and remote storage match")
 				return nil
 			}
@@ -67,8 +72,13 @@ func statusCmd() *cobra.Command {
 			row(len(r.Downloaded), "to download")
 			row(len(r.Merged), "changed on two devices (will merge)")
 			row(len(r.Restored), "to restore to remote")
-			row(len(r.Deferred), "waiting for an open session to close")
+			row(len(r.Deleted), "deleted here, to delete on every Mac")
+			row(len(r.Trashed), "deleted on another Mac, to move to ~/.stradl/trash")
+			row(len(r.Deferred), "waiting for an open session or a git command to finish")
 			row(len(r.Skipped), "skipped (unknown path token; check path_map)")
+			for _, w := range r.Warnings {
+				printWarning(w)
+			}
 			fmt.Println("\n  Run 'stradl sync' to sync now, or 'stradl diff' for the file list.")
 			return nil
 		},
@@ -78,7 +88,7 @@ func statusCmd() *cobra.Command {
 func diffCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "diff",
-		Short: "List the files the next sync would upload, download, or merge",
+		Short: "List the files the next sync would upload, download, merge or delete",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
@@ -86,8 +96,8 @@ func diffCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if !r.Changed() && len(r.Deferred) == 0 && len(r.Skipped) == 0 {
-				printSuccess("✓ In sync: nothing to upload, download, or merge")
+			if !pendingWork(r) {
+				printSuccess("✓ In sync: nothing to upload, download, merge or delete")
 				return nil
 			}
 			list := func(sym, title string, paths []string) {
@@ -104,8 +114,13 @@ func diffCmd() *cobra.Command {
 			list("↓", "Download", r.Downloaded)
 			list("⇄", "Merge (changed on two devices)", r.Merged)
 			list("↺", "Restore to remote", r.Restored)
-			list("…", "Waiting for an open session to close", r.Deferred)
+			list("✗", "Delete on every Mac (deleted here)", r.Deleted)
+			list("⌫", "Move to ~/.stradl/trash (deleted on another Mac)", r.Trashed)
+			list("…", "Waiting for an open session or a git command to finish", r.Deferred)
 			list("?", "Skipped (unknown path token)", r.Skipped)
+			for _, w := range r.Warnings {
+				printWarning(w)
+			}
 			return nil
 		},
 	}

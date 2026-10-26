@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"filippo.io/age"
+
 	"github.com/tawanorg/claude-sync/internal/config"
 	"github.com/tawanorg/claude-sync/internal/crypto"
 	"github.com/tawanorg/claude-sync/internal/storage"
@@ -58,6 +60,13 @@ type Syncer struct {
 	// recentWrite treats transcripts modified this recently as live (see
 	// recentWriteWindow); zero disables the heuristic.
 	recentWrite time.Duration
+
+	// ageID is the encryptor's key, for streaming large files; nil (key
+	// unreadable) keeps every file on the in-memory path.
+	ageID *age.X25519Identity
+
+	// modes is the shared modes manifest during a pass.
+	modes *modeBook
 }
 
 type SyncResult struct {
@@ -112,7 +121,7 @@ func NewSyncer(cfg *config.Config, quiet bool) (*Syncer, error) {
 		claudeDir = cfg.ClaudeDirOverride
 	}
 
-	homeDir, _ := os.UserHomeDir()
+	homeDir := cfg.HomeDir()
 	mapper, err := NewPathMapper(homeDir, cfg.PathMap)
 	if err != nil {
 		return nil, err
@@ -128,6 +137,7 @@ func NewSyncer(cfg *config.Config, quiet bool) (*Syncer, error) {
 		paths:       mapper,
 		home:        homeDir,
 		recentWrite: recentWriteWindow,
+		ageID:       loadAgeIdentity(cfg.EncryptionKey),
 	}, nil
 }
 
@@ -141,7 +151,7 @@ func StorageIdentity(c *storage.StorageConfig) string {
 }
 
 func NewSyncerWith(cfg *config.Config, store storage.Storage, enc *crypto.Encryptor, state *SyncState, claudeDir string, quiet bool) *Syncer {
-	homeDir, _ := os.UserHomeDir()
+	homeDir := cfg.HomeDir()
 	mapper, _ := NewPathMapper(homeDir, cfg.PathMap)
 	return &Syncer{
 		storage:     store,
@@ -153,6 +163,7 @@ func NewSyncerWith(cfg *config.Config, store storage.Storage, enc *crypto.Encryp
 		paths:       mapper,
 		home:        homeDir,
 		recentWrite: recentWriteWindow,
+		ageID:       loadAgeIdentity(cfg.EncryptionKey),
 	}
 }
 
@@ -171,13 +182,14 @@ func (s *Syncer) isExcluded(relPath string) bool {
 }
 
 // syncPaths returns the set of ~/.claude paths to sync, honoring both the
-// configured scope ("full" by default, or "sessions" for portable data only)
-// and any sync_paths override, with scope acting as a ceiling.
+// configured scope ("everything", "full", or "sessions" for portable data
+// only) and any sync_paths override, with scope acting as a ceiling.
 func (s *Syncer) syncPaths() []string {
 	return s.cfg.GetEffectiveSyncPaths()
 }
 
-// Scope returns the configured sync scope (empty means the default "full").
+// Scope returns the configured sync scope (empty means "full"; configs that
+// load from disk without a chosen scope get "everything").
 func (s *Syncer) Scope() string {
 	return s.cfg.Scope
 }
