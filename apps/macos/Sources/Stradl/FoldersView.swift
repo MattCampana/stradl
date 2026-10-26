@@ -8,6 +8,12 @@ struct FoldersView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            Text("Every folder a session works in syncs to all your Macs, at the same place under your home folder. Build output such as node_modules stays on each Mac.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
             if let c = model.config, !c.folderSync {
                 Card {
                     Text("Project folders don't sync on this Mac. Turn on Project folders in Settings to sync the folders your sessions work in.")
@@ -17,19 +23,14 @@ struct FoldersView: View {
             }
             List {
                 Section {
-                    ForEach(model.folders) { f in
+                    // Real projects first, the Claude app's scratch folders last.
+                    ForEach(model.folders.sorted { ($0.isScratch ? 1 : 0, -$0.files) < ($1.isScratch ? 1 : 0, -$1.files) }) { f in
                         FolderRow(folder: f)
                     }
                     if model.folders.isEmpty {
                         Text("No project folders yet. They're picked up from your sessions at the next sync.")
                             .foregroundStyle(.secondary)
                     }
-                } header: {
-                    Text("Every folder a session works in syncs to all your Macs at the same place under your home folder. Build output such as node_modules stays on each Mac.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .textCase(nil)
-                        .padding(.bottom, 6)
                 }
             }
             .listStyle(.inset(alternatesRowBackgrounds: true))
@@ -69,9 +70,13 @@ struct FolderRow: View {
                 .frame(width: 24)
                 .help(folder.git ? "A git repository: history and branches sync too" : "A folder")
             VStack(alignment: .leading, spacing: 2) {
-                Text("~/" + folder.path).font(.body.monospaced())
+                Text(folder.isScratch ? (folder.path as NSString).lastPathComponent : "~/" + folder.path)
+                    .font(.body.monospaced())
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help("~/" + folder.path)
                 HStack(spacing: 6) {
-                    Text(folder.git ? "Git repository" : "Folder")
+                    Text(folder.git ? "Git repository" : folder.isScratch ? "Claude app scratch folder" : "Folder")
                     Text("·")
                     Text(folder.files.plural("file"))
                     Text("·")

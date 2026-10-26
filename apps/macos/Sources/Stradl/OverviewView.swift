@@ -87,9 +87,9 @@ struct OverviewView: View {
         HStack(spacing: 12) {
             Stat(value: "\(o.totals.sessions)", label: "Sessions", symbol: "bubble.left.and.bubble.right")
             Stat(value: "\(o.totals.projects)", label: "Projects", symbol: "folder")
-            Stat(value: "\(model.folders.count)", label: "Project folders syncing", symbol: "externaldrive.badge.icloud")
-            Stat(value: "\(o.totals.syncedFiles)", label: "Files in sync", symbol: "doc.on.doc")
-            Stat(value: o.totals.bytes.bytes, label: "Synced from this Mac", symbol: "internaldrive")
+            Stat(value: "\(model.folders.filter { $0.files > 0 }.count)", label: "Project folders", symbol: "externaldrive.badge.icloud")
+            Stat(value: "\(o.totals.syncedFiles)", label: "Claude files", symbol: "doc.on.doc")
+            Stat(value: o.totals.bytes.bytes, label: "Claude data", symbol: "internaldrive")
         }
     }
 
@@ -156,7 +156,7 @@ struct Stat: View {
                 .foregroundStyle(.secondary)
                 .frame(height: 18, alignment: .leading)
             Text(value).font(.title2.weight(.semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
-            Text(label).font(.caption).foregroundStyle(.secondary).lineLimit(2, reservesSpace: true)
+            Text(label).font(.caption).foregroundStyle(.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .topLeading)

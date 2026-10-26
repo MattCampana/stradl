@@ -33,10 +33,11 @@ struct LogsView: View {
                 .listStyle(.plain)
                 .font(.system(.callout, design: .monospaced))
                 .onChange(of: tail.lines.last?.id) { _ in
-                    if follow, let last = lines.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                    // visible, not lines: lines is the list from before the change.
+                    if follow, let last = visible.last { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
-                .onAppear {
-                    if let last = lines.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                .onChange(of: problemsOnly) { _ in
+                    if let last = visible.last { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
             if tail.lines.isEmpty {

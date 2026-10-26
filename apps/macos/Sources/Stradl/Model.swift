@@ -150,6 +150,9 @@ struct FolderStat: Decodable, Identifiable, Hashable {
     var bytes: Int64
     var lastChange: Date?
     var id: String { path }
+
+    /// A scratch folder the Claude desktop app made for a session.
+    var isScratch: Bool { path.contains("/Claude/scratch-workspaces/") }
 }
 
 extension JSONDecoder {

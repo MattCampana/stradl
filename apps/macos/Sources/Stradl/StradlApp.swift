@@ -4,8 +4,19 @@ import SwiftUI
 struct StradlApp: App {
     @StateObject private var model = AppModel()
 
+    init() {
+        // Always open the window at launch: macOS's window restoration can
+        // replay a saved "no windows" state (after a crash, a forced quit or
+        // quitting with the window closed), which leaves the app running
+        // with nothing on screen.
+        UserDefaults.standard.set(true, forKey: "ApplePersistenceIgnoreState")
+    }
+
     var body: some Scene {
-        WindowGroup("Stradl") {
+        // One window, always opened at launch. (A WindowGroup restores its
+        // windows by the content's type, and silently opens none after an
+        // update changes that type.)
+        Window("Stradl", id: "main") {
             ContentView()
                 .environmentObject(model)
                 .frame(minWidth: 860, minHeight: 560)
@@ -13,7 +24,6 @@ struct StradlApp: App {
         }
         .windowToolbarStyle(.unified)
         .commands {
-            CommandGroup(replacing: .newItem) {}
             CommandMenu("Sync") {
                 Button("Sync Now") { model.syncNow() }
                     .keyboardShortcut("r", modifiers: [.command])
