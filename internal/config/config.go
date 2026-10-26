@@ -308,7 +308,13 @@ func Load() (*Config, error) {
 
 	if cfg.migrateScope() {
 		scopeNote.Do(func() {
+			// Once per Mac, not on every command: a marker remembers it.
+			marker := filepath.Join(filepath.Dir(configPath), ".scope-note-shown")
+			if _, err := os.Stat(marker); err == nil {
+				return
+			}
 			fmt.Fprintf(os.Stderr, "Note: Stradl now syncs everything: all of ~/.claude, your MCP servers and the project folders your sessions use. To sync less, set scope in %s.\n", configPath)
+			_ = os.WriteFile(marker, nil, 0600)
 		})
 	}
 
