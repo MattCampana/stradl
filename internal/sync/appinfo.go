@@ -36,8 +36,20 @@ func FolderStats(cfg *config.Config) ([]FolderStat, error) {
 		return nil, err
 	}
 	snap := state.Snapshot()
+	folders := s.knownFolderList()
+	// A file belongs to the innermost listed folder holding it (a repository
+	// inside another folder is listed, and counted, on its own).
+	owner := func(np string) string {
+		best := ""
+		for _, rel := range folders {
+			if strings.HasPrefix(np, FoldersPrefix+rel+"/") && len(rel) > len(best) {
+				best = rel
+			}
+		}
+		return best
+	}
 	var out []FolderStat
-	for _, rel := range s.knownFolderList() {
+	for _, rel := range folders {
 		abs := filepath.Join(s.home, filepath.FromSlash(rel))
 		st := FolderStat{Path: rel, Abs: abs}
 		if fi, err := os.Stat(abs); err == nil && fi.IsDir() {
@@ -48,7 +60,7 @@ func FolderStats(cfg *config.Config) ([]FolderStat, error) {
 		}
 		prefix := FoldersPrefix + rel + "/"
 		for np, fs := range snap {
-			if !strings.HasPrefix(np, prefix) || fs.LocalDeleted {
+			if !strings.HasPrefix(np, prefix) || fs.LocalDeleted || owner(np) != rel {
 				continue
 			}
 			// State can still hold files that no longer sync (build output

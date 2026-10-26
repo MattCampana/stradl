@@ -64,6 +64,14 @@ type syncRoot struct {
 	// deferred keeps the root out of this pass (git is working in it, or it
 	// couldn't be scanned completely).
 	deferred bool
+
+	// Project folders only. Every git repository syncs as its own unit, and
+	// only when a session needs it: children are folder roots inside this
+	// one (a repository a session works in), which this root leaves to them;
+	// nested are other repositories inside it, which no session needs and
+	// which don't sync at all. Both are slash paths relative to dir.
+	children map[string]bool
+	nested   map[string]bool
 }
 
 type localFile struct {
@@ -174,6 +182,7 @@ func (s *Syncer) syncRoots(objects []storage.ObjectInfo, useCache bool) []*syncR
 		for _, rel := range s.discoverFolders(objects, useCache) {
 			roots = append(roots, s.folderRoot(rel))
 		}
+		s.linkFolderRoots(roots, objects)
 	}
 	return roots
 }
@@ -255,6 +264,9 @@ func (s *Syncer) rootFor(roots []*syncRoot, npath string) (*syncRoot, string) {
 // inScope reports whether rel is covered by the root's sync paths and filter.
 func (r *syncRoot) inScope(rel string) bool {
 	if r.include != nil && !r.include(rel) {
+		return false
+	}
+	if r.kind == rootFolder && !r.owns(rel) {
 		return false
 	}
 	for _, p := range r.paths {

@@ -619,13 +619,17 @@ func TestDiscoverFoldersDedupesNestedAndRejectsUnsafeFolders(t *testing.T) {
 
 	// Nested folders collapse to the outermost; case variants to one spelling,
 	// preferring the one in remote storage.
-	if got := chooseFolders([]string{"a/b", "a", "c/d", "c/d/e", "cc"}, nil, false); strings.Join(got, ",") != "a,c/d,cc" {
+	if got := chooseFolders([]string{"a/b", "a", "c/d", "c/d/e", "cc"}, nil, false, nil); strings.Join(got, ",") != "a,c/d,cc" {
 		t.Fatalf("nested = %v", got)
 	}
-	if got := chooseFolders([]string{"code/X", "Code/x"}, map[string]bool{"code/X": true}, true); strings.Join(got, ",") != "code/X" {
+	// A git repository inside another folder stays its own.
+	if got := chooseFolders([]string{"a", "a/repo", "a/plain"}, nil, false, map[string]bool{"a/repo": true}); strings.Join(got, ",") != "a,a/repo" {
+		t.Fatalf("nested repository = %v", got)
+	}
+	if got := chooseFolders([]string{"code/X", "Code/x"}, map[string]bool{"code/X": true}, true, nil); strings.Join(got, ",") != "code/X" {
 		t.Fatalf("case variants = %v", got)
 	}
-	if got := chooseFolders([]string{"code/X", "Code/x"}, nil, false); len(got) != 2 {
+	if got := chooseFolders([]string{"code/X", "Code/x"}, nil, false, nil); len(got) != 2 {
 		t.Fatalf("a case-sensitive volume keeps both: %v", got)
 	}
 }
