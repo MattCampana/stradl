@@ -54,6 +54,8 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 LDFLAGS="-s -w -X main.version=${VERSION} -X main.releaseRepo=${REPO}"
+# Code signing identifier of the macOS binaries (see the codesign below).
+SIGN_ID="com.breakpointdata.stradl"
 
 # cgo links with clang, which otherwise stamps the build host's macOS version
 # as the minimum, and dyld refuses to load the binary on anything older. 13.0
@@ -99,8 +101,14 @@ build() {
     # Apple Silicon refuses to exec unsigned arm64 code, and the linker only
     # signs some outputs, so give every darwin binary an ad-hoc signature.
     # (curl does not set the quarantine flag, so Gatekeeper never sees it.)
-    codesign --force --sign - "$stage/stradl"
-    codesign --verify "$stage/stradl"
+    # Its designated requirement names only the identifier: macOS keeps a
+    # privacy grant (Desktop, Documents) against that requirement, and an
+    # ad-hoc default (the content hash) changes with every release, so each
+    # update would ask again.
+    codesign --force --sign - --identifier "$SIGN_ID" \
+      --requirements "=designated => identifier \"$SIGN_ID\"" "$stage/stradl"
+    codesign --verify --strict -R="identifier \"$SIGN_ID\"" "$stage/stradl" ||
+      die "$os/$arch: signature lacks the stable requirement"
   else
     (cd "$ROOT" && env GOOS="$os" GOARCH="$arch" CGO_ENABLED=0 \
       go build -ldflags "$LDFLAGS" -o "$stage/stradl" ./cmd/claude-sync)

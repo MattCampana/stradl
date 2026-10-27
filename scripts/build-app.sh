@@ -64,5 +64,12 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --sign - --timestamp=none "$app" >/dev/null
+# A designated requirement of just the bundle identifier, so macOS keeps the
+# app's privacy grants across updates (an ad-hoc signature's default is its
+# content hash, which every build changes).
+id="com.breakpointdata.stradl.app"
+codesign --force --sign - --timestamp=none \
+  --requirements "=designated => identifier \"$id\"" "$app" >/dev/null
+codesign --verify --strict -R="identifier \"$id\"" "$app" ||
+  { echo "build-app: signature lacks the stable requirement" >&2; exit 1; }
 echo "$app"
