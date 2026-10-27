@@ -41,10 +41,14 @@ func frozenLib(t *testing.T, prep func(carolLib, aliceLib string)) (carol, alice
 func TestDivergedFrozenCopyKeepsBothSidesAndAHealthyRepo(t *testing.T) {
 	var c, a string
 	_, alice, _ := frozenLib(t, func(carolLib, aliceLib string) {
-		os.WriteFile(filepath.Join(carolLib, "lib.go"), []byte("carol\n"), 0644)
+		if err := os.WriteFile(filepath.Join(carolLib, "lib.go"), []byte("carol\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
 		git(t, carolLib, "commit", "-q", "-am", "C (unpushed)")
 		c = strings.TrimSpace(git(t, carolLib, "rev-parse", "HEAD"))
-		os.WriteFile(filepath.Join(aliceLib, "lib.go"), []byte("alice\n"), 0644)
+		if err := os.WriteFile(filepath.Join(aliceLib, "lib.go"), []byte("alice\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
 		git(t, aliceLib, "commit", "-q", "-am", "A")
 		a = strings.TrimSpace(git(t, aliceLib, "rev-parse", "HEAD"))
 	})
@@ -250,7 +254,9 @@ func TestAStoredCopyAheadIsNotFrozen(t *testing.T) {
 	var y string
 	_, alice, _ := frozenLib(t, func(carolLib, _ string) {
 		// carol (still on an older Stradl) kept working past alice's clone.
-		os.WriteFile(filepath.Join(carolLib, "lib.go"), []byte("v2\n"), 0644)
+		if err := os.WriteFile(filepath.Join(carolLib, "lib.go"), []byte("v2\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
 		git(t, carolLib, "commit", "-q", "-am", "Y")
 		y = strings.TrimSpace(git(t, carolLib, "rev-parse", "HEAD"))
 	})

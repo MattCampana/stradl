@@ -152,14 +152,11 @@ func (s *Syncer) folderAllowed(rel string) bool {
 	return true
 }
 
-// canonicalFolder turns a working folder into the project folder that syncs
-// it, relative to home: the root of the git repository it lies in, else the
-// folder itself. It returns "" when the folder can't be synced.
-func (s *Syncer) canonicalFolder(abs string) string { return s.canonicalFolderIn(abs, nil) }
-
-// canonicalFolderIn is canonicalFolder that also counts as a repository a
-// folder other Macs sync as one (remoteRepos, home-relative): a repository
-// inside another stays its own on a Mac that doesn't have it yet.
+// canonicalFolderIn turns a working folder into the project folder that
+// syncs it, relative to home: the root of the git repository it lies in,
+// else the folder itself; "" when the folder can't be synced. A folder other
+// Macs sync as a repository (remoteRepos, home-relative) counts as one, so a
+// repository inside another stays its own on a Mac that doesn't have it yet.
 func (s *Syncer) canonicalFolderIn(abs string, remoteRepos map[string]bool) string {
 	if s.home == "" || !filepath.IsAbs(abs) {
 		return ""
@@ -357,7 +354,7 @@ func (s *Syncer) dropSkippedNested(candidates []string, fold bool) []string {
 	for _, c := range candidates {
 		skipped := false
 		for _, o := range candidates {
-			if len(c) <= len(o) || c[len(o)] != '/' || (c[:len(o)] != o && !(fold && strings.EqualFold(c[:len(o)], o))) {
+			if len(c) <= len(o) || c[len(o)] != '/' || (c[:len(o)] != o && (!fold || !strings.EqualFold(c[:len(o)], o))) {
 				continue
 			}
 			rest := c[len(o)+1:]
@@ -794,7 +791,7 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 			// Not checked out (missing or empty) or checked out: either way
 			// the submodule's, unless it's a plain folder of files (a
 			// submodule converted to files, a source tarball).
-			if abs := filepath.Join(r.dir, filepath.FromSlash(p)); !r.children[p] && !(plainDir(abs) && hasEntries(abs)) {
+			if abs := filepath.Join(r.dir, filepath.FromSlash(p)); !r.children[p] && (!plainDir(abs) || !hasEntries(abs)) {
 				r.nested[p] = true
 			}
 		}
@@ -822,7 +819,7 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 			dir = d
 		}
 		outerRel := strings.TrimSuffix(strings.TrimPrefix(root.prefix, FoldersPrefix), "/")
-		if abs := filepath.Join(root.dir, filepath.FromSlash(dir)); dir != "" && !root.children[dir] && !markers[outerRel+"/"+dir] && !(plainDir(abs) && hasEntries(abs)) {
+		if abs := filepath.Join(root.dir, filepath.FromSlash(dir)); dir != "" && !root.children[dir] && !markers[outerRel+"/"+dir] && (!plainDir(abs) || !hasEntries(abs)) {
 			root.nested[dir] = true
 		}
 	}
