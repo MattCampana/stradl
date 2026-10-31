@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/tawanorg/claude-sync/internal/agent"
 	"github.com/tawanorg/claude-sync/internal/config"
 	"github.com/tawanorg/claude-sync/internal/profiles"
 )
@@ -52,6 +53,7 @@ func TestOpenFindsTheProfileSignedInToTheAccount(t *testing.T) {
 // they are deployed.
 func TestLaunchersFollowColorsOnceDeployed(t *testing.T) {
 	const judge = "53d94190-1990-4286-b69d-42cdf507ba7a"
+	t.Cleanup(agent.SetIconRefresher(func(string) {}))
 	root := t.TempDir()
 	t.Setenv("HOME", root)
 	cfg := &config.Config{

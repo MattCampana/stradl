@@ -220,7 +220,7 @@ struct StatusPill: View {
             Text(text)
         }
         .font(.system(size: 11, weight: .semibold, design: .rounded))
-        .foregroundStyle(color)
+        .foregroundStyle(color.readable)
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(color.opacity(0.14), in: Capsule())
@@ -298,10 +298,20 @@ struct ThemeLinkStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .semibold, design: .rounded))
-            .foregroundStyle(Theme.azure.opacity(configuration.isPressed ? 0.7 : 1))
+            .foregroundStyle(Theme.azure.readable.opacity(configuration.isPressed ? 0.7 : 1))
     }
 }
 
 extension ButtonStyle where Self == ThemeLinkStyle {
     static var themeLink: ThemeLinkStyle { ThemeLinkStyle() }
+}
+
+extension Color {
+    /// This color for text: as it is on the dark grounds, and darkened on
+    /// Light, where the bright accents are too faint to read as words.
+    var readable: Color {
+        guard Theme.p.scheme == .light,
+              let ns = NSColor(self).usingColorSpace(.sRGB)?.blended(withFraction: 0.45, of: .black) else { return self }
+        return Color(nsColor: ns)
+    }
 }

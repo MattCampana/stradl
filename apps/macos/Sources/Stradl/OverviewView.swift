@@ -63,7 +63,7 @@ struct OverviewView: View {
                             .padding(.top, 4)
                     }
                     if let err = o.agent.lastError, !err.isEmpty {
-                        Text(err).font(.callout).foregroundStyle(Theme.warn).textSelection(.enabled).lineLimit(3)
+                        Text(err).font(.callout).foregroundStyle(Theme.warn.readable).textSelection(.enabled).lineLimit(3)
                     }
                 }
                 Spacer()

@@ -104,7 +104,7 @@ struct FolderRow: View {
             }
             Spacer(minLength: 8)
             if !folder.exists {
-                Text("Not on this Mac").font(.caption).foregroundStyle(Theme.warn)
+                Text("Not on this Mac").font(.caption).foregroundStyle(Theme.warn.readable)
             }
             if let entry = extraEntry {
                 Button("Remove from Extra Folders") { stopSyncing(entry) }

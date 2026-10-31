@@ -83,7 +83,7 @@ struct SyncBadge: View {
             .padding(.horizontal, 7)
             .padding(.vertical, 2)
             .background(color.opacity(0.15), in: Capsule())
-            .foregroundStyle(color)
+            .foregroundStyle(color.readable)
     }
 
     private var label: String {

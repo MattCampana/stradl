@@ -153,6 +153,15 @@ func writeLauncher(app, exe, icon string, l Launcher) error {
 // refreshIcon re-registers a launcher with Launch Services. Tests replace it.
 var refreshIcon = func(app string) { _ = exec.Command(lsregister, "-f", app).Run() }
 
+// SetIconRefresher replaces the Launch Services refresh (for tests in other
+// packages, which must never register their temporary launchers) and
+// returns a func that restores it.
+func SetIconRefresher(f func(app string)) (restore func()) {
+	old := refreshIcon
+	refreshIcon = f
+	return func() { refreshIcon = old }
+}
+
 const lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 // LaunchersDeployed reports whether dir holds any launcher Stradl wrote.

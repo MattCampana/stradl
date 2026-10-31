@@ -84,8 +84,8 @@ struct LogLineView: View {
     private var color: Color {
         switch line.level {
         case .info: return .primary
-        case .warning: return Theme.warn
-        case .error: return Theme.bad
+        case .warning: return Theme.warn.readable
+        case .error: return Theme.bad.readable
         }
     }
 }

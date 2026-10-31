@@ -70,7 +70,7 @@ struct MacCard: View {
             }
             if !device.healthy {
                 Text("Hasn't synced cleanly in the last day. It may be asleep, offline or turned off.")
-                    .font(.caption).foregroundStyle(Theme.warn)
+                    .font(.caption).foregroundStyle(Theme.warn.readable)
             }
         }
         .contextMenu {

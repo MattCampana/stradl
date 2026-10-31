@@ -28,7 +28,7 @@ struct ActivityView: View {
                 if p.total == 0 && p.known != false {
                     Card {
                         Label("Nothing waiting. This Mac and your storage match.", systemImage: "checkmark.circle")
-                            .foregroundStyle(Theme.ok)
+                            .foregroundStyle(Theme.ok.readable)
                     }
                 } else if p.total > 0 {
                     let rows = p.files.filter { query.isEmpty || $0.path.localizedCaseInsensitiveContains(query) }
@@ -70,7 +70,7 @@ struct ActionBadge: View {
     var body: some View {
         Label(label, systemImage: symbol)
             .font(.caption.weight(.medium))
-            .foregroundStyle(color)
+            .foregroundStyle(color.readable)
     }
 
     private var label: String {

@@ -230,10 +230,10 @@ struct SidebarRow: View {
                     Text("\(badge)")
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .monospacedDigit()
-                        .foregroundStyle(selected ? Color.white : pane.color)
+                        .foregroundStyle(selected ? Theme.text : pane.color.readable)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)
-                        .background((selected ? Color.white.opacity(0.18) : pane.color.opacity(0.16)), in: Capsule())
+                        .background((selected ? Theme.fillStrong : pane.color.opacity(0.16)), in: Capsule())
                 }
             }
             .padding(.horizontal, 10)

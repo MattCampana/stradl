@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -47,7 +48,9 @@ func installedAppVersion(path string) string {
 // appPids lists the running Stradl.app processes started from app.
 func appPids(ctx context.Context, app string) []int {
 	exe := filepath.Join(app, "Contents", "MacOS", "Stradl")
-	out, err := exec.CommandContext(ctx, "/usr/bin/pgrep", "-a", "-f", "^"+regexp.QuoteMeta(exe)+"( |$)").Output()
+	// No -a: an app that started this update (an ancestor) is never quit
+	// by it; its bundle is swapped and it runs on until relaunched.
+	out, err := exec.CommandContext(ctx, "/usr/bin/pgrep", "-f", "^"+regexp.QuoteMeta(exe)+"( |$)").Output()
 	if err != nil {
 		return nil // pgrep exits 1 when nothing matches
 	}
@@ -157,6 +160,10 @@ func installApp(ctx context.Context, release *GitHubRelease, zipURL string) erro
 	// and opens again on the new version once it's in place.
 	wasOpen := false
 	if installed {
+		// Whoever reads this command's output may be gone after the app
+		// quits: a write to the closed pipe must not kill the update
+		// before it reopens the app.
+		signal.Ignore(syscall.SIGPIPE)
 		wasOpen = quitApp(ctx, dest)
 	}
 	old := filepath.Join(stage, "Stradl.app.old")
@@ -173,7 +180,7 @@ func installApp(ctx context.Context, release *GitHubRelease, zipURL string) erro
 		reopenApp(dest, wasOpen)
 		return err
 	}
-	defer reopenApp(dest, wasOpen)
+	reopenApp(dest, wasOpen)
 	verb := "Updated"
 	if !installed {
 		verb = "Installed"
