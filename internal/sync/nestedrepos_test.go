@@ -304,7 +304,7 @@ func TestSubmoduleWaitsForGitInItsDataDir(t *testing.T) {
 	a.write("code/p/lib/lib.go", "package lib // edited\n")
 	r := a.sync()
 	// The submodule brings its superproject, which waits too.
-	if len(r.Uploaded) != 0 || !(slices.Contains(r.Deferred, FoldersPrefix+"code/p/lib/") || slices.Contains(r.Deferred, FoldersPrefix+"code/p/")) {
+	if len(r.Uploaded) != 0 || (!slices.Contains(r.Deferred, FoldersPrefix+"code/p/lib/") && !slices.Contains(r.Deferred, FoldersPrefix+"code/p/")) {
 		t.Fatalf("uploaded = %v, deferred = %v", r.Uploaded, r.Deferred)
 	}
 	var busy *gitBusyError
