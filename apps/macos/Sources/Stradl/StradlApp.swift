@@ -17,15 +17,22 @@ struct StradlApp: App {
         // windows by the content's type, and silently opens none after an
         // update changes that type.)
         Window("Stradl", id: "main") {
-            ContentView()
-                .environmentObject(model)
-                .frame(minWidth: 900, minHeight: 600)
-                .preferredColorScheme(.dark)
-                .tint(Theme.violet)
-                .task { await Snapshots.runIfAsked(model) }
+            ThemedRoot {
+                ContentView()
+                    .environmentObject(model)
+            }
+            .frame(minWidth: 900, minHeight: 600)
+            .task { await Snapshots.runIfAsked(model) }
         }
         .windowToolbarStyle(.unifiedCompact)
         .commands {
+            CommandGroup(after: .sidebar) {
+                Picker("Appearance", selection: Binding(
+                    get: { UserDefaults.standard.string(forKey: "appearance") ?? Appearance.dark.rawValue },
+                    set: { UserDefaults.standard.set($0, forKey: "appearance") })) {
+                    ForEach(Appearance.allCases) { a in Text(a.title).tag(a.rawValue) }
+                }
+            }
             CommandMenu("Sync") {
                 Button("Sync Now") { model.syncNow() }
                     .keyboardShortcut("r", modifiers: [.command])
@@ -40,11 +47,11 @@ struct StradlApp: App {
         }
 
         Settings {
-            SettingsView()
-                .environmentObject(model)
-                .frame(width: 560, height: 620)
-                .preferredColorScheme(.dark)
-                .tint(Theme.violet)
+            ThemedRoot {
+                SettingsView()
+                    .environmentObject(model)
+            }
+            .frame(width: 560, height: 620)
         }
     }
 }
@@ -235,7 +242,7 @@ struct SidebarRow: View {
             .background {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(selected ? AnyShapeStyle(LinearGradient(colors: [pane.color.opacity(0.30), pane.color.opacity(0.08)], startPoint: .leading, endPoint: .trailing))
-                                   : AnyShapeStyle(Color.white.opacity(hovering ? 0.05 : 0)))
+                                   : AnyShapeStyle(hovering ? Theme.hover : Color.clear))
             }
             .overlay {
                 if selected {
@@ -312,7 +319,7 @@ struct GradientBar: View {
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.08))
+                Capsule().fill(Theme.fillStrong)
                 Capsule().fill(Theme.voices)
                     .frame(width: max(6, geo.size.width * min(max(value, 0), 1)))
                     .shadow(color: Theme.violet.opacity(0.6), radius: 4)

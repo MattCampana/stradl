@@ -153,7 +153,7 @@ struct AccountRow: View {
                         Text("Terminal")
                             .font(.caption2)
                             .padding(.horizontal, 6).padding(.vertical, 1)
-                            .background(Color.white.opacity(0.10), in: Capsule())
+                            .background(Theme.fillStrong, in: Capsule())
                             .help("Claude Code in the terminal is signed in to this account")
                     }
                 }

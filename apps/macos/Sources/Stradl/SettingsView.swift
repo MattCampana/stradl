@@ -18,6 +18,9 @@ struct SettingsForm: View {
     var body: some View {
         if let c = model.config {
             VStack(alignment: .leading, spacing: 20) {
+                Card(title: "Appearance", systemImage: "paintpalette", color: Theme.magenta) {
+                    AppearancePicker()
+                }
                 Card(title: "What syncs", systemImage: "square.stack.3d.up", color: Theme.violet) {
                     Picker("Scope", selection: binding(c.scope) { model.setConfig("scope", $0) }) {
                         Text("Everything (recommended)").tag("everything")
@@ -168,6 +171,48 @@ struct SettingsForm: View {
         panel.prompt = "Sync This Folder"
         if panel.runModal() == .OK, let url = panel.url {
             model.editList("extra_folders", add: true, url.path)
+        }
+    }
+}
+
+/// Dark, Grey or Light: a swatch of each, the chosen one ringed in the
+/// voices' gradient. Remembered for this Mac.
+struct AppearancePicker: View {
+    @AppStorage("appearance") private var appearance = Appearance.dark.rawValue
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ForEach(Appearance.allCases) { a in
+                let p = Theme.palettes[a]!
+                let chosen = appearance == a.rawValue
+                Button { appearance = a.rawValue } label: {
+                    VStack(spacing: 8) {
+                        ZStack(alignment: .bottomLeading) {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(p.ink0)
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(p.ink2)
+                                .frame(width: 58, height: 26)
+                                .overlay(alignment: .leading) {
+                                    Capsule().fill(Theme.voices).frame(width: 30, height: 6).padding(.leading, 8)
+                                }
+                                .padding(10)
+                        }
+                        .frame(width: 96, height: 64)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(chosen ? AnyShapeStyle(Theme.voices) : AnyShapeStyle(Theme.lineStrong), lineWidth: chosen ? 2.5 : 1)
+                        }
+                        .shadow(color: chosen ? Theme.violet.opacity(0.4) : .clear, radius: 8)
+                        Text(a.title)
+                            .font(.system(size: 12, weight: chosen ? .bold : .medium, design: .rounded))
+                            .foregroundStyle(chosen ? Theme.text : Theme.text2)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(a.title)
+                .accessibilityAddTraits(chosen ? .isSelected : [])
+            }
         }
     }
 }

@@ -1,19 +1,78 @@
 import SwiftUI
 
-/// Stradl's look: the Unison icon's night ink and its three voices (pink,
-/// violet, azure) on dark glass. Every view takes its colors from here.
-enum Theme {
-    // Ground, from deepest to raised.
-    static let ink0 = Color(hex: "#07051A")!
-    static let ink1 = Color(hex: "#0C0925")!
-    static let ink2 = Color(hex: "#141036")!
-    static let ink3 = Color(hex: "#1D1750")!
+/// The three looks: night ink, graphite, and soft white. Each keeps the
+/// Unison voices as its accents.
+enum Appearance: String, CaseIterable, Identifiable {
+    case dark, grey, light
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .dark: return "Dark"
+        case .grey: return "Grey"
+        case .light: return "Light"
+        }
+    }
+}
 
-    static let line = Color.white.opacity(0.08)
-    static let lineStrong = Color.white.opacity(0.14)
-    static let text = Color.white.opacity(0.94)
-    static let text2 = Color.white.opacity(0.64)
-    static let text3 = Color.white.opacity(0.42)
+/// One look's neutrals.
+struct Palette {
+    var ink0, ink1, ink2, ink3: Color // ground, sidebar, panels, raised
+    var text, text2, text3: Color
+    var line, lineStrong: Color
+    var fill, fillStrong, hover: Color // quiet fills: ghost buttons, off switches, hovered rows
+    var edgeTop, edgeBottom: Color     // a panel's border, lit from above
+    var panelOpacity: Double
+    var glow: Double                   // how strongly the voices light the ground
+    var scheme: ColorScheme
+}
+
+/// Stradl's look: the Unison icon's three voices (pink, violet, azure) over
+/// the chosen ground. Every view takes its colors from here.
+enum Theme {
+    /// The look in use; ThemedRoot sets it from the stored choice and rebuilds
+    /// the views when it changes.
+    static var appearance: Appearance = .dark
+
+    static let palettes: [Appearance: Palette] = [
+        .dark: Palette(
+            ink0: Color(hex: "#07051A")!, ink1: Color(hex: "#0C0925")!, ink2: Color(hex: "#141036")!, ink3: Color(hex: "#1D1750")!,
+            text: .white.opacity(0.94), text2: .white.opacity(0.64), text3: .white.opacity(0.42),
+            line: .white.opacity(0.08), lineStrong: .white.opacity(0.14),
+            fill: .white.opacity(0.07), fillStrong: .white.opacity(0.12), hover: .white.opacity(0.05),
+            edgeTop: .white.opacity(0.13), edgeBottom: .white.opacity(0.04),
+            panelOpacity: 0.78, glow: 1, scheme: .dark),
+        .grey: Palette(
+            ink0: Color(hex: "#202227")!, ink1: Color(hex: "#26292F")!, ink2: Color(hex: "#2E3138")!, ink3: Color(hex: "#383C45")!,
+            text: .white.opacity(0.94), text2: .white.opacity(0.66), text3: .white.opacity(0.44),
+            line: .white.opacity(0.09), lineStrong: .white.opacity(0.16),
+            fill: .white.opacity(0.08), fillStrong: .white.opacity(0.14), hover: .white.opacity(0.06),
+            edgeTop: .white.opacity(0.14), edgeBottom: .white.opacity(0.05),
+            panelOpacity: 0.86, glow: 0.55, scheme: .dark),
+        .light: Palette(
+            ink0: Color(hex: "#F4F3FA")!, ink1: Color(hex: "#FBFAFF")!, ink2: Color(hex: "#FFFFFF")!, ink3: Color(hex: "#ECEAF6")!,
+            text: Color(hex: "#15122B")!.opacity(0.94), text2: Color(hex: "#15122B")!.opacity(0.62), text3: Color(hex: "#15122B")!.opacity(0.42),
+            line: Color(hex: "#15122B")!.opacity(0.08), lineStrong: Color(hex: "#15122B")!.opacity(0.14),
+            fill: Color(hex: "#15122B")!.opacity(0.05), fillStrong: Color(hex: "#15122B")!.opacity(0.12), hover: Color(hex: "#15122B")!.opacity(0.05),
+            edgeTop: Color(hex: "#15122B")!.opacity(0.10), edgeBottom: Color(hex: "#15122B")!.opacity(0.06),
+            panelOpacity: 0.86, glow: 0.45, scheme: .light),
+    ]
+
+    static var p: Palette { palettes[appearance] ?? palettes[.dark]! }
+
+    // Ground, from deepest to raised.
+    static var ink0: Color { p.ink0 }
+    static var ink1: Color { p.ink1 }
+    static var ink2: Color { p.ink2 }
+    static var ink3: Color { p.ink3 }
+
+    static var line: Color { p.line }
+    static var lineStrong: Color { p.lineStrong }
+    static var text: Color { p.text }
+    static var text2: Color { p.text2 }
+    static var text3: Color { p.text3 }
+    static var fill: Color { p.fill }
+    static var fillStrong: Color { p.fillStrong }
+    static var hover: Color { p.hover }
 
     // The three voices, and the rest of the palette.
     static let pink = Color(hex: "#FF3D9A")!
@@ -36,14 +95,30 @@ enum Theme {
     static let radius: CGFloat = 18
 }
 
+/// Applies the chosen look (stored as "appearance") to everything under it,
+/// rebuilding the views when the choice changes.
+struct ThemedRoot<Content: View>: View {
+    @AppStorage("appearance") private var appearance = Appearance.dark.rawValue
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        let look = Appearance(rawValue: appearance) ?? .dark
+        Theme.appearance = look
+        return content
+            .id(look)
+            .preferredColorScheme(Theme.p.scheme)
+            .tint(Theme.violet)
+    }
+}
+
 /// The window's ground: night ink lit by the voices from the edges.
 struct ThemeBackground: View {
     var body: some View {
         ZStack {
             Theme.ink0
-            RadialGradient(colors: [Theme.violet.opacity(0.24), .clear], center: .topTrailing, startRadius: 0, endRadius: 720)
-            RadialGradient(colors: [Theme.azure.opacity(0.10), .clear], center: .bottomLeading, startRadius: 0, endRadius: 620)
-            RadialGradient(colors: [Theme.pink.opacity(0.07), .clear], center: .top, startRadius: 0, endRadius: 520)
+            RadialGradient(colors: [Theme.violet.opacity(0.24 * Theme.p.glow), .clear], center: .topTrailing, startRadius: 0, endRadius: 720)
+            RadialGradient(colors: [Theme.azure.opacity(0.10 * Theme.p.glow), .clear], center: .bottomLeading, startRadius: 0, endRadius: 620)
+            RadialGradient(colors: [Theme.pink.opacity(0.07 * Theme.p.glow), .clear], center: .top, startRadius: 0, endRadius: 520)
         }
         .ignoresSafeArea()
     }
@@ -78,11 +153,12 @@ extension View {
     func themePanel(radius: CGFloat = Theme.radius, padding: CGFloat = 0) -> some View {
         self
             .padding(padding)
-            .background(Theme.ink2.opacity(0.78), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .background(Theme.ink2.opacity(Theme.p.panelOpacity), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(0.13), Color.white.opacity(0.04)], startPoint: .top, endPoint: .bottom), lineWidth: 1)
+                    .strokeBorder(LinearGradient(colors: [Theme.p.edgeTop, Theme.p.edgeBottom], startPoint: .top, endPoint: .bottom), lineWidth: 1)
             )
+            .shadow(color: .black.opacity(Theme.p.scheme == .light ? 0.06 : 0), radius: 10, y: 3)
     }
 }
 
@@ -119,7 +195,7 @@ struct GhostButtonStyle: ButtonStyle {
             .foregroundStyle(Theme.text)
             .padding(.horizontal, small ? 11 : 14)
             .padding(.vertical, small ? 5 : 7)
-            .background(Color.white.opacity(configuration.isPressed ? 0.14 : 0.07), in: Capsule())
+            .background(configuration.isPressed ? Theme.fillStrong : Theme.fill, in: Capsule())
             .overlay(Capsule().strokeBorder(Theme.lineStrong, lineWidth: 1))
             .opacity(enabled ? 1 : 0.4)
     }
@@ -190,8 +266,8 @@ struct ThemeSwitchStyle: ToggleStyle {
         HStack(spacing: 10) {
             ZStack(alignment: configuration.isOn ? .trailing : .leading) {
                 Capsule()
-                    .fill(configuration.isOn ? AnyShapeStyle(Theme.voices) : AnyShapeStyle(Color.white.opacity(0.12)))
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(configuration.isOn ? 0.25 : 0.14), lineWidth: 1))
+                    .fill(configuration.isOn ? AnyShapeStyle(Theme.voices) : AnyShapeStyle(Theme.fillStrong))
+                    .overlay(Capsule().strokeBorder(configuration.isOn ? Color.white.opacity(0.25) : Theme.lineStrong, lineWidth: 1))
                     .shadow(color: configuration.isOn ? Theme.violet.opacity(0.45) : .clear, radius: 6)
                 Circle()
                     .fill(.white)
