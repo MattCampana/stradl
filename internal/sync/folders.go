@@ -277,7 +277,16 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	// A folder an account that doesn't sync works in is noted for it but
 	// never becomes a candidate: once only such accounts use it, it stops
 	// syncing (see folderOff).
+	// A folder this Mac syncs because the user named it (extra_folders) is
+	// never noted for an account that doesn't sync, so it stays on for
+	// every Mac.
 	offCanon := make(map[string]string)
+	extra := make(map[string]bool)
+	for _, p := range s.cfg.ExtraFolders {
+		if rel := s.canonicalFolderIn(p, remoteRepos); rel != "" {
+			extra[rel] = true
+		}
+	}
 	noteOff := func(abs, acct string) {
 		if abs == "" || !filepath.IsAbs(abs) {
 			return
@@ -287,7 +296,9 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 			rel = s.canonicalFolderIn(abs, remoteRepos)
 			offCanon[abs] = rel
 		}
-		note(rel, acct)
+		if !extra[rel] {
+			note(rel, acct)
+		}
 	}
 	fold := homeCaseInsensitive(s.home)
 	// Sidebar records name folders only while the sidebar syncs (they are

@@ -233,43 +233,90 @@ func (e Env) Ensure(acct string) (Profile, error) {
 	if p, ok := ForAccount(e.List(), acct); ok {
 		return p, nil
 	}
-	return e.create(acct, acct)
+	return e.createFor(acct)
+}
+
+// createFor makes a profile for acct: the folder named after it, or, when
+// that folder is someone else's now (signed in to another account), a new
+// one.
+func (e Env) createFor(acct string) (Profile, error) {
+	id := acct
+	if _, err := os.Lstat(filepath.Join(e.ProfilesDir, id)); err == nil {
+		var err error
+		if id, err = newID(); err != nil {
+			return Profile{}, err
+		}
+	}
+	return e.create(id, acct)
 }
 
 // New makes a profile for an account Stradl hasn't seen yet: whoever signs
 // in to it decides whose it is.
 func (e Env) New() (Profile, error) {
-	b := make([]byte, 4)
-	if _, err := rand.Read(b); err != nil {
+	id, err := newID()
+	if err != nil {
 		return Profile{}, err
 	}
-	return e.create("new-"+hex.EncodeToString(b), "")
+	return e.create(id, "")
 }
 
+func newID() (string, error) {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "new-" + hex.EncodeToString(b), nil
+}
+
+// SidebarStateFiles names the files Stradl keeps for a profile's sidebar
+// layout (package sync merges it): the last layout it agreed on with
+// storage, and one waiting for the profile to quit. The main profile's are
+// sidebar-base.json and sidebar-pending.json; another's carry its ID.
+func SidebarStateFiles(id string) (base, pending string) {
+	if id == MainID {
+		return "sidebar-base.json", "sidebar-pending.json"
+	}
+	return "sidebar-base." + id + ".json", "sidebar-pending." + id + ".json"
+}
+
+// create makes the profile folder id, which must not exist yet. Callers
+// that run beside a sync hold the sync lock: the preferences file and its
+// sidebar base are copied as one pair.
 func (e Env) create(id, acct string) (Profile, error) {
 	if e.ProfilesDir == "" || e.MainDir == "" {
 		return Profile{}, errors.New("no home folder")
 	}
-	dir := filepath.Join(e.ProfilesDir, id)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(e.ProfilesDir, 0700); err != nil {
 		return Profile{}, err
+	}
+	dir := filepath.Join(e.ProfilesDir, id)
+	if err := os.Mkdir(dir, 0700); err != nil {
+		return Profile{}, fmt.Errorf("profile %s: %w", id, err) // never someone else's folder
 	}
 	if err := e.Link(dir); err != nil {
 		return Profile{}, err
 	}
 	// The app's preferences (MCP servers, the sidebar layout): the new
-	// profile starts with the main one's, then keeps its own.
-	if _, err := os.Stat(filepath.Join(dir, desktopConfigName)); errors.Is(err, os.ErrNotExist) {
-		if err := copyFile(filepath.Join(e.MainDir, desktopConfigName), filepath.Join(dir, desktopConfigName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	// profile starts with the main one's, then keeps its own. Its sidebar
+	// base starts as the main one's too, the layout that file agreed on
+	// with storage: without it, the first merge would read whatever the
+	// main file hasn't caught up on yet (changes from other Macs waiting
+	// for Claude to quit) as this profile's own and send it back.
+	err := copyFile(filepath.Join(e.MainDir, desktopConfigName), filepath.Join(dir, desktopConfigName))
+	switch {
+	case err == nil:
+		mainBase, _ := SidebarStateFiles(MainID)
+		base, _ := SidebarStateFiles(id)
+		if err := copyFile(filepath.Join(e.StateDir, mainBase), filepath.Join(e.StateDir, base)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return Profile{}, err
 		}
+	case !errors.Is(err, os.ErrNotExist):
+		return Profile{}, err
 	}
 	l := e.readList()
-	if _, ok := l.Profiles[id]; !ok {
-		l.Profiles[id] = listEntry{For: acct, Created: time.Now().UTC()}
-		if err := e.writeList(l); err != nil {
-			return Profile{}, err
-		}
+	l.Profiles[id] = listEntry{For: acct, Created: time.Now().UTC()}
+	if err := e.writeList(l); err != nil {
+		return Profile{}, err
 	}
 	p, _ := e.Get(id)
 	return p, nil
@@ -371,7 +418,7 @@ func (e Env) Convert(accounts []string) ([]Profile, error) {
 		if _, ok := ForAccount(list, acct); ok {
 			continue
 		}
-		p, err := e.create(acct, acct)
+		p, err := e.createFor(acct)
 		if err != nil {
 			return made, err
 		}
@@ -390,18 +437,6 @@ func (e Env) Convert(accounts []string) ([]Profile, error) {
 
 // Converted reports whether this Mac's accounts were turned into profiles.
 func (e Env) Converted() bool { return !e.readList().Converted.IsZero() }
-
-// SidebarFiles returns each profile's preferences file (the sidebar layout)
-// by profile ID; profiles whose folder doesn't exist are left out.
-func (e Env) SidebarFiles() map[string]string {
-	out := make(map[string]string)
-	for _, p := range e.List() {
-		if fi, err := os.Stat(p.Dir); err == nil && fi.IsDir() {
-			out[p.ID] = filepath.Join(p.Dir, desktopConfigName)
-		}
-	}
-	return out
-}
 
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)

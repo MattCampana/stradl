@@ -129,18 +129,41 @@ func listProfiles(asJSON bool) error {
 }
 
 // resolveProfile finds who's profile: an account (see sync.FindAccount),
-// whose profile is made when it has none, or a profile ID.
+// opened in the profile signed in to it, or made one when it has none; else
+// a profile ID (main, new-…).
 func resolveProfile(cfg *config.Config, who string) (profiles.Profile, string, error) {
 	env := profiles.FromConfig(cfg)
+	a, aerr := sync.FindAccount(sync.ListAccounts(cfg), who)
+	if aerr == nil {
+		if p, ok := profiles.ForAccount(env.List(), a.ID); ok {
+			return p, a.Name, nil
+		}
+		var p profiles.Profile
+		err := withSyncLock(cfg, func() (err error) {
+			p, err = env.Ensure(a.ID)
+			return err
+		})
+		return p, a.Name, err
+	}
 	if p, ok := env.Get(who); ok {
 		return p, p.ID, nil
 	}
-	a, err := sync.FindAccount(sync.ListAccounts(cfg), who)
-	if err != nil {
-		return profiles.Profile{}, "", err
+	return profiles.Profile{}, "", aerr
+}
+
+// withSyncLock runs fn holding the sync lock, so a profile being made copies
+// its preferences and their sidebar base while no sync changes them.
+func withSyncLock(cfg *config.Config, fn func() error) error {
+	lockPath := config.LockFilePath()
+	if cfg.StateDirOverride != "" {
+		lockPath = filepath.Join(cfg.StateDirOverride, config.LockFile)
 	}
-	p, err := env.Ensure(a.ID)
-	return p, a.Name, err
+	release, err := sync.AcquireLock(lockPath, true, 2*time.Minute)
+	if err != nil {
+		return fmt.Errorf("waiting for the sync to finish: %w", err)
+	}
+	defer release()
+	return fn()
 }
 
 func openCmd() *cobra.Command {
@@ -203,7 +226,7 @@ profiles, so a sign-in that comes back through the browser reaches this one.`,
 func quitOthers(ctx context.Context, env profiles.Env, keep profiles.Profile, force bool) error {
 	app := agent.NewDesktopApp()
 	if n := app.BusySessions(); n > 0 && !force {
-		return fmt.Errorf("Claude has %d session(s) still working; wait for them, or pass --force", n)
+		return fmt.Errorf("%d Claude session(s) still working; wait for them, or pass --force", n)
 	}
 	for _, p := range env.List() {
 		if p.Running && p.ID != keep.ID {
@@ -260,8 +283,11 @@ Sign in to the account there; Stradl learns it and keeps that profile for it.`,
 				return err
 			}
 			env := profiles.FromConfig(cfg)
-			p, err := env.New()
-			if err != nil {
+			var p profiles.Profile
+			if err := withSyncLock(cfg, func() (err error) {
+				p, err = env.New()
+				return err
+			}); err != nil {
 				return err
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
@@ -295,8 +321,11 @@ func profileConvertCmd() *cobra.Command {
 			for _, a := range sync.ListAccounts(cfg) {
 				ids = append(ids, a.ID)
 			}
-			made, err := profiles.FromConfig(cfg).Convert(ids)
-			if err != nil {
+			var made []profiles.Profile
+			if err := withSyncLock(cfg, func() (err error) {
+				made, err = profiles.FromConfig(cfg).Convert(ids)
+				return err
+			}); err != nil {
 				return err
 			}
 			if asJSON {

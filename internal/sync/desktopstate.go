@@ -268,9 +268,7 @@ type sidebarTarget struct {
 func sidebarTargetFor(cfg *config.Config, path string) sidebarTarget {
 	t := sidebarTarget{path: path, base: sidebarBaseFile, pending: sidebarPendingFile}
 	if dir := filepath.Dir(path); filepath.Clean(filepath.Dir(dir)) == filepath.Clean(cfg.EffectiveProfilesDir()) {
-		id := filepath.Base(dir)
-		t.base = strings.TrimSuffix(sidebarBaseFile, ".json") + "." + id + ".json"
-		t.pending = strings.TrimSuffix(sidebarPendingFile, ".json") + "." + id + ".json"
+		t.base, t.pending = profiles.SidebarStateFiles(filepath.Base(dir))
 	}
 	return t
 }

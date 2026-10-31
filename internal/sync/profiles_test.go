@@ -128,3 +128,57 @@ func TestAccountsSignedInToProfilesShowAsSignedIn(t *testing.T) {
 		t.Fatal("a profile no one signed in to yet named an account")
 	}
 }
+
+func TestANewProfileDoesntBringBackAGroupAnotherMacDeleted(t *testing.T) {
+	store := newCASStore()
+	a, b := newSidebarPair(t, store)
+	stubDesktopApp(t, false)
+	a.syncSidebar(false)
+	b.syncSidebar(false)
+	// Bob deletes a group; alice's Claude is open, so it waits for her.
+	drop := func(f appFile) {
+		m := f.load()
+		gs := groupScopeOf(m["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any))
+		var keep []any
+		for _, g := range gs["groups"].([]any) {
+			if g.(map[string]any)["id"] != gWeb {
+				keep = append(keep, g)
+			}
+		}
+		gs["groups"] = keep
+		f.save(m)
+	}
+	drop(sidebarFile(b))
+	b.syncSidebar(false)
+	if res := a.syncSidebar(true); !res.PendingRestart {
+		t.Fatalf("setup: alice's change should wait: %+v", res)
+	}
+	// Judge's profile is made now, from alice's main file, which still has it.
+	prof, err := profiles.FromConfig(a.s.cfg).Ensure(judgeAcct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Dir(a.desktop)
+	old := DesktopAppRunning
+	DesktopAppRunning = func(dir string) bool { return filepath.Clean(dir) == filepath.Clean(main) }
+	t.Cleanup(func() { DesktopAppRunning = old })
+	if _, err := a.s.SyncSidebar(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+	b.syncSidebar(false)
+	has := func(f appFile) bool {
+		gs := groupScopeOf(f.load()["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any))
+		for _, g := range gs["groups"].([]any) {
+			if g.(map[string]any)["id"] == gWeb {
+				return true
+			}
+		}
+		return false
+	}
+	if has(sidebarFile(b)) {
+		t.Fatal("the group bob deleted came back from alice's new profile")
+	}
+	if has(appFile{t, filepath.Join(prof.Dir, sidebarConfigName)}) {
+		t.Fatal("the new profile should take bob's delete")
+	}
+}

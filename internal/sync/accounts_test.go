@@ -981,3 +981,24 @@ func TestANewMacGetsNoneOfAnOffAccountsPlansPastesOrPrompts(t *testing.T) {
 		}
 	}
 }
+
+func TestAnExtraFolderStaysOnWhenAnOffAccountWorksInIt(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	a.s.cfg.ExtraFolders = []string{filepath.Join(a.home, "code", "x")}
+	a.write("code/x/f.txt", "v1\n")
+	syncAll(2, a, b)
+	if b.read("code/x/f.txt") != "v1\n" {
+		t.Fatal("setup: bob should get the extra folder")
+	}
+	a.setSync(judgeAcct, false)
+	a.writeAccountSession(judgeAcct, judgeOrg, "j1", filepath.Join(a.home, "code", "x"))
+	a.sync()
+	b.write("code/x/f.txt", "v2 from bob\n")
+	syncAll(2, b, a)
+	if got := a.read("code/x/f.txt"); got != "v2 from bob\n" {
+		t.Fatalf("a folder alice named in extra_folders stopped syncing on bob: alice has %q", got)
+	}
+}

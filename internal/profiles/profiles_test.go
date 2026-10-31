@@ -228,3 +228,58 @@ func TestRunningInstancesAreMatchedToTheirProfiles(t *testing.T) {
 		}
 	}
 }
+
+func TestAFolderSignedInToAnotherAccountIsNeverHandedBack(t *testing.T) {
+	e := testEnv(t)
+	signIn(t, e.MainDir, bp)
+	jp, err := e.Ensure(judge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signIn(t, jp.Dir, owd) // someone signed Judge's profile in to OWD
+	p, err := e.Ensure(judge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Dir == jp.Dir || !strings.HasPrefix(p.ID, "new-") || p.For != judge || p.SignedIn {
+		t.Fatalf("Judge got %+v, want a new signed-out profile made for Judge", p)
+	}
+	if again, _ := e.Ensure(judge); again.ID != p.ID {
+		t.Fatalf("a second Ensure made another profile: %s", again.ID)
+	}
+	if made, err := e.Convert([]string{judge, owd}); err != nil || len(made) != 0 {
+		t.Fatalf("Convert made %+v (%v): every account already has a profile", made, err)
+	}
+	if got, _ := ForAccount(e.List(), owd); got.ID != jp.ID {
+		t.Fatalf("OWD should open where it's signed in: %+v", got)
+	}
+}
+
+func TestANewProfileStartsFromTheMainLayoutsBase(t *testing.T) {
+	e := testEnv(t)
+	writeFile(t, filepath.Join(e.MainDir, desktopConfigName), `{"preferences":{}}`)
+	mainBase, _ := SidebarStateFiles(MainID)
+	writeFile(t, filepath.Join(e.StateDir, mainBase), `{"base":"main"}`)
+	p, err := e.Ensure(judge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, pending := SidebarStateFiles(p.ID)
+	if base != "sidebar-base."+judge+".json" || pending != "sidebar-pending."+judge+".json" {
+		t.Fatalf("names = %s %s", base, pending)
+	}
+	if got, _ := os.ReadFile(filepath.Join(e.StateDir, base)); string(got) != `{"base":"main"}` {
+		t.Fatalf("the new profile's base = %q, want the main one's", got)
+	}
+	// No preferences to copy: no base either (a first merge is then a union of nothing).
+	e2 := testEnv(t)
+	writeFile(t, filepath.Join(e2.StateDir, mainBase), `{"base":"main"}`)
+	p2, err := e2.Ensure(judge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b2, _ := SidebarStateFiles(p2.ID)
+	if _, err := os.Stat(filepath.Join(e2.StateDir, b2)); !os.IsNotExist(err) {
+		t.Fatal("a base without the preferences it belongs to")
+	}
+}
