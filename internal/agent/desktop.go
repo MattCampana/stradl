@@ -6,11 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tawanorg/claude-sync/internal/config"
+	"github.com/tawanorg/claude-sync/internal/profiles"
 )
 
 // Commander runs a program and returns its standard output. Tests replace it
@@ -42,20 +44,29 @@ type DesktopApp struct {
 	// again: the one moment its settings file can change without the app
 	// overwriting it. Stradl applies pending sidebar layout changes here.
 	BeforeLaunch func(ctx context.Context)
+	// Instances lists the app's running instances, process ID to data
+	// folder (see package profiles); MainDir is the app's own folder. With
+	// it, Restart reopens each instance on its own profile. Nil treats the
+	// app as one instance.
+	Instances func() map[int]string
+	MainDir   string
 }
 
 // NewDesktopApp returns a DesktopApp for the real Claude app.
 func NewDesktopApp() *DesktopApp {
+	main := (&config.Config{}).ClaudeAppDir()
 	return &DesktopApp{
 		Run: ExecCommand, Name: "Claude", QuitTimeout: 20 * time.Second, PollEvery: 500 * time.Millisecond,
 		SessionsDir: filepath.Join(config.ClaudeDir(), "sessions"),
+		Instances:   func() map[int]string { return profiles.Instances(main) },
+		MainDir:     main,
 	}
 }
 
 // pids lists the app's main processes (exact name match, so helper
 // processes and the lowercase `claude` CLI don't count).
 func (a *DesktopApp) pids(ctx context.Context) []int {
-	out, err := a.Run(ctx, "/usr/bin/pgrep", "-x", a.Name)
+	out, err := a.Run(ctx, "/usr/bin/pgrep", "-a", "-x", a.Name)
 	if err != nil {
 		return nil // pgrep exits 1 when nothing matches
 	}
@@ -100,6 +111,11 @@ func parseLstart(s string) (time.Time, error) {
 // for example because it is asking the user something, Restart gives up
 // without force-quitting.
 func (a *DesktopApp) Restart(ctx context.Context) error {
+	if a.Instances != nil {
+		if inst := a.Instances(); len(inst) > 1 || (len(inst) == 1 && !a.onlyMain(inst)) {
+			return a.restartProfiles(ctx, inst)
+		}
+	}
 	if len(a.pids(ctx)) > 0 {
 		if _, err := a.Run(ctx, "/usr/bin/osascript", "-e", fmt.Sprintf("tell application %q to quit", a.Name)); err != nil {
 			return fmt.Errorf("failed to ask %s to quit: %w", a.Name, err)
@@ -127,6 +143,49 @@ func (a *DesktopApp) Restart(ctx context.Context) error {
 		return fmt.Errorf("failed to open %s: %w", a.Name, err)
 	}
 	return nil
+}
+
+func (a *DesktopApp) onlyMain(inst map[int]string) bool {
+	for _, dir := range inst {
+		if filepath.Clean(dir) != filepath.Clean(a.MainDir) {
+			return false
+		}
+	}
+	return true
+}
+
+// restartProfiles restarts several instances (or one on a profile of its
+// own): each is asked to quit, and once all have, each opens again on its
+// own folder. One that doesn't quit in time is left running and the rest
+// reopen.
+func (a *DesktopApp) restartProfiles(ctx context.Context, inst map[int]string) error {
+	pids := make([]int, 0, len(inst))
+	for pid := range inst {
+		pids = append(pids, pid)
+	}
+	sort.Ints(pids)
+	var failed error
+	var reopen []profiles.Profile
+	for _, pid := range pids {
+		dir := filepath.Clean(inst[pid])
+		if err := profiles.Quit(ctx, profiles.Runner(a.Run), pid, a.QuitTimeout, a.Alive); err != nil {
+			failed = err
+			continue
+		}
+		main := dir == filepath.Clean(a.MainDir)
+		reopen = append(reopen, profiles.Profile{Dir: dir, Main: main})
+	}
+	launch, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if a.BeforeLaunch != nil && len(reopen) > 0 {
+		a.BeforeLaunch(launch)
+	}
+	for _, p := range reopen {
+		if _, err := a.Run(launch, "/usr/bin/open", profiles.LaunchArgs(p)...); err != nil {
+			failed = fmt.Errorf("failed to open %s: %w", a.Name, err)
+		}
+	}
+	return failed
 }
 
 // Notify shows a macOS notification. Title and body travel as script

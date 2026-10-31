@@ -62,10 +62,11 @@ func (s *Syncer) LocalFingerprint() (string, error) {
 	for id := range liveSessionIDs(s.claudeDir) {
 		lines = append(lines, "l\x00"+id)
 	}
-	if p := s.sidebarPath(); p != "" {
+	for _, t := range s.sidebarTargets() {
 		// Groups, membership and pins: the layout, not the whole preferences
-		// file, which the app rewrites for unrelated settings.
-		lines = append(lines, "s\x00"+SidebarFingerprint(p))
+		// file, which the app rewrites for unrelated settings. Each profile
+		// has its own.
+		lines = append(lines, "s\x00"+t.path+"\x00"+SidebarFingerprint(t.path))
 	}
 	return digest(lines), nil
 }

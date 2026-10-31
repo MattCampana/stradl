@@ -136,6 +136,10 @@ type SyncReport struct {
 	// it, such as deletions the mass-delete guard stopped.
 	Warnings []string
 
+	// NewProfiles lists the accounts this pass made a Claude app profile
+	// for (see package profiles); each needs one sign-in.
+	NewProfiles []string
+
 	Errors []error
 }
 

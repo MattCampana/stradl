@@ -4,9 +4,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	gosync "sync"
 	"sync/atomic"
 	"syscall"
@@ -104,6 +106,33 @@ func runTray(opts agent.Options) error {
 			mDash := systray.AddMenuItem("Open Dashboard…", "See your Macs, this week's sessions and what is synced")
 			dashClicked = mDash.ClickedCh
 		}
+		// Claude, opened signed in to any account (each has a profile of its
+		// own; see package profiles).
+		mOpen := systray.AddMenuItem("Open Claude As", "Open the Claude app signed in to one of your accounts")
+		mOpen.Hide()
+		var openItems []*systray.MenuItem
+		var shownOpen [maxMenuAccounts]sync.Account
+		openClicked := make(chan int, 1)
+		for i := 0; i < maxMenuAccounts; i++ {
+			item := mOpen.AddSubMenuItem("", "")
+			item.Hide()
+			openItems = append(openItems, item)
+			go func(i int, ch <-chan struct{}) {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ch:
+						select {
+						case openClicked <- i:
+						default:
+						}
+					}
+				}
+			}(i, item.ClickedCh)
+		}
+		mOpenNew := mOpen.AddSubMenuItem("Another Account…", "Open a new Claude profile and sign in to another account there")
+		mLaunchers := mOpen.AddSubMenuItem("Add to Applications", "Add a Claude app for each account to ~/Applications, for Launchpad, Spotlight and the Dock")
 		mSync := systray.AddMenuItem("Sync Now", "Sync with your other Macs now")
 		mPause := systray.AddMenuItem("Pause Syncing", "Stop syncing until you resume")
 		// Claude accounts, checked when their sessions sync (hidden until
@@ -211,11 +240,34 @@ func runTray(opts agent.Options) error {
 					}
 					item.Show()
 				}
+				for i, item := range openItems {
+					if i >= len(list) {
+						item.Hide()
+						continue
+					}
+					a := list[i]
+					shownOpen[i] = a
+					title := a.Name
+					switch {
+					case a.Open:
+						title = "🟢 " + title
+						item.SetTooltip("Open now: brings its window forward")
+					case a.SignIn || a.Profile == "":
+						title += " (sign in once)"
+						item.SetTooltip("Opens a Claude profile of its own; sign in to it there the first time")
+					default:
+						item.SetTooltip("Opens Claude signed in to it")
+					}
+					item.SetTitle(title)
+					item.Show()
+				}
 				accountsMu.Unlock()
 				if len(list) > 0 {
 					mAccounts.Show()
+					mOpen.Show()
 				} else {
 					mAccounts.Hide()
+					mOpen.Show() // Another Account… still works
 				}
 			}
 		}
@@ -313,6 +365,36 @@ func runTray(opts agent.Options) error {
 						poke()
 						r.SyncNow()
 					}()
+				case i := <-openClicked:
+					accountsMu.Lock()
+					a := shownOpen[i]
+					accountsMu.Unlock()
+					if a.ID == "" {
+						continue
+					}
+					go func() {
+						defer poke()
+						if err := trayRun(ctx, "open", a.ID); err != nil {
+							logger.Printf("open Claude as %s: %v", a.Name, err)
+							notify("Stradl", "Couldn't open Claude as "+a.Name+": "+err.Error())
+						}
+					}()
+				case <-mOpenNew.ClickedCh:
+					go func() {
+						if err := trayRun(ctx, "profile", "new"); err != nil {
+							logger.Printf("new Claude profile: %v", err)
+							notify("Stradl", "Couldn't open a new Claude profile: "+err.Error())
+						}
+					}()
+				case <-mLaunchers.ClickedCh:
+					go func() {
+						if err := trayRun(ctx, "profile", "launchers"); err != nil {
+							logger.Printf("Claude launchers: %v", err)
+							notify("Stradl", "Couldn't add the Claude apps: "+err.Error())
+							return
+						}
+						notify("Stradl", "Added a Claude app for each account to your Applications folder.")
+					}()
 				case <-appClicked:
 					if p, ok := appPath(); ok {
 						openPath(logger, p)
@@ -344,4 +426,25 @@ func openPath(logger *agent.Logger, path string) {
 	if err := exec.Command("/usr/bin/open", path).Start(); err != nil {
 		logger.Printf("open %s: %v", path, err)
 	}
+}
+
+// trayRun runs a stradl command (this binary) for a menu item, so the menu
+// and the CLI open Claude the same way. Its output goes nowhere; a failure
+// returns its last line.
+func trayRun(ctx context.Context, args ...string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, exe, args...).CombinedOutput()
+	if err != nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		if last := strings.TrimSpace(lines[len(lines)-1]); last != "" {
+			return errors.New(strings.TrimPrefix(last, "Error: "))
+		}
+		return err
+	}
+	return nil
 }

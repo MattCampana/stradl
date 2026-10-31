@@ -41,8 +41,16 @@ func RunSync(ctx context.Context, cfg *config.Config, quiet, wait bool) (*SyncRe
 			report.Errors = append(report.Errors, fmt.Errorf("MCP servers: %w", err))
 		}
 	}
+	// Every Claude account gets a Claude app profile of its own on this Mac
+	// (see package profiles), so the app can open signed in to any of them.
+	if made, err := s.ensureProfiles(); err != nil {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("Claude profiles: %v", err))
+	} else {
+		report.NewProfiles = made
+	}
 	// The desktop sidebar layout (groups, membership, pins) merges as a whole
-	// document; changes for a running app wait for it to quit.
+	// document, for each profile; changes for a running one wait for it to
+	// quit.
 	if sres, err := s.SyncSidebar(ctx, nil); err != nil {
 		report.Errors = append(report.Errors, fmt.Errorf("desktop sidebar: %w", err))
 	} else {

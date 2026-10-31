@@ -241,6 +241,33 @@ final class AppModel: ObservableObject {
         accounts.filter(\.isNew).sorted { $0.active && !$1.active }.first
     }
 
+    /// Opens the Claude app signed in to an account (its own profile; the
+    /// first time, the user signs in there).
+    func openClaude(as account: ClaudeAccount) {
+        let done = account.needsSignIn
+            ? "Opening Claude as \(account.name): sign in to it once in the new window, and it stays signed in."
+            : nil
+        perform("open:\(account.id)", success: done, refresh: false) {
+            try await StradlCLI.run(["open", account.id], timeout: 120)
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await self.refreshAccounts()
+        }
+    }
+
+    /// Opens a new Claude profile to sign in to an account not seen yet.
+    func openNewClaudeProfile() {
+        perform("open:new", success: "Opened a new Claude window: sign in to your other account there.", refresh: false) {
+            try await StradlCLI.run(["profile", "new"], timeout: 120)
+        }
+    }
+
+    /// Adds a Claude app per account to ~/Applications.
+    func addClaudeLaunchers() {
+        perform("launchers", success: "Added a Claude app for each account to your Applications folder, for Launchpad, Spotlight and the Dock.", refresh: false) {
+            try await StradlCLI.run(["profile", "launchers"], timeout: 60)
+        }
+    }
+
     func setAccountLabel(_ account: ClaudeAccount, _ label: String) {
         perform("account:\(account.id)") {
             try await StradlCLI.run(["accounts", "label", account.id, label], timeout: 90)

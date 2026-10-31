@@ -38,8 +38,12 @@ const FoldersPrefix = "_folders/"
 const folderMarker = ".stradl-folder"
 
 // scratchWorkspaces is the one place under ~/Library project folders may live:
-// the desktop app's scratch folders for sessions started without a folder.
+// the desktop app's scratch folders for sessions started without a folder,
+// in its own data folder and in each profile Stradl made for it
+// (profileScratch, Library/Application Support/Stradl/Profiles/<id>/...).
 const scratchWorkspaces = "Library/Application Support/Claude/scratch-workspaces"
+
+var profileScratch = regexp.MustCompile(`^Library/Application Support/Stradl/Profiles/[0-9a-z][0-9a-z-]{2,63}/scratch-workspaces(/|$)`)
 
 // errGitBusy defers a project folder while git holds a lock file in it: a
 // half-written index or ref must never reach another Mac, and a checkout or
@@ -139,7 +143,7 @@ func (s *Syncer) folderAllowed(rel string) bool {
 	case ".claude", ".stradl", ".claude-sync", ".Trash":
 		return false
 	case "Library":
-		if rel != scratchWorkspaces && !strings.HasPrefix(rel, scratchWorkspaces+"/") {
+		if rel != scratchWorkspaces && !strings.HasPrefix(rel, scratchWorkspaces+"/") && !profileScratch.MatchString(rel) {
 			return false
 		}
 	}

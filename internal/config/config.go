@@ -146,6 +146,9 @@ type Config struct {
 	// HomeDirOverride allows overriding the home directory used for path
 	// mapping and project folders (for testing)
 	HomeDirOverride string `yaml:"-"`
+
+	// ProfilesDirOverride allows overriding ProfilesDir (for testing)
+	ProfilesDirOverride string `yaml:"-"`
 }
 
 // SyncPaths defines which paths under ~/.claude to sync in the default "full" scope.
@@ -506,6 +509,34 @@ func DesktopSessionsDir() string {
 		return ""
 	}
 	return filepath.Join(home, "Library", "Application Support", "Claude", "claude-code-sessions")
+}
+
+// ProfilesDir returns where Stradl keeps the Claude app's extra profiles
+// (~/Library/Application Support/Stradl/Profiles): one data folder per
+// account, each opened with --user-data-dir.
+func ProfilesDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, "Library", "Application Support", "Stradl", "Profiles")
+}
+
+// ClaudeAppDir returns the Claude desktop app's own data folder (the parent
+// of the session index), or the test override's parent.
+func (c *Config) ClaudeAppDir() string {
+	if c.DesktopDirOverride != "" {
+		return filepath.Dir(c.DesktopDirOverride)
+	}
+	return filepath.Dir(DesktopSessionsDir())
+}
+
+// EffectiveProfilesDir returns ProfilesDir or the test override.
+func (c *Config) EffectiveProfilesDir() string {
+	if c.ProfilesDirOverride != "" {
+		return c.ProfilesDirOverride
+	}
+	return ProfilesDir()
 }
 
 // EffectiveDesktopDir returns the desktop session index directory to sync,

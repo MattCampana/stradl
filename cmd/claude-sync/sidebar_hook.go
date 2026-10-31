@@ -20,8 +20,7 @@ func applyPendingSidebar(ctx context.Context, logger *agent.Logger) bool {
 	if err != nil {
 		return false
 	}
-	dir := cfg.EffectiveDesktopDir()
-	if dir == "" {
+	if cfg.EffectiveDesktopDir() == "" {
 		return false
 	}
 	lockPath := config.LockFilePath()
@@ -42,7 +41,7 @@ func applyPendingSidebar(ctx context.Context, logger *agent.Logger) bool {
 		return sync.SidebarPendingExists(cfg)
 	}
 	defer release()
-	applied, err := sync.ApplyPendingSidebar(cfg, filepath.Join(filepath.Dir(dir), "claude_desktop_config.json"))
+	applied, err := sync.ApplyPendingSidebars(cfg)
 	switch {
 	case err != nil:
 		logger.Printf("sidebar: couldn't apply changes from your other Macs: %v", err)

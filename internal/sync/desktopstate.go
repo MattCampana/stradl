@@ -12,16 +12,15 @@ import (
 	"io/fs"
 	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/tawanorg/claude-sync/internal/config"
+	"github.com/tawanorg/claude-sync/internal/profiles"
 	"github.com/tawanorg/claude-sync/internal/storage"
 )
 
@@ -240,21 +239,61 @@ func sidebarStateDir(cfg *config.Config) string {
 }
 
 // DesktopAppRunning reports whether the Claude desktop app is running on this
-// Mac (pgrep's exact name match, so helper processes and the lowercase claude
-// CLI don't count). When pgrep can't answer it reports true, so nothing gets
-// written underneath a running app. Tests replace it.
-var DesktopAppRunning = func() bool {
+// Mac on the data folder dir (see package profiles: each profile is its own
+// instance). When the processes can't be read it reports true, so nothing
+// gets written underneath a running app. Tests replace it.
+var DesktopAppRunning = func(dir string) bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	err := exec.CommandContext(ctx, "/usr/bin/pgrep", "-x", "Claude").Run()
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() == 1 {
-		return false // pgrep exits 1 when nothing matches
+	inst, ok := profiles.InstancesChecked((&config.Config{}).ClaudeAppDir())
+	if !ok {
+		return true
 	}
-	return true
+	for _, d := range inst {
+		if filepath.Clean(d) == filepath.Clean(dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// sidebarTarget is one profile's preferences file and the names of the
+// state Stradl keeps for it: the main profile's are sidebar-base.json and
+// sidebar-pending.json, another's carry its ID.
+type sidebarTarget struct {
+	path, base, pending string
+}
+
+func sidebarTargetFor(cfg *config.Config, path string) sidebarTarget {
+	t := sidebarTarget{path: path, base: sidebarBaseFile, pending: sidebarPendingFile}
+	if dir := filepath.Dir(path); filepath.Clean(filepath.Dir(dir)) == filepath.Clean(cfg.EffectiveProfilesDir()) {
+		id := filepath.Base(dir)
+		t.base = strings.TrimSuffix(sidebarBaseFile, ".json") + "." + id + ".json"
+		t.pending = strings.TrimSuffix(sidebarPendingFile, ".json") + "." + id + ".json"
+	}
+	return t
+}
+
+// sidebarTargets returns the preferences file of every profile whose folder
+// exists, the main one first; none while desktop sync is off.
+func (s *Syncer) sidebarTargets() []sidebarTarget {
+	main := s.sidebarPath()
+	if main == "" {
+		return nil
+	}
+	var out []sidebarTarget
+	if dirExists(filepath.Dir(main)) {
+		out = append(out, sidebarTargetFor(s.cfg, main))
+	}
+	env := profiles.FromConfig(s.cfg)
+	env.Instances = func() map[int]string { return nil } // which are open doesn't matter here
+	for _, p := range env.List() {
+		if !p.Main && dirExists(p.Dir) {
+			out = append(out, sidebarTargetFor(s.cfg, filepath.Join(p.Dir, sidebarConfigName)))
+		}
+	}
+	return out
 }
 
 // --- sync ---------------------------------------------------------------------
@@ -272,27 +311,44 @@ type SidebarResult struct {
 	AssignmentsChanged int
 }
 
-// SyncSidebar reconciles the desktop app's sidebar layout with storage: it
-// merges this Mac's layout, the one in storage and the last one both agreed on
-// (see MergeSidebar), uploads the result when storage lacks something, and
-// writes it to the app's file when this Mac lacks something. appRunning (nil
-// means DesktopAppRunning) is checked right before writing: while the app runs
-// the merged layout is kept in sidebar-pending.json instead and
-// PendingRestart is set, for ApplyPendingSidebar to write once the app quits.
-// It does nothing when desktop sync is off or the app's folder doesn't exist.
-// Callers hold the sync lock.
+// SyncSidebar reconciles the desktop app's sidebar layout with storage, for
+// each profile in turn (see package profiles; each keeps its own layout
+// file and merges like another Mac would): it merges the profile's layout,
+// the one in storage and the last one both agreed on (see MergeSidebar),
+// uploads the result when storage lacks something, and writes it to the
+// profile's file when it lacks something. appRunning (nil means
+// DesktopAppRunning on the profile's folder) is checked right before
+// writing: while the profile is open the merged layout is kept in its
+// sidebar-pending file instead and PendingRestart is set, for
+// ApplyPendingSidebar to write once it quits. It does nothing when desktop
+// sync is off or the app's folder doesn't exist. Callers hold the sync lock.
 func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (SidebarResult, error) {
 	var res SidebarResult
-	path := s.sidebarPath()
-	if path == "" || !dirExists(filepath.Dir(path)) {
-		return res, nil
+	for _, t := range s.sidebarTargets() {
+		running := appRunning
+		if running == nil {
+			dir := filepath.Dir(t.path)
+			running = func() bool { return DesktopAppRunning(dir) }
+		}
+		r, err := s.syncSidebarFile(ctx, t, running)
+		res.Uploaded = res.Uploaded || r.Uploaded
+		res.AppliedLocally = res.AppliedLocally || r.AppliedLocally
+		res.PendingRestart = res.PendingRestart || r.PendingRestart
+		res.GroupsChanged += r.GroupsChanged
+		res.AssignmentsChanged += r.AssignmentsChanged
+		if err != nil {
+			return res, err
+		}
 	}
-	if appRunning == nil {
-		appRunning = DesktopAppRunning
-	}
+	return res, nil
+}
+
+func (s *Syncer) syncSidebarFile(ctx context.Context, t sidebarTarget, appRunning func() bool) (SidebarResult, error) {
+	var res SidebarResult
+	path := t.path
 	stateDir := sidebarStateDir(s.cfg)
-	basePath := filepath.Join(stateDir, sidebarBaseFile)
-	pendingPath := filepath.Join(stateDir, sidebarPendingFile)
+	basePath := filepath.Join(stateDir, t.base)
+	pendingPath := filepath.Join(stateDir, t.pending)
 	storageID := StorageIdentity(s.cfg.GetStorageConfig())
 	base, _ := loadSidebarSnapshot(basePath, storageID)
 	// The base's part for accounts that don't sync is kept as it is, so the
@@ -488,10 +544,24 @@ func joinSidebar(on, off SidebarState) SidebarState {
 }
 
 // SidebarPendingExists reports whether a sidebar layout is waiting for the
-// Claude app to quit.
+// Claude app (any profile) to quit.
 func SidebarPendingExists(cfg *config.Config) bool {
-	_, err := os.Stat(filepath.Join(sidebarStateDir(cfg), sidebarPendingFile))
-	return err == nil
+	m, _ := filepath.Glob(filepath.Join(sidebarStateDir(cfg), strings.TrimSuffix(sidebarPendingFile, ".json")+"*.json"))
+	return len(m) > 0
+}
+
+// ApplyPendingSidebars runs ApplyPendingSidebar for every profile, and
+// reports whether any layout was written. Callers hold the sync lock.
+func ApplyPendingSidebars(cfg *config.Config) (applied bool, err error) {
+	s := newScopeSyncer(cfg)
+	for _, t := range s.sidebarTargets() {
+		a, e := ApplyPendingSidebar(cfg, t.path)
+		applied = applied || a
+		if e != nil {
+			err = errors.Join(err, e)
+		}
+	}
+	return applied, err
 }
 
 // ApplyPendingSidebar writes a layout SyncSidebar held back while the desktop
@@ -501,9 +571,10 @@ func SidebarPendingExists(cfg *config.Config) bool {
 // pending layout, so sidebar edits made on this Mac in the meantime are kept
 // (and go to storage on the next sync). Callers hold the sync lock.
 func ApplyPendingSidebar(cfg *config.Config, sidebarPath string) (applied bool, err error) {
+	t := sidebarTargetFor(cfg, sidebarPath)
 	stateDir := sidebarStateDir(cfg)
-	pendingPath := filepath.Join(stateDir, sidebarPendingFile)
-	basePath := filepath.Join(stateDir, sidebarBaseFile)
+	pendingPath := filepath.Join(stateDir, t.pending)
+	basePath := filepath.Join(stateDir, t.base)
 	storageID := StorageIdentity(cfg.GetStorageConfig())
 
 	pending, ok := loadSidebarSnapshot(pendingPath, storageID)
@@ -513,7 +584,7 @@ func ApplyPendingSidebar(cfg *config.Config, sidebarPath string) (applied bool, 
 		}
 		return false, nil
 	}
-	if sidebarPath == "" || !dirExists(filepath.Dir(sidebarPath)) || DesktopAppRunning() {
+	if sidebarPath == "" || !dirExists(filepath.Dir(sidebarPath)) || DesktopAppRunning(filepath.Dir(sidebarPath)) {
 		return false, nil
 	}
 	base, _ := loadSidebarSnapshot(basePath, storageID)

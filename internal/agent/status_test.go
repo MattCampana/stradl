@@ -365,7 +365,7 @@ func TestDesktopAppStartTime(t *testing.T) {
 	if !ok || !got.Equal(want) {
 		t.Fatalf("StartTime = %v %v, want %v", got, ok, want)
 	}
-	if f.calls[0] != "pgrep -x Claude" {
+	if f.calls[0] != "pgrep -a -x Claude" {
 		t.Fatalf("calls = %q", f.calls)
 	}
 
@@ -394,7 +394,7 @@ func TestDesktopAppRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(order.calls, "\n")
-	if !strings.Contains(got, "pgrep -x Claude\nbefore-launch\nopen -a Claude") {
+	if !strings.Contains(got, "pgrep -a -x Claude\nbefore-launch\nopen -a Claude") {
 		t.Fatalf("BeforeLaunch out of order:\n%s", got)
 	}
 
@@ -414,7 +414,7 @@ func TestDesktopAppRestart(t *testing.T) {
 	if err := app.Restart(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(off.calls, "\n") != "pgrep -x Claude\nopen -a Claude" {
+	if strings.Join(off.calls, "\n") != "pgrep -a -x Claude\nopen -a Claude" {
 		t.Fatalf("calls: %q", off.calls)
 	}
 }
@@ -427,5 +427,74 @@ func TestNotifyPassesTextAsArguments(t *testing.T) {
 	}
 	if !strings.HasSuffix(f.calls[0], " end run Stradl "+body) {
 		t.Fatalf("call = %q", f.calls[0])
+	}
+}
+
+func TestDesktopAppRestartReopensEachProfile(t *testing.T) {
+	f := &fakeCommands{pgrep: []string{""}}
+	quit := map[int]bool{}
+	app := &DesktopApp{Run: f.run, Name: "Claude", QuitTimeout: time.Second, PollEvery: time.Millisecond,
+		MainDir:   "/main",
+		Instances: func() map[int]string { return map[int]string{10: "/main", 20: "/profiles/judge"} },
+		Alive:     func(pid int) bool { return !quit[pid] },
+	}
+	run := f.run
+	app.Run = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		for _, pid := range []int{10, 20} {
+			if strings.Contains(joined, fmt.Sprintf("(%d).terminate", pid)) {
+				quit[pid] = true
+				return []byte("true\n"), nil
+			}
+		}
+		return run(ctx, name, args...)
+	}
+	app.BeforeLaunch = func(context.Context) { f.calls = append(f.calls, "before-launch") }
+	if err := app.Restart(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(f.calls, "\n")
+	want := "before-launch\nopen -n -a Claude\nopen -n -a Claude --args --user-data-dir=/profiles/judge"
+	if !quit[10] || !quit[20] || got != want {
+		t.Fatalf("quit=%v calls:\n%s\nwant:\n%s", quit, got, want)
+	}
+}
+
+func TestLaunchersAreStradlsOwn(t *testing.T) {
+	dir := t.TempDir()
+	other := filepath.Join(dir, "Claude (Mine).app", "Contents")
+	if err := os.MkdirAll(other, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(other, "Info.plist"), []byte("<plist/>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ls := []Launcher{{Name: "Claude (Mine)", ID: "x"}, {Name: "Claude (it's/odd)", ID: "y", Args: []string{"open", "it's"}}}
+	made, err := WriteLaunchers(dir, "/bin/stradl x", "", ls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(made) != 1 || filepath.Base(made[0]) != "Claude (it's-odd).app" {
+		t.Fatalf("made = %v (an app Stradl didn't make must be left alone)", made)
+	}
+	script, _ := os.ReadFile(filepath.Join(made[0], "Contents", "MacOS", "launcher"))
+	if !strings.Contains(string(script), `exec '/bin/stradl x' 'open' 'it'\''s'`) {
+		t.Fatalf("script:\n%s", script)
+	}
+	if fi, err := os.Stat(filepath.Join(made[0], "Contents", "MacOS", "launcher")); err != nil || fi.Mode()&0111 == 0 {
+		t.Fatal("the launcher script must be executable")
+	}
+	// A launcher no longer wanted goes; the other app stays.
+	if _, err := WriteLaunchers(dir, "/bin/stradl", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(made[0]); !os.IsNotExist(err) {
+		t.Fatal("an old launcher stayed")
+	}
+	if n, err := RemoveLaunchers(dir); err != nil || n != 0 {
+		t.Fatalf("RemoveLaunchers = %d %v", n, err)
+	}
+	if _, err := os.Stat(other); err != nil {
+		t.Fatal("removed an app Stradl didn't make")
 	}
 }

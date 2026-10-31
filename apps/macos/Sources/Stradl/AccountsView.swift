@@ -12,9 +12,22 @@ struct AccountsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Choose which Claude accounts sync to all your Macs. The choice is for your whole Circle. Turning an account off keeps its sessions on the Mac they were made on and deletes nothing already synced.")
+                Text("Open Claude signed in to any of your accounts, and choose which accounts sync to all your Macs. Each account has a Claude profile of its own, so every one stays signed in. The sync choice is for your whole Circle; turning an account off keeps its sessions on the Mac they were made on and deletes nothing already synced.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 8) {
+                    Button { model.openNewClaudeProfile() } label: {
+                        Label("Sign In to Another Account…", systemImage: "person.crop.circle.badge.plus")
+                    }
+                    .disabled(model.busy.contains("open:new"))
+                    .help("Open a new Claude profile and sign in to another account there")
+                    Button { model.addClaudeLaunchers() } label: {
+                        Label("Add to Applications", systemImage: "square.grid.2x2")
+                    }
+                    .disabled(model.busy.contains("launchers") || model.accounts.isEmpty)
+                    .help("Add a Claude app for each account to ~/Applications, for Launchpad, Spotlight and the Dock")
+                }
+                .controlSize(.small)
                 if !model.heldSessions.isEmpty {
                     Card(title: "\(model.heldSessions.count.plural("session")) waiting for an account", systemImage: "hourglass") {
                         Text("Stradl can't tell which account these sessions on this Mac belong to (they were written before Stradl knew this Mac's sign-ins, or while switching accounts), so they don't sync while an account is kept on each Mac.")
@@ -56,8 +69,10 @@ struct AccountsView: View {
                             if i > 0 { Divider().padding(.leading, 52) }
                             AccountRow(account: a,
                                        busy: model.busy.contains("account:\(a.id)"),
+                                       opening: model.busy.contains("open:\(a.id)"),
                                        setSync: { on in model.setAccountSync(a, on) },
-                                       setLabel: { label in model.setAccountLabel(a, label) })
+                                       setLabel: { label in model.setAccountLabel(a, label) },
+                                       open: { model.openClaude(as: a) })
                         }
                     }
                     .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -77,8 +92,10 @@ struct AccountsView: View {
 struct AccountRow: View {
     var account: ClaudeAccount
     var busy: Bool
+    var opening: Bool
     var setSync: (Bool) -> Void
     var setLabel: (String) -> Void
+    var open: () -> Void
     @State private var naming = false
     @State private var draft = ""
 
@@ -101,6 +118,13 @@ struct AccountRow: View {
                         .background(Color.green.opacity(0.12), in: Capsule())
                         .help("The Claude app on this Mac is signed in to this account")
                     }
+                    if account.isOpen {
+                        Text("Open")
+                            .font(.caption2)
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(Color.accentColor.opacity(0.15), in: Capsule())
+                            .help("A Claude window is open for this account")
+                    }
                     if account.terminal == true && !account.active {
                         Text("Terminal")
                             .font(.caption2)
@@ -116,6 +140,12 @@ struct AccountRow: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
+            Button(account.isOpen ? "Show" : (account.needsSignIn ? "Open & Sign In" : "Open")) { open() }
+                .controlSize(.small)
+                .disabled(opening)
+                .help(account.isOpen ? "Bring its Claude window forward"
+                      : account.needsSignIn ? "Open Claude in this account's own profile; sign in to it there once"
+                      : "Open Claude signed in to this account")
             if account.undecided {
                 Button("Keep on each Mac") { setSync(false) }
                     .controlSize(.small)

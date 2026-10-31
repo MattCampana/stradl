@@ -374,7 +374,7 @@ func newEmptyGroupsMac(t *testing.T, root, name string, store storage.Storage) *
 
 func stubDesktopApp(t *testing.T, running bool) {
 	old := DesktopAppRunning
-	DesktopAppRunning = func() bool { return running }
+	DesktopAppRunning = func(string) bool { return running }
 	t.Cleanup(func() { DesktopAppRunning = old })
 }
 

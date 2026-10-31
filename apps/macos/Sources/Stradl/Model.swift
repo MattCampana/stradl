@@ -176,6 +176,12 @@ struct ClaudeAccount: Decodable, Identifiable, Hashable {
     var terminal: Bool?       // Claude Code in the terminal is signed in to it
     var here: Bool            // this Mac has sidebar sessions of it
     var sessions: Int
+    var profile: String?      // the Claude app profile that opens it here (nil: none yet)
+    var signIn: Bool?         // that profile still needs its first sign-in
+    var open: Bool?           // a Claude window is open for it
+
+    var needsSignIn: Bool { signIn == true || profile == nil }
+    var isOpen: Bool { open == true }
 
     var syncs: Bool { sync != "off" }
     var undecided: Bool { sync == "ask" }

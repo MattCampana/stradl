@@ -13,12 +13,14 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/tawanorg/claude-sync/internal/config"
+	"github.com/tawanorg/claude-sync/internal/profiles"
 	"github.com/tawanorg/claude-sync/internal/storage"
 )
 
@@ -279,28 +281,60 @@ func (s *Syncer) readActiveAccount() (activeAccount, bool) {
 	return activeAccount{ID: strings.ToLower(a.AccountUUID), Email: a.EmailAddress, OrgID: strings.ToLower(a.OrganizationUUID), OrgName: a.OrganizationName}, true
 }
 
-// desktopAccount returns the account the Claude desktop app on this Mac is
-// signed in to ("" unknown), from the app's own config.json. It can differ
+// appInstances lists the Claude app's running instances (see package
+// profiles). Tests replace it.
+var appInstances = profiles.Instances
+
+// appProfiles lists the Claude app's profiles on this Mac; withRunning also
+// finds which are open.
+func (s *Syncer) appProfiles(withRunning bool) []profiles.Profile {
+	env := profiles.FromConfig(s.cfg)
+	env.Instances = func() map[int]string {
+		if !withRunning {
+			return nil
+		}
+		return appInstances(env.MainDir)
+	}
+	return env.List()
+}
+
+// ensureProfiles gives every account the Circle knows a Claude app profile
+// on this Mac (see profiles.Env.Convert: the first time, this turns the
+// accounts already here into profiles; after that, it covers accounts met
+// since). The main profile stays the one it's signed in to. Nothing happens
+// where the Claude app has never run. It returns the accounts it made
+// profiles for.
+func (s *Syncer) ensureProfiles() ([]string, error) {
+	env := profiles.FromConfig(s.cfg)
+	env.Instances = func() map[int]string { return appInstances(env.MainDir) }
+	if env.MainDir == "" || !dirExists(env.MainDir) || (runtime.GOOS != "darwin" && s.cfg.ProfilesDirOverride == "") {
+		return nil, nil
+	}
+	reg := s.registry()
+	ids := make([]string, 0, len(reg.Accounts))
+	for id := range reg.Accounts {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	made, err := env.Convert(ids)
+	var out []string
+	for _, p := range made {
+		out = append(out, p.For)
+	}
+	return out, err
+}
+
+// desktopAccounts returns the accounts the Claude app's profiles on this Mac
+// were signed in to last, from each one's own config.json. They can differ
 // from Claude Code's in the terminal (~/.claude.json).
-func (s *Syncer) desktopAccount() string {
-	dir := s.cfg.DesktopDirOverride
-	if dir == "" {
-		dir = config.DesktopSessionsDir()
+func (s *Syncer) desktopAccounts() map[string]bool {
+	out := make(map[string]bool)
+	for _, p := range s.appProfiles(false) {
+		if p.Account != "" && (p.Main || p.SignedIn) {
+			out[p.Account] = true
+		}
 	}
-	if dir == "" {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(filepath.Dir(dir), "config.json"))
-	if err != nil {
-		return ""
-	}
-	var c struct {
-		LastKnownAccountUUID string `json:"lastKnownAccountUuid"`
-	}
-	if json.Unmarshal(data, &c) != nil || !accountIDRe.MatchString(c.LastKnownAccountUUID) {
-		return ""
-	}
-	return strings.ToLower(c.LastKnownAccountUUID)
+	return out
 }
 
 // learnEmails fills in the email of accounts the registry has none for, from
@@ -309,14 +343,14 @@ func (s *Syncer) desktopAccount() string {
 // ID; the email is only what it is shown as. It reports whether any was
 // learned.
 func (s *Syncer) learnEmails(reg *AccountRegistry) bool {
-	dir := s.cfg.DesktopDirOverride
-	if dir == "" {
-		dir = config.DesktopSessionsDir()
+	changed := false
+	for _, p := range s.appProfiles(false) {
+		changed = s.learnEmailsIn(reg, filepath.Join(p.Dir, "local-agent-mode-sessions")) || changed
 	}
-	if dir == "" {
-		return false
-	}
-	base := filepath.Join(filepath.Dir(dir), "local-agent-mode-sessions")
+	return changed
+}
+
+func (s *Syncer) learnEmailsIn(reg *AccountRegistry, base string) bool {
 	accts, err := os.ReadDir(base)
 	if err != nil {
 		return false
@@ -403,9 +437,9 @@ func (s *Syncer) localRecords() []localRecord {
 // sidebar record. It reports whether the registry changed.
 func (s *Syncer) noteLocalAccounts(reg *AccountRegistry, objects []storage.ObjectInfo, attribute bool) bool {
 	changed := false
-	// The account the Claude app is signed in to is known from the moment
-	// it signs in, before it has any session, so the app can ask about it.
-	if id := s.desktopAccount(); id != "" {
+	// An account the Claude app is signed in to is known from the moment it
+	// signs in, before it has any session, so the app can ask about it.
+	for id := range s.desktopAccounts() {
 		if _, ok := reg.Accounts[id]; !ok {
 			reg.account(id)
 			changed = true
@@ -1147,6 +1181,13 @@ type Account struct {
 	Terminal bool         `json:"terminal"` // Claude Code in the terminal is signed in to it
 	Here     bool         `json:"here"`     // this Mac has sidebar sessions of it
 	Sessions int          `json:"sessions"` // sessions known to belong to it
+	// Profile is the Claude app profile that opens it on this Mac (see
+	// package profiles), "" when it has none yet; SignIn says that profile
+	// still needs its first sign-in, and Open that a Claude window is open
+	// for it.
+	Profile string `json:"profile,omitempty"`
+	SignIn  bool   `json:"signIn,omitempty"`
+	Open    bool   `json:"open,omitempty"`
 }
 
 // AccountOrg is an organization an account has sessions in.
@@ -1169,10 +1210,11 @@ func ListAccounts(cfg *config.Config) []Account {
 func (s *Syncer) accountList(reg *AccountRegistry) []Account {
 	records := s.localRecords()
 	terminal := s.activeAccount().ID
-	active := s.desktopAccount()
-	if active == "" {
-		active = terminal
+	active := s.desktopAccounts()
+	if len(active) == 0 && terminal != "" {
+		active[terminal] = true
 	}
+	profs := s.appProfiles(true)
 	here := make(map[string]bool)
 	for _, r := range records {
 		here[r.Account] = true
@@ -1183,7 +1225,10 @@ func (s *Syncer) accountList(reg *AccountRegistry) []Account {
 	}
 	var out []Account
 	for id, a := range reg.Accounts {
-		acc := Account{ID: id, Email: a.Email, Label: a.Label, Active: id == active, Terminal: id == terminal, Here: here[id], Sessions: count[id], Sync: "ask"}
+		acc := Account{ID: id, Email: a.Email, Label: a.Label, Active: active[id], Terminal: id == terminal, Here: here[id], Sessions: count[id], Sync: "ask"}
+		if p, ok := profiles.ForAccount(profs, id); ok {
+			acc.Profile, acc.SignIn, acc.Open = p.ID, !p.SignedIn && !p.Main, p.Running && p.Account == id
+		}
 		if a.Sync != nil {
 			acc.Sync = map[bool]string{true: "on", false: "off"}[*a.Sync]
 		}
