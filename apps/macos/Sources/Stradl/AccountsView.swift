@@ -143,7 +143,7 @@ struct AccountRow: View {
             .popover(isPresented: $naming) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Name this account").font(.headline)
-                    TextField(account.email ?? "Work, Personal…", text: $draft)
+                    TextField(account.email ?? "you@company.com", text: $draft)
                         .frame(width: 220)
                         .onSubmit { save() }
                     HStack {
@@ -200,12 +200,13 @@ struct NewAccountSheet: View {
                 }
             }
             VStack(alignment: .leading, spacing: 6) {
-                Text("Name").font(.headline)
-                TextField("Work, Personal, a client…", text: $name)
+                Text("Email").font(.headline)
+                TextField("you@company.com", text: $name)
                     .textFieldStyle(.roundedBorder)
-                Text(account.email ?? "Account \(account.id.prefix(8))")
+                Text("The email you sign in to Claude with, so every Mac shows which account this is (or any name you like).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Its sessions").font(.headline)
@@ -230,7 +231,7 @@ struct NewAccountSheet: View {
         .frame(width: 420)
         .interactiveDismissDisabled(true)
         .onAppear {
-            name = account.label ?? ""
+            name = account.label ?? account.email ?? ""
         }
     }
 }
