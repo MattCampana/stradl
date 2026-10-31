@@ -9,12 +9,12 @@ struct ActivityView: View {
         if let p = model.overview?.pending {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 12) {
-                    Stat(value: "\(p.upload)", label: "To upload", symbol: "arrow.up")
-                    Stat(value: "\(p.download)", label: "To download", symbol: "arrow.down")
-                    Stat(value: "\(p.merge)", label: "To merge", symbol: "arrow.triangle.merge")
-                    Stat(value: "\(p.deferred)", label: "Waiting for Claude", symbol: "clock")
-                    Stat(value: "\((p.delete ?? 0) + (p.trash ?? 0))", label: "Deletes (to trash)", symbol: "trash")
-                    Stat(value: "\(p.conflicts)", label: "Conflict copies", symbol: "exclamationmark.triangle")
+                    Stat(value: "\(p.upload)", label: "To upload", symbol: "arrow.up", color: Theme.azure)
+                    Stat(value: "\(p.download)", label: "To download", symbol: "arrow.down", color: Theme.teal)
+                    Stat(value: "\(p.merge)", label: "To merge", symbol: "arrow.triangle.merge", color: Theme.violet)
+                    Stat(value: "\(p.deferred)", label: "Waiting for Claude", symbol: "clock", color: Theme.amber)
+                    Stat(value: "\((p.delete ?? 0) + (p.trash ?? 0))", label: "Deletes (to trash)", symbol: "trash", color: Theme.coral)
+                    Stat(value: "\(p.conflicts)", label: "Conflict copies", symbol: "exclamationmark.triangle", color: Theme.pink)
                 }
                 if p.known == false {
                     Card {
@@ -28,7 +28,7 @@ struct ActivityView: View {
                 if p.total == 0 && p.known != false {
                     Card {
                         Label("Nothing waiting. This Mac and your storage match.", systemImage: "checkmark.circle")
-                            .foregroundStyle(.green)
+                            .foregroundStyle(Theme.ok)
                     }
                 } else if p.total > 0 {
                     let rows = p.files.filter { query.isEmpty || $0.path.localizedCaseInsensitiveContains(query) }
@@ -38,6 +38,9 @@ struct ActivityView: View {
                             Text(f.path).font(.callout.monospaced()).lineLimit(1).truncationMode(.middle).help(f.path)
                         }
                     }
+                    .tableStyle(.inset(alternatesRowBackgrounds: false))
+                    .scrollContentBackground(.hidden)
+                    .themePanel(radius: 16)
                     if p.total > p.files.count {
                         Text("Showing the first \(p.files.count) of \(p.total).").font(.caption).foregroundStyle(.secondary)
                     }
@@ -96,9 +99,9 @@ struct ActionBadge: View {
 
     private var color: Color {
         switch action {
-        case "deferred": return .purple
-        case "delete", "trash": return .orange
-        default: return .blue
+        case "deferred": return Theme.violet
+        case "delete", "trash": return Theme.warn
+        default: return Theme.azure
         }
     }
 }

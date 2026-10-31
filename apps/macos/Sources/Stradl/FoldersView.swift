@@ -42,8 +42,7 @@ struct FoldersView: View {
                             }
                         }
                     }
-                    .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.separator, lineWidth: 0.5))
+                    .themePanel()
                 }
             }
             .padding(24)
@@ -90,7 +89,7 @@ struct FolderRow: View {
         HStack(spacing: 12) {
             Image(systemName: folder.git ? "point.3.connected.trianglepath.dotted" : "folder")
                 .font(.system(size: 18))
-                .foregroundStyle(folder.exists ? Color.accentColor : .secondary)
+                .foregroundStyle(folder.exists ? Theme.violet : .secondary)
                 .frame(width: 28)
                 .help(folder.git ? "A git repository: history and branches sync too" : "A folder")
             VStack(alignment: .leading, spacing: 2) {
@@ -105,7 +104,7 @@ struct FolderRow: View {
             }
             Spacer(minLength: 8)
             if !folder.exists {
-                Text("Not on this Mac").font(.caption).foregroundStyle(.orange)
+                Text("Not on this Mac").font(.caption).foregroundStyle(Theme.warn)
             }
             if let entry = extraEntry {
                 Button("Remove from Extra Folders") { stopSyncing(entry) }

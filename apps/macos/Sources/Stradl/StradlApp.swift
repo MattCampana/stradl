@@ -19,10 +19,12 @@ struct StradlApp: App {
         Window("Stradl", id: "main") {
             ContentView()
                 .environmentObject(model)
-                .frame(minWidth: 860, minHeight: 560)
+                .frame(minWidth: 900, minHeight: 600)
+                .preferredColorScheme(.dark)
+                .tint(Theme.violet)
                 .task { await Snapshots.runIfAsked(model) }
         }
-        .windowToolbarStyle(.unified)
+        .windowToolbarStyle(.unifiedCompact)
         .commands {
             CommandMenu("Sync") {
                 Button("Sync Now") { model.syncNow() }
@@ -41,6 +43,8 @@ struct StradlApp: App {
             SettingsView()
                 .environmentObject(model)
                 .frame(width: 560, height: 620)
+                .preferredColorScheme(.dark)
+                .tint(Theme.violet)
         }
     }
 }
@@ -77,33 +81,42 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List(Pane.allCases, selection: $model.pane) { s in
-                Label(s.rawValue, systemImage: s.symbol)
-                    .badge(badge(for: s))
-                    .tag(s)
-            }
-            .navigationSplitViewColumnWidth(min: 170, ideal: 190)
-            .safeAreaInset(edge: .bottom) { SidebarFooter() }
+            Sidebar()
+                .navigationSplitViewColumnWidth(min: 210, ideal: 228, max: 280)
         } detail: {
-            VStack(spacing: 0) {
-                if let banner = model.message {
-                    BannerView(banner: banner) { model.message = nil }
-                }
-                Group {
-                    switch model.pane ?? .overview {
-                    case .overview: OverviewView(section: $model.pane)
-                    case .circle: CircleView()
-                    case .sessions: SessionsView()
-                    case .accounts: AccountsView()
-                    case .folders: FoldersView()
-                    case .activity: ActivityView()
-                    case .settings: ScrollView { SettingsForm().padding(24) }
-                    case .logs: LogsView()
+            ZStack {
+                ThemeBackground()
+                VStack(spacing: 0) {
+                    if let banner = model.message {
+                        BannerView(banner: banner) { model.message = nil }
+                            .padding(.horizontal, 24)
+                            .padding(.top, 14)
                     }
+                    PaneHeader(pane: model.pane ?? .overview)
+                    Group {
+                        switch model.pane ?? .overview {
+                        case .overview: OverviewView(section: $model.pane)
+                        case .circle: CircleView()
+                        case .sessions: SessionsView()
+                        case .accounts: AccountsView()
+                        case .folders: FoldersView()
+                        case .activity: ActivityView()
+                        case .settings: ScrollView { SettingsForm().padding(24) }
+                        case .logs: LogsView()
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .scrollContentBackground(.hidden)
+                    // Every plain button and switch in the panes, themed;
+                    // a button that names its own style keeps it.
+                    .buttonStyle(.ghost)
+                    .toggleStyle(.themeSwitch)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .navigationTitle(model.pane?.rawValue ?? "Stradl")
+            .foregroundStyle(Theme.text)
+            .navigationTitle("")
+            .toolbarBackground(Theme.ink0, for: .windowToolbar)
+            .toolbarBackground(.visible, for: .windowToolbar)
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button { model.syncNow() } label: {
@@ -132,6 +145,54 @@ struct ContentView: View {
             NewAccountSheet(account: account).environmentObject(model).id(account.id)
         }
     }
+}
+
+/// The section list: the mark and name, a colored tile per section with room
+/// around it, the selected one lit in the voices' gradient, and the status at
+/// the bottom.
+struct Sidebar: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 34, height: 34)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("stradl")
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .foregroundStyle(Theme.text)
+                    Text("Musical chairs for Claude")
+                        .font(.system(size: 10.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(Theme.text3)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 14)
+            .padding(.bottom, 18)
+
+            ScrollView {
+                VStack(spacing: 4) {
+                    ForEach(Pane.allCases) { pane in
+                        SidebarRow(pane: pane, selected: (model.pane ?? .overview) == pane, badge: badge(for: pane)) {
+                            model.pane = pane
+                        }
+                    }
+                }
+                .padding(.horizontal, 10)
+            }
+            Spacer(minLength: 0)
+            SidebarFooter()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            LinearGradient(colors: [Theme.ink1, Theme.ink0], startPoint: .top, endPoint: .bottom)
+                .overlay(alignment: .trailing) { Rectangle().fill(Theme.line).frame(width: 1) }
+                .ignoresSafeArea()
+        )
+    }
 
     private func badge(for s: Pane) -> Int {
         switch s {
@@ -143,32 +204,122 @@ struct ContentView: View {
     }
 }
 
+struct SidebarRow: View {
+    var pane: Pane
+    var selected: Bool
+    var badge: Int
+    var action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                IconTile(symbol: pane.symbol, color: pane.color, size: 28, filled: selected)
+                Text(pane.rawValue)
+                    .font(.system(size: 13.5, weight: selected ? .semibold : .medium, design: .rounded))
+                    .foregroundStyle(selected ? Theme.text : Theme.text2)
+                Spacer(minLength: 4)
+                if badge > 0 {
+                    Text("\(badge)")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(selected ? Color.white : pane.color)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background((selected ? Color.white.opacity(0.18) : pane.color.opacity(0.16)), in: Capsule())
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(selected ? AnyShapeStyle(LinearGradient(colors: [pane.color.opacity(0.30), pane.color.opacity(0.08)], startPoint: .leading, endPoint: .trailing))
+                                   : AnyShapeStyle(Color.white.opacity(hovering ? 0.05 : 0)))
+            }
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(pane.color.opacity(0.35), lineWidth: 1)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// The section's title, big, with its tile and one line about it.
+struct PaneHeader: View {
+    var pane: Pane
+
+    var body: some View {
+        HStack(spacing: 14) {
+            IconTile(symbol: pane.symbol, color: pane.color, size: 40, filled: true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(pane.rawValue)
+                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                    .foregroundStyle(Theme.text)
+                Text(pane.subtitle)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(Theme.text2)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 18)
+        .padding(.bottom, 6)
+    }
+}
+
 struct SidebarFooter: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
                 if model.progress.syncing {
                     Image(systemName: "arrow.triangle.2.circlepath")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.blue)
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Theme.azure)
                         .spinning(true)
                 } else {
                     StatusDot(health: model.health)
                 }
                 Text(model.statusLine)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(Theme.text2)
                     .lineLimit(2)
                     .monospacedDigit()
                 Spacer(minLength: 0)
             }
             if model.progress.syncing, let f = model.progress.fraction {
-                ProgressView(value: f).progressViewStyle(.linear).controlSize(.small)
+                GradientBar(value: f)
             }
         }
         .padding(12)
+        .themePanel(radius: 14)
+        .padding(12)
+    }
+}
+
+/// A thin progress bar in the voices' gradient.
+struct GradientBar: View {
+    var value: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.08))
+                Capsule().fill(Theme.voices)
+                    .frame(width: max(6, geo.size.width * min(max(value, 0), 1)))
+                    .shadow(color: Theme.violet.opacity(0.6), radius: 4)
+            }
+        }
+        .frame(height: 5)
+        .animation(.easeOut(duration: 0.4), value: value)
     }
 }
 
@@ -179,16 +330,16 @@ struct StatusDot: View {
         Circle()
             .fill(color)
             .frame(width: 9, height: 9)
-            .overlay(Circle().stroke(.black.opacity(0.12), lineWidth: 0.5))
+            .shadow(color: color.opacity(0.8), radius: 4)
             .accessibilityLabel(label)
     }
 
     private var color: Color {
         switch health {
-        case .good: return .green
-        case .working: return .blue
-        case .attention: return .orange
-        case .off: return .gray
+        case .good: return Theme.ok
+        case .working: return Theme.azure
+        case .attention: return Theme.warn
+        case .off: return Theme.text3
         }
     }
 
@@ -207,19 +358,23 @@ struct BannerView: View {
     var dismiss: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: banner.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                .foregroundStyle(banner.isError ? .orange : .green)
+        let color = banner.isError ? Theme.warn : Theme.ok
+        HStack(alignment: .top, spacing: 12) {
+            IconTile(symbol: banner.isError ? "exclamationmark.triangle.fill" : "checkmark", color: color, size: 26)
             Text(banner.text)
+                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .foregroundStyle(Theme.text)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Button(action: dismiss) { Image(systemName: "xmark") }
-                .buttonStyle(.borderless)
+                .padding(.top, 4)
+            Button(action: dismiss) { Image(systemName: "xmark").foregroundStyle(Theme.text2) }
+                .buttonStyle(.plain)
+                .padding(.top, 5)
                 .help("Dismiss")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(banner.isError ? Color.orange.opacity(0.12) : Color.green.opacity(0.10))
+        .padding(12)
+        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(color.opacity(0.35), lineWidth: 1))
         .task(id: banner.id) {
             guard !banner.isError else { return }
             try? await Task.sleep(nanoseconds: 6_000_000_000)
@@ -228,25 +383,30 @@ struct BannerView: View {
     }
 }
 
-/// A rounded card used across the app.
+/// A glass card used across the app, with an optional title and icon tile.
 struct Card<Content: View>: View {
     var title: String?
     var systemImage: String?
+    var color: Color = Theme.violet
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             if let title {
-                Label(title, systemImage: systemImage ?? "")
-                    .labelStyle(.titleAndIcon)
-                    .font(.headline)
+                HStack(spacing: 10) {
+                    if let systemImage {
+                        IconTile(symbol: systemImage, color: color, size: 26)
+                    }
+                    Text(title)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Theme.text)
+                }
             }
             content
         }
-        .padding(16)
+        .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.separator, lineWidth: 0.5))
+        .themePanel()
     }
 }
 
@@ -258,23 +418,22 @@ struct AgentOffline: View {
         // The agent can be running but slow to answer (its first overview
         // reads every transcript): that is not the same as stopped.
         let running = model.config?.agentRunning ?? false
-        VStack(spacing: 14) {
-            Image(systemName: running ? "hourglass" : "moon.zzz")
-                .font(.system(size: 40))
-                .foregroundStyle(.secondary)
+        VStack(spacing: 16) {
+            IconTile(symbol: running ? "hourglass" : "moon.zzz.fill", color: running ? Theme.azure : Theme.violet, size: 64, filled: true)
             Text(running ? "Stradl is busy" : "Stradl isn't running")
-                .font(.title2.weight(.semibold))
+                .font(.system(size: 22, weight: .bold, design: .rounded))
             Text(running
                  ? "It didn't answer in time, usually because it's in the middle of a big sync. \(model.overviewError ?? "")"
                  : "Start the background agent to sync and see your Macs.")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.text2)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 440)
             if running {
                 Button("Try Again") { Task { await model.refreshAll() } }
+                    .buttonStyle(.ghost)
             } else {
                 Button("Start Stradl") { model.startAgent() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.primary)
                     .disabled(model.busy.contains("agent"))
             }
         }

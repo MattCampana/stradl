@@ -15,12 +15,12 @@ struct SessionsView: View {
                 Table(rows, selection: $selection, sortOrder: $order) {
                     TableColumn("Session", value: \.title) { s in
                         HStack(spacing: 6) {
-                            if s.live { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(.green).help("Open in Claude now") }
+                            if s.live { Image(systemName: "circle.fill").font(.system(size: 6)).foregroundStyle(Theme.ok).help("Open in Claude now") }
                             Text(s.title).lineLimit(1)
                         }
                     }
                     .width(min: 220, ideal: 320)
-                    TableColumn("Project", value: \.project) { s in Text(s.project).foregroundStyle(.secondary) }
+                    TableColumn("Project", value: \.project) { s in Text(s.project).foregroundStyle(Theme.text2) }
                         .width(min: 90, ideal: 140)
                     TableColumn("Last activity", value: \.lastActivityAt) { s in Text(s.lastActivityAt.ago) }
                         .width(min: 90, ideal: 110)
@@ -29,6 +29,8 @@ struct SessionsView: View {
                     TableColumn("Sync", value: \.syncState) { s in SyncBadge(state: s.syncState) }
                         .width(min: 90, ideal: 120)
                 }
+                .tableStyle(.inset(alternatesRowBackgrounds: false))
+                .scrollContentBackground(.hidden)
                 .frame(minWidth: 520)
                 if let id = selection, let s = o.sessions.first(where: { $0.id == id }) {
                     SessionDetail(session: s)
@@ -98,10 +100,10 @@ struct SyncBadge: View {
 
     private var color: Color {
         switch state {
-        case "synced": return .green
-        case "pending-upload", "pending-download", "merging": return .blue
-        case "held": return .purple
-        case "conflict": return .orange
+        case "synced": return Theme.ok
+        case "pending-upload", "pending-download", "merging": return Theme.azure
+        case "held": return Theme.violet
+        case "conflict": return Theme.warn
         default: return .secondary
         }
     }

@@ -24,6 +24,7 @@ struct AccountsView: View {
                     Button { model.deployLaunchers() } label: {
                         Label(model.launchersDeployed ? "Redeploy Launchers" : "Deploy Launchers", systemImage: "square.and.arrow.down.on.square")
                     }
+                    .buttonStyle(.primary)
                     .disabled(model.busy.contains("launchers") || model.accounts.isEmpty)
                     .help("Put a Claude app for each account in Applications, its icon showing the account's name on its color")
                     if model.launchersDeployed {
@@ -40,7 +41,7 @@ struct AccountsView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if !model.heldSessions.isEmpty {
-                    Card(title: "\(model.heldSessions.count.plural("session")) waiting for an account", systemImage: "hourglass") {
+                    Card(title: "\(model.heldSessions.count.plural("session")) waiting for an account", systemImage: "hourglass", color: Theme.warn) {
                         Text("Stradl can't tell which account these sessions on this Mac belong to (they were written before Stradl knew this Mac's sign-ins, or while switching accounts), so they don't sync while an account is kept on each Mac.")
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -87,8 +88,7 @@ struct AccountsView: View {
                                        setColor: { hex in model.setAccountColor(a, hex) })
                         }
                     }
-                    .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.separator, lineWidth: 0.5))
+                    .themePanel()
                 }
                 Text("Sign-ins never sync: each Mac signs in to each account itself.")
                     .font(.caption)
@@ -134,26 +134,26 @@ struct AccountRow: View {
                     Text(account.name).lineLimit(1).truncationMode(.middle)
                     if account.active {
                         HStack(spacing: 4) {
-                            Circle().fill(.green).frame(width: 7, height: 7)
+                            Circle().fill(Theme.ok).frame(width: 7, height: 7)
                             Text("Signed in to Claude")
                         }
                         .font(.caption2)
                         .padding(.horizontal, 6).padding(.vertical, 1)
-                        .background(Color.green.opacity(0.12), in: Capsule())
+                        .background(Theme.ok.opacity(0.14), in: Capsule())
                         .help("The Claude app on this Mac is signed in to this account")
                     }
                     if account.isOpen {
                         Text("Open")
                             .font(.caption2)
                             .padding(.horizontal, 6).padding(.vertical, 1)
-                            .background(Color.accentColor.opacity(0.15), in: Capsule())
+                            .background(Theme.violet.opacity(0.15), in: Capsule())
                             .help("A Claude window is open for this account")
                     }
                     if account.terminal == true && !account.active {
                         Text("Terminal")
                             .font(.caption2)
                             .padding(.horizontal, 6).padding(.vertical, 1)
-                            .background(Color.secondary.opacity(0.15), in: Capsule())
+                            .background(Color.white.opacity(0.10), in: Capsule())
                             .help("Claude Code in the terminal is signed in to this account")
                     }
                 }
@@ -176,11 +176,11 @@ struct AccountRow: View {
                     .disabled(busy)
                 Button("Sync") { setSync(true) }
                     .controlSize(.small)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.primary)
                     .disabled(busy)
             } else {
                 Toggle("Sync", isOn: Binding(get: { account.syncs }, set: { setSync($0) }))
-                    .toggleStyle(.switch)
+                    .toggleStyle(.themeSwitch)
                     .labelsHidden()
                     .disabled(busy)
                     .help(account.syncs ? "Its sessions sync to all your Macs" : "Its sessions stay on the Mac they were made on")
@@ -246,7 +246,7 @@ struct NewAccountSheet: View {
             HStack(spacing: 10) {
                 Image(systemName: "person.crop.circle.badge.plus")
                     .font(.system(size: 28))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(Theme.violet)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("New Claude account").font(.title3.weight(.semibold))
                     Text(account.active ? "The Claude app on this Mac just signed in to it." : "A Mac in your Circle has used it.")

@@ -11,7 +11,7 @@ struct OverviewView: View {
                     hero(o)
                     let undecided = model.accounts.filter(\.undecided)
                     if !undecided.isEmpty {
-                        Card(title: "Choose which Claude accounts sync", systemImage: "person.crop.circle.badge.questionmark") {
+                        Card(title: "Choose which Claude accounts sync", systemImage: "person.crop.circle.badge.questionmark", color: Theme.magenta) {
                             Text(undecided.count == 1
                                  ? "\(undecided[0].name) is new to your Circle. Its sessions sync to all your Macs until you choose."
                                  : "\(undecided.count) Claude accounts are new to your Circle. Their sessions sync to all your Macs until you choose.")
@@ -21,7 +21,7 @@ struct OverviewView: View {
                         }
                     }
                     if let warnings = o.warnings, !warnings.isEmpty {
-                        Card(title: "Needs your attention", systemImage: "exclamationmark.triangle") {
+                        Card(title: "Needs your attention", systemImage: "exclamationmark.triangle", color: Theme.warn) {
                             ForEach(warnings, id: \.self) { w in
                                 Text(w).textSelection(.enabled).foregroundStyle(.secondary)
                             }
@@ -46,14 +46,16 @@ struct OverviewView: View {
         Card {
             HStack(alignment: .center, spacing: 16) {
                 ZStack {
-                    Circle().fill(heroColor.opacity(0.15)).frame(width: 56, height: 56)
+                    Circle().fill(heroColor.opacity(0.16)).frame(width: 60, height: 60)
+                    Circle().strokeBorder(heroColor.opacity(0.5), lineWidth: 1.5).frame(width: 60, height: 60)
                     Image(systemName: heroSymbol)
-                        .font(.system(size: 24, weight: .semibold))
+                        .font(.system(size: 24, weight: .bold))
                         .foregroundStyle(heroColor)
                         .spinning(model.health == .working)
                 }
+                .shadow(color: heroColor.opacity(0.45), radius: 14)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(model.statusLine).font(.title2.weight(.semibold)).monospacedDigit()
+                    Text(model.statusLine).font(.system(size: 22, weight: .bold, design: .rounded)).monospacedDigit()
                     Text("\(o.thisDevice) · Stradl \(o.agent.version) · \(o.devices.count.plural("Mac")) in your Circle")
                         .foregroundStyle(.secondary)
                     if model.progress.syncing || o.agent.syncing {
@@ -61,7 +63,7 @@ struct OverviewView: View {
                             .padding(.top, 4)
                     }
                     if let err = o.agent.lastError, !err.isEmpty {
-                        Text(err).font(.callout).foregroundStyle(.orange).textSelection(.enabled).lineLimit(3)
+                        Text(err).font(.callout).foregroundStyle(Theme.warn).textSelection(.enabled).lineLimit(3)
                     }
                 }
                 Spacer()
@@ -73,7 +75,7 @@ struct OverviewView: View {
                             Image(systemName: "arrow.triangle.2.circlepath").spinning(model.progress.syncing)
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.primary)
                     .disabled(model.busy.contains("sync") || model.progress.syncing)
                     if o.agent.pendingDesktopRestart > 0 {
                         Button { model.restartClaude() } label: {
@@ -97,25 +99,25 @@ struct OverviewView: View {
 
     private var heroColor: Color {
         switch model.health {
-        case .good: return .green
-        case .working: return .blue
-        case .attention: return .orange
-        case .off: return .gray
+        case .good: return Theme.ok
+        case .working: return Theme.azure
+        case .attention: return Theme.warn
+        case .off: return Theme.text3
         }
     }
 
     private func stats(_ o: Overview) -> some View {
         HStack(spacing: 12) {
-            Stat(value: "\(o.totals.sessions)", label: "Sessions", symbol: "bubble.left.and.bubble.right")
-            Stat(value: "\(o.totals.projects)", label: "Projects", symbol: "folder")
-            Stat(value: "\(model.folders.filter { $0.files > 0 }.count)", label: "Project folders", symbol: "externaldrive.badge.icloud")
-            Stat(value: "\(o.totals.syncedFiles)", label: "Claude files", symbol: "doc.on.doc")
-            Stat(value: o.totals.bytes.bytes, label: "Claude data", symbol: "internaldrive")
+            Stat(value: "\(o.totals.sessions)", label: "Sessions", symbol: "bubble.left.and.bubble.right", color: Theme.pink)
+            Stat(value: "\(o.totals.projects)", label: "Projects", symbol: "folder", color: Theme.violet)
+            Stat(value: "\(model.folders.filter { $0.files > 0 }.count)", label: "Project folders", symbol: "externaldrive.badge.icloud", color: Theme.azure)
+            Stat(value: "\(o.totals.syncedFiles)", label: "Claude files", symbol: "doc.on.doc", color: Theme.teal)
+            Stat(value: o.totals.bytes.bytes, label: "Claude data", symbol: "internaldrive", color: Theme.amber)
         }
     }
 
     private func circle(_ o: Overview) -> some View {
-        Card(title: "Your Circle", systemImage: "person.3.sequence") {
+        Card(title: "Your Circle", systemImage: "person.3.sequence", color: Theme.violet) {
             ForEach(o.devices) { d in
                 HStack {
                     StatusDot(health: d.healthy ? .good : .attention)
@@ -132,13 +134,13 @@ struct OverviewView: View {
                     .foregroundStyle(.secondary)
             }
             Button("See your Circle") { section = .circle }
-                .buttonStyle(.link)
+                .buttonStyle(.themeLink)
         }
         .frame(maxWidth: .infinity)
     }
 
     private func week(_ o: Overview) -> some View {
-        Card(title: "This week", systemImage: "calendar") {
+        Card(title: "This week", systemImage: "calendar", color: Theme.pink) {
             let days = o.days.filter { !$0.sessions.isEmpty }.prefix(5)
             if days.isEmpty {
                 Text("No sessions in the last 7 days.").foregroundStyle(.secondary)
@@ -160,7 +162,7 @@ struct OverviewView: View {
                 }
             }
             Button("All sessions") { section = .sessions }
-                .buttonStyle(.link)
+                .buttonStyle(.themeLink)
         }
         .frame(maxWidth: .infinity)
     }
@@ -170,19 +172,29 @@ struct Stat: View {
     var value: String
     var label: String
     var symbol: String
+    var color: Color = Theme.violet
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Image(systemName: symbol)
-                .foregroundStyle(.secondary)
-                .frame(height: 18, alignment: .leading)
-            Text(value).font(.title2.weight(.semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
-            Text(label).font(.caption).foregroundStyle(.secondary).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 8) {
+            IconTile(symbol: symbol, color: color, size: 26)
+            Text(value)
+                .font(.system(size: 26, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            Text(label)
+                .font(.system(size: 11.5, weight: .medium, design: .rounded))
+                .foregroundStyle(Theme.text2)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(14)
+        .padding(16)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.separator, lineWidth: 0.5))
+        .background(alignment: .topTrailing) {
+            Circle().fill(color.opacity(0.18)).frame(width: 90, height: 90).blur(radius: 30).offset(x: 20, y: -20)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .themePanel(radius: 16)
     }
 }
 
@@ -194,9 +206,7 @@ struct SyncProgressBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if let f = progress.fraction {
-                ProgressView(value: f)
-                    .progressViewStyle(.linear)
-                    .animation(.easeOut(duration: 0.4), value: f)
+                GradientBar(value: f)
                 Text(progress.checking
                      ? "Checking files: \(progress.done.formatted()) of \(progress.total.formatted()) · \(Int((f * 100).rounded()))%"
                      : "Syncing: \(progress.done.formatted()) of \(progress.total.formatted()) files · \(Int((f * 100).rounded()))%")

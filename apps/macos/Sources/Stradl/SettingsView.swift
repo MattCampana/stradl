@@ -18,7 +18,7 @@ struct SettingsForm: View {
     var body: some View {
         if let c = model.config {
             VStack(alignment: .leading, spacing: 20) {
-                Card(title: "What syncs", systemImage: "square.stack.3d.up") {
+                Card(title: "What syncs", systemImage: "square.stack.3d.up", color: Theme.violet) {
                     Picker("Scope", selection: binding(c.scope) { model.setConfig("scope", $0) }) {
                         Text("Everything (recommended)").tag("everything")
                         Text("Sessions only").tag("sessions")
@@ -34,7 +34,7 @@ struct SettingsForm: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
-                Card(title: "Extra folders", systemImage: "folder.badge.plus") {
+                Card(title: "Extra folders", systemImage: "folder.badge.plus", color: Theme.teal) {
                     Text("Folders your sessions work in sync on their own. Add any other folder in your home folder to keep it on every Mac.")
                         .font(.callout).foregroundStyle(.secondary)
                     ForEach(c.extraFolders, id: \.self) { f in
@@ -48,7 +48,7 @@ struct SettingsForm: View {
                     Button("Add Folder…") { addFolder() }
                 }
 
-                Card(title: "Leave out", systemImage: "line.3.horizontal.decrease.circle") {
+                Card(title: "Leave out", systemImage: "line.3.horizontal.decrease.circle", color: Theme.coral) {
                     Text("Patterns for files in project folders that stay on each Mac, such as *.mov or dist/**.")
                         .font(.callout).foregroundStyle(.secondary)
                     ForEach(c.folderExclude, id: \.self) { p in
@@ -66,7 +66,7 @@ struct SettingsForm: View {
                     }
                 }
 
-                Card(title: "This Mac", systemImage: "laptopcomputer") {
+                Card(title: "This Mac", systemImage: "laptopcomputer", color: Theme.azure) {
                     HStack {
                         TextField("Name in your Circle", text: $deviceName)
                             .onSubmit { model.setConfig("device_name", deviceName) }
@@ -87,7 +87,7 @@ struct SettingsForm: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
-                Card(title: "Background", systemImage: "menubar.rectangle") {
+                Card(title: "Background", systemImage: "menubar.rectangle", color: Theme.pink) {
                     Toggle("Start Stradl at login and keep syncing", isOn: Binding(
                         get: { c.agentInstalled },
                         set: { $0 ? model.startAgent() : model.stopAgent() }))
@@ -96,7 +96,7 @@ struct SettingsForm: View {
                         .disabled(!c.agentInstalled)
                 }
 
-                Card(title: "Storage", systemImage: "externaldrive.connected.to.line.below") {
+                Card(title: "Storage", systemImage: "externaldrive.connected.to.line.below", color: Theme.amber) {
                     LabeledContent("Provider", value: c.provider.capitalized)
                     if let a = c.account, !a.isEmpty { LabeledContent("Account", value: a) }
                     LabeledContent("Container", value: c.container)
@@ -105,7 +105,7 @@ struct SettingsForm: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
-                Card(title: "Files", systemImage: "folder") {
+                Card(title: "Files", systemImage: "folder", color: Theme.slate) {
                     HStack {
                         Button("Open Stradl Folder") { NSWorkspace.shared.open(URL(fileURLWithPath: c.stateDir)) }
                         Button("Open Trash") { model.reveal(URL(fileURLWithPath: c.trashDir)) }
@@ -127,7 +127,7 @@ struct SettingsForm: View {
                     .foregroundStyle(.secondary).multilineTextAlignment(.center).textSelection(.enabled)
                 if outdated {
                     Button("Update Stradl") { model.update() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.primary)
                         .disabled(model.busy.contains("update"))
                 } else {
                     Button("Try Again") { Task { await model.refreshConfig() } }

@@ -12,7 +12,7 @@ struct CircleView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Your Circle is every Mac syncing into \(model.config.map { "the \($0.container) container" } ?? "your storage"). Each Mac checks in after every sync.")
                         .foregroundStyle(.secondary)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 16)], spacing: 16) {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 16, alignment: .top)], alignment: .leading, spacing: 16) {
                         ForEach(o.devices) { d in
                             MacCard(device: d) { forgetting = d }
                         }
@@ -52,7 +52,7 @@ struct MacCard: View {
             HStack(alignment: .top) {
                 Image(systemName: "laptopcomputer")
                     .font(.system(size: 28))
-                    .foregroundStyle(device.this ? Color.accentColor : .secondary)
+                    .foregroundStyle(device.this ? Theme.violet : .secondary)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(device.name).font(.headline)
                     Text(device.this ? "This Mac" : "Stradl \(device.version)")
@@ -70,7 +70,7 @@ struct MacCard: View {
             }
             if !device.healthy {
                 Text("Hasn't synced cleanly in the last day. It may be asleep, offline or turned off.")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(Theme.warn)
             }
         }
         .contextMenu {

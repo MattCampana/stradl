@@ -12,8 +12,8 @@ struct LogsView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
-                Toggle("Problems only", isOn: $problemsOnly).toggleStyle(.checkbox)
-                Toggle("Follow", isOn: $follow).toggleStyle(.checkbox)
+                Toggle("Problems only", isOn: $problemsOnly).toggleStyle(.themeSwitch)
+                Toggle("Follow", isOn: $follow).toggleStyle(.themeSwitch)
                     .help("Keep the newest lines in view")
                 Spacer()
                 Button { model.copyDiagnostics() } label: { Label("Copy Diagnostics", systemImage: "stethoscope") }
@@ -84,8 +84,8 @@ struct LogLineView: View {
     private var color: Color {
         switch line.level {
         case .info: return .primary
-        case .warning: return .orange
-        case .error: return .red
+        case .warning: return Theme.warn
+        case .error: return Theme.bad
         }
     }
 }
