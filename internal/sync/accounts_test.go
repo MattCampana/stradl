@@ -630,3 +630,178 @@ func TestAnOldSessionResumedUnderAnOffAccountStaysHere(t *testing.T) {
 		t.Fatal("work resumed under an account that doesn't sync reached bob")
 	}
 }
+
+func TestASessionStartedDuringASwitchWaits(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	a.setSync(judgeAcct, false)
+	a.signIn(bpAcct, bpOrg, "matt@breakpointdata.com")
+	// Breakpoint was last confirmed a minute ago; then a session starts,
+	// then the switch to Judge: the session can't be placed.
+	h := a.s.readSignIns()
+	h[len(h)-1].Seen = time.Now().Add(-time.Minute).UTC()
+	b, _ := json.Marshal(h)
+	_ = os.WriteFile(filepath.Join(a.s.stateDir(), signInsFile), b, 0600)
+	a.writeSession("cli", "unsure", cwdLine("u1", filepath.Join(a.home, "code", "q")))
+	time.Sleep(20 * time.Millisecond)
+	data, _ := json.Marshal(map[string]any{"oauthAccount": map[string]string{"accountUuid": judgeAcct, "emailAddress": "mcampana@judge.com", "organizationUuid": judgeOrg}})
+	if err := os.WriteFile(a.s.cfg.ClaudeJSONOverride, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	a.writeSession("cli", "after", cwdLine("u2", filepath.Join(a.home, "code", "q")))
+	a.sync()
+	if hasSession(store, "unsure") || hasSession(store, "after") {
+		t.Fatal("a session around a switch to an account that doesn't sync uploaded")
+	}
+	held := HeldSessions(a.s.cfg)
+	if len(held) != 1 || held[0].ID != "unsure" {
+		t.Fatalf("held = %+v, want only the session written during the switch", held)
+	}
+	if a.s.registry().Sessions["after"] != judgeAcct {
+		t.Fatal("a session started after the switch belongs to Judge for certain")
+	}
+}
+
+func TestSessionsWithoutAClaudeLoginStillSync(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	a.setSync(judgeAcct, false)
+	// An API key: ~/.claude.json reads fine, without a claude.ai account.
+	if err := os.WriteFile(a.s.cfg.ClaudeJSONOverride, []byte(`{"primaryApiKey":"x"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.s.noteSignIn(time.Now())
+	time.Sleep(10 * time.Millisecond)
+	a.writeSession("cli", "apikey", cwdLine("u1", filepath.Join(a.home, "code", "k")))
+	a.sync()
+	if !hasSession(store, "apikey") {
+		t.Fatal("a session made without a claude.ai account should sync")
+	}
+}
+
+func TestHeldSessionsCanBeAssigned(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	// Written before this Mac's sign-in history began.
+	a.writeSession("cli", "old-work", cwdLine("u1", filepath.Join(a.home, "code", "w")))
+	hist := `{"display":"old prompt","sessionId":"old-work"}` + "\n"
+	if err := os.WriteFile(filepath.Join(a.claude, "history.jsonl"), []byte(hist), 0600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	a.setSync(judgeAcct, false)
+	a.signIn(bpAcct, bpOrg, "matt@breakpointdata.com")
+	a.sync()
+	if hasSession(store, "old-work") {
+		t.Fatal("a session older than the sign-in history uploaded while an account is off")
+	}
+	other := newEverythingDevice(t, root, "carol", store)
+	other.sync()
+	if got, _ := os.ReadFile(filepath.Join(other.claude, "history.jsonl")); strings.Contains(string(got), "old prompt") {
+		t.Fatal("a held session's prompt reached another Mac")
+	}
+	held := HeldSessions(a.s.cfg)
+	if len(held) != 1 || held[0].ID != "old-work" {
+		t.Fatalf("held = %+v", held)
+	}
+	if err := a.s.AssignSessions(context.Background(), bpAcct, []string{"old-work"}); err != nil {
+		t.Fatal(err)
+	}
+	a.sync()
+	if !hasSession(store, "old-work") || len(HeldSessions(a.s.cfg)) != 0 {
+		t.Fatal("an assigned session should sync by its account's choice")
+	}
+}
+
+func TestPlansStayHereWithFolderSyncOff(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	off := false
+	a.s.cfg.FolderSync = &off
+	a.setSync(judgeAcct, false)
+	a.writeAccountSession(judgeAcct, judgeOrg, "j1", filepath.Join(a.home, "code", "x"))
+	plan := filepath.Join(a.home, ".claude", "plans", "quiet-heron.md")
+	a.appendSession("p", "cli-j1", `{"uuid":"u9","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"`+plan+`"}}]}}`+"\n")
+	a.write(".claude/plans/quiet-heron.md", "the plan\n")
+	a.sync()
+	if len(keysWithPrefix(store, "plans/")) != 0 {
+		t.Fatal("an off account's plan synced with folder sync off")
+	}
+}
+
+func TestAPendingSidebarKeepsAnOffAccountsLayout(t *testing.T) {
+	store := newCASStore()
+	a, b := newSidebarPair(t, store)
+	stubDesktopApp(t, false)
+	a.syncSidebar(false) // the base holds the whole layout
+	a.setSync(testAcct, false)
+	// Bob adds a group in another account, which syncs.
+	f := sidebarFile(b)
+	m := f.load()
+	ep := m["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any)
+	ep["dframe-group-scopes"].(map[string]any)[bpAcct+"/"+bpOrg] = map[string]any{
+		"groups": []any{map[string]any{"id": "GBP", "name": "Breakpoint"}}, "assignments": map[string]any{}, "order": map[string]any{},
+	}
+	f.save(m)
+	b.syncSidebar(false)
+	if res := a.syncSidebar(true); !res.PendingRestart {
+		t.Fatalf("setup: alice should get a pending layout: %+v", res)
+	}
+	if _, err := ApplyPendingSidebar(a.s.cfg, a.s.sidebarPath()); err != nil {
+		t.Fatal(err)
+	}
+	ep = sidebarFile(a).load()["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any)
+	if len(groupScopeOf(ep)["assignments"].(map[string]any)) == 0 {
+		t.Fatal("alice's layout of an account that doesn't sync was erased when the app quit")
+	}
+	if _, ok := ep["dframe-group-scopes"].(map[string]any)[bpAcct+"/"+bpOrg]; !ok {
+		t.Fatal("bob's new group should arrive")
+	}
+}
+
+func TestHistoryDoesntPingPongBetweenMacsWithOffPrompts(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	for _, d := range []*device{a, b} {
+		d.writeAccountSession(judgeAcct, judgeOrg, "j-"+d.name, filepath.Join(d.home, "code", "x"))
+	}
+	a.setSync(judgeAcct, false)
+	for _, d := range []*device{a, b} {
+		hist := `{"display":"secret ` + d.name + `","sessionId":"cli-j-` + d.name + `"}` + "\n" + `{"display":"shared ` + d.name + `"}` + "\n"
+		if err := os.WriteFile(filepath.Join(d.claude, "history.jsonl"), []byte(hist), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncAll(3, a, b)
+	ra, rb := a.sync(), b.sync()
+	if len(ra.Uploaded)+len(rb.Uploaded)+len(ra.Merged)+len(rb.Merged) != 0 {
+		t.Fatalf("still moving after settling: %v %v %v %v", ra.Uploaded, rb.Uploaded, ra.Merged, rb.Merged)
+	}
+}
+
+func TestAStaleCacheNeverUndoesANewerChoice(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	a.setSync(judgeAcct, false) // alice's copy: off
+	b.sync()
+	b.setSync(judgeAcct, true) // newer, on bob
+	// The container is replaced; alice syncs first and brings back her
+	// older choice, then bob brings back his newer one.
+	fresh := newCASStore()
+	a.s.storage, b.s.storage = fresh, fresh
+	a.sync()
+	b.sync()
+	a.sync()
+	if got := a.s.registry().Accounts[judgeAcct]; got == nil || got.Sync == nil || !*got.Sync {
+		t.Fatalf("bob's newer choice to sync Judge was lost or undone: %+v", got)
+	}
+}

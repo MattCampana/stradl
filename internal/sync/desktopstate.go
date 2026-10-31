@@ -355,7 +355,10 @@ func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (Sideb
 			// The base stays as it is: the file still holds the old layout, and
 			// comparing it with a newer base would read the difference as this
 			// Mac undoing the other Macs' changes.
-			if err := saveSidebarSnapshot(pendingPath, storageID, merged, ""); err != nil {
+			// The whole layout, this Mac's own part of accounts that don't
+			// sync included: applied when the app quits, a pending layout
+			// without it would read as having removed it.
+			if err := saveSidebarSnapshot(pendingPath, storageID, joinSidebar(merged, localOff), ""); err != nil {
 				return res, err
 			}
 			res.PendingRestart = true

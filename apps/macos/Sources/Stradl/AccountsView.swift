@@ -15,6 +15,27 @@ struct AccountsView: View {
                 Text("Choose which Claude accounts sync to all your Macs. The choice is for your whole Circle. Turning an account off keeps its sessions on the Mac they were made on and deletes nothing already synced.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if !model.heldSessions.isEmpty {
+                    Card(title: "\(model.heldSessions.count.plural("session")) waiting for an account", systemImage: "hourglass") {
+                        Text("Stradl can't tell which account these sessions on this Mac belong to (they were written before Stradl knew this Mac's sign-ins, or while switching accounts), so they don't sync while an account is kept on each Mac.")
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        ForEach(model.heldSessions.prefix(5)) { h in
+                            Text(h.cwd.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? h.id)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        Menu("Assign All To…") {
+                            ForEach(model.accounts) { a in
+                                Button(a.name) { model.assignHeld(to: a) }
+                            }
+                        }
+                        .fixedSize()
+                        .disabled(model.busy.contains("assign"))
+                    }
+                }
                 let undecided = model.accounts.filter(\.undecided)
                 if !undecided.isEmpty {
                     Card {

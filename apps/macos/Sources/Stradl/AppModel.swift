@@ -11,6 +11,7 @@ final class AppModel: ObservableObject {
     @Published var configError: String?
     @Published var folders: [FolderStat] = []
     @Published var accounts: [ClaudeAccount] = []
+    @Published var heldSessions: [HeldSession] = []
     @Published var busy: Set<String> = []     // actions in flight, by name
     @Published var message: Banner?           // last action's outcome
     @Published var lastRefresh: Date?
@@ -93,6 +94,16 @@ final class AppModel: ObservableObject {
     func refreshAccounts(fromStorage: Bool = false) async {
         let args = fromStorage ? ["accounts", "--json", "--refresh"] : ["accounts", "--json"]
         accounts = (try? await StradlCLI.json([ClaudeAccount].self, args, timeout: fromStorage ? 90 : 30)) ?? accounts
+        heldSessions = (try? await StradlCLI.json([HeldSession].self, ["accounts", "held", "--json"])) ?? heldSessions
+    }
+
+    /// Gives every waiting session an account.
+    func assignHeld(to account: ClaudeAccount) {
+        let n = heldSessions.count
+        perform("assign", success: "\(n.plural("session")) now belong to \(account.name)") {
+            try await StradlCLI.run(["accounts", "assign", account.id, "--held"], timeout: 90)
+            try? await AgentAPI.syncNow()
+        }
     }
 
     // MARK: derived

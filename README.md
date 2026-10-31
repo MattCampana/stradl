@@ -112,7 +112,7 @@ Look for the Stradl mark in the menu bar:
 | `stradl status` | Agent status, last sync, and what's waiting to sync |
 | `stradl circle` | The Macs in your Circle (`forget <name>` removes a retired one) |
 | `stradl folders` | The project folders that sync |
-| `stradl accounts` | Your Claude accounts and which sync (`sync <account> on\|off`, `label <account> <name>`) |
+| `stradl accounts` | Your Claude accounts and which sync (`sync <account> on\|off`, `label <account> <name>`, `held` and `assign` for sessions waiting for an account) |
 | `stradl config show` / `set` / `add` / `remove` | See or change settings without editing YAML |
 | `stradl claude restart` | Restart Claude so its sidebar shows what arrived |
 | `stradl diagnostics` | A troubleshooting report with secrets removed |

@@ -946,6 +946,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 		wg.Wait()
 	}
 	stopSaving()
+	s.saveHeld(stored)
 	s.reindexRepos(roots)
 
 	// Downloads in this pass may have delivered the new copy of a moved session.
@@ -1682,7 +1683,9 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 		switch {
 		case IsMergeableJSONL(npath):
 			merged, gotRemote := MergeJSONL(localData, remoteData)
-			_, gotLocal := MergeJSONL(remoteData, localData)
+			// Storage needs only what this Mac would send (the prompts of
+			// accounts that don't sync stay here).
+			_, gotLocal := MergeJSONL(remoteData, s.sharedJSONL(npath, localData))
 			result, writeHere, uploadThere = merged, gotRemote, gotLocal
 		case strings.HasPrefix(npath, DesktopPrefix):
 			if PreferRemoteDesktopMeta(localData, remoteData) {

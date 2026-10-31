@@ -75,7 +75,81 @@ Nothing already in storage is deleted.`,
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "read the Circle's account list from storage first")
-	cmd.AddCommand(accountsSyncCmd(), accountsLabelCmd())
+	cmd.AddCommand(accountsSyncCmd(), accountsLabelCmd(), accountsHeldCmd(), accountsAssignCmd())
+	return cmd
+}
+
+func accountsHeldCmd() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "held",
+		Short: "Sessions waiting because their account isn't known",
+		Long: `While an account doesn't sync, a session on this Mac whose account Stradl
+can't tell (written before Stradl knew this Mac's sign-ins, or while
+switching accounts) waits instead of syncing. Give them an account with
+'stradl accounts assign <account> --held'.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			held := sync.HeldSessions(cfg)
+			if held == nil {
+				held = []sync.HeldSession{}
+			}
+			if asJSON {
+				return printJSON(held)
+			}
+			if len(held) == 0 {
+				fmt.Println("No sessions are waiting for an account.")
+				return nil
+			}
+			for _, h := range held {
+				fmt.Printf("  %s  %s%s%s\n", h.ID, colorDim, h.Cwd, colorReset)
+			}
+			fmt.Printf("\nGive them an account: stradl accounts assign <account> --held\n")
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
+	return cmd
+}
+
+func accountsAssignCmd() *cobra.Command {
+	var held bool
+	cmd := &cobra.Command{
+		Use:   "assign <account> [session...]",
+		Short: "Say which account sessions belong to (--held: all waiting ones)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			sessions := args[1:]
+			if held {
+				for _, h := range sync.HeldSessions(cfg) {
+					sessions = append(sessions, h.ID)
+				}
+			}
+			if len(sessions) == 0 {
+				return fmt.Errorf("name sessions, or --held for all waiting ones")
+			}
+			ctx, cancel := context.WithTimeout(cmd.Context(), time.Minute)
+			defer cancel()
+			s, a, err := resolveAccount(ctx, cfg, args[0])
+			if err != nil {
+				return err
+			}
+			if err := s.AssignSessions(ctx, a.ID, sessions); err != nil {
+				return err
+			}
+			fmt.Printf("%s✓%s %d sessions belong to %s; they sync by its choice from the next sync\n", colorGreen, colorReset, len(sessions), a.Name)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&held, "held", false, "every session waiting for an account")
 	return cmd
 }
 

@@ -180,6 +180,13 @@ struct ClaudeAccount: Decodable, Identifiable, Hashable {
     var undecided: Bool { sync == "ask" }
 }
 
+/// A session waiting because its account isn't known (`stradl accounts held`).
+struct HeldSession: Decodable, Identifiable, Hashable {
+    var id: String
+    var cwd: String?
+    var written: Date?
+}
+
 struct FolderStat: Decodable, Identifiable, Hashable {
     var path: String
     var abs: String
