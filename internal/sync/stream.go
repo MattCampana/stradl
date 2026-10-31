@@ -72,7 +72,7 @@ func (s *Syncer) streams(npath string, size int64) bool {
 	_, ok := s.streamer()
 	// The prompt history is filtered whole while some account doesn't sync.
 	return ok && size > streamThreshold && !strings.HasPrefix(npath, DesktopPrefix) &&
-		!(npath == "history.jsonl" && s.registry().anyOff())
+		(npath != "history.jsonl" || !s.registry().anyOff())
 }
 
 // contentFilter returns the per-line path rewrite for npath on upload

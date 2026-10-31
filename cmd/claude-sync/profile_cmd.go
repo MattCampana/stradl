@@ -101,7 +101,7 @@ func listProfiles(asJSON bool) error {
 		return nil
 	}
 	for _, r := range rows {
-		name, where := "(new profile, not signed in yet)", r.Profile.ID
+		name, where := "(new profile, not signed in yet)", ""
 		if r.Account != nil {
 			name = r.Account.Name
 		}

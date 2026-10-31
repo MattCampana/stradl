@@ -33,6 +33,9 @@ func (d *device) signIn(acct, org, email string) {
 		d.t.Fatal(err)
 	}
 	d.s.noteSignIn(time.Now()) // as the agent's local check does within seconds
+	// Linux stamps files from a coarse clock (a few ms behind time.Now), so
+	// a session written at once could predate the sign-in it follows.
+	time.Sleep(15 * time.Millisecond)
 }
 
 // writeAccountSession writes a desktop session of acct: its sidebar record
