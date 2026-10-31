@@ -133,11 +133,13 @@ A Mac can be signed in to several Claude accounts over time. The desktop app kee
 
 Stradl keeps an account registry in your storage (`_metadata/accounts`, encrypted like everything else) for the whole Circle. It names each account (its email once a Mac has been signed in to it, or a name you give it), records whether it syncs, and which account each session and project folder belongs to:
 
-- A sidebar record says for certain: the folder it lives in names the account.
-- A session started in the terminal belongs to the account Claude Code was signed in to when this Mac wrote it. Sessions that came from another Mac, or synced before Stradl knew accounts, are never guessed at; they sync as before.
-- A project folder belongs to the accounts whose sessions work in it.
+- A sidebar record says for certain: the folder it lives in names the account. A desktop-app session waits for its record.
+- A session in the terminal belongs to the account Claude Code was signed in to when it was written or continued on this Mac. Stradl keeps a history of this Mac's sign-ins (noticed within seconds while the agent runs), so signing in to another account before the next sync doesn't move earlier work. Sessions that came from another Mac, or synced before Stradl knew accounts and haven't been continued since, are never guessed at; they sync as before.
+- A project folder belongs to the accounts whose sessions work in it; the repository holding a worktree's or a submodule's git data, to the same accounts.
 
-An account you choose not to sync keeps its sidebar records, transcripts (with their subagents, file history and to-do lists) and the project folders only its sessions use on the Mac they were made on. Nothing is downloaded for it and nothing already in storage is deleted. A folder sessions of another account also use keeps syncing. The choice is the Circle's: the latest made on any Mac wins. An account nobody has chosen for yet syncs, as before.
+While some account doesn't sync, a session written or continued here whose account isn't known yet sits each sync out until it is.
+
+An account you choose not to sync keeps on the Mac they were made on: its sidebar records and their layout (groups, sections, stars, pins), its transcripts with their subagents, tool results, file history, to-do and task lists, the prompts it typed (their lines in the prompt history) and pastes only those prompts hold, plans only its sessions wrote, a project's memory when only its sessions use that project, and the project folders only its sessions use, a repository inside a folder that syncs included. Nothing is downloaded for it and nothing already in storage is deleted. A folder sessions of another account also use keeps syncing, and so does a plain subfolder of a folder that syncs (it is part of that folder). The choice is the Circle's: the latest made on any Mac wins, and this Mac's copy brings it back if storage loses it (a new container). An account nobody has chosen for yet syncs, as before.
 
 Never synced, whatever you choose: each Mac's sign-ins (credentials stay on each Mac) and the managed settings and policy limits of the organization a Mac is signed in to (`remote-settings.json`, `policy-limits.json`), which belong to that sign-in.
 

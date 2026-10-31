@@ -280,7 +280,7 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	}
 	first, later := s.transcriptCwds(useCache)
 	for _, c := range first {
-		if !reg.sessionOff(c.Session) {
+		if !reg.sessionOff(c.Session) && !s.held[c.Session] {
 			note(add(c.Path), reg.Sessions[c.Session])
 		}
 	}
@@ -300,7 +300,7 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	primary := append([]string(nil), candidates...)
 	for _, c := range later {
 		p := c.Path
-		if seen[p] || !filepath.IsAbs(p) || reg.sessionOff(c.Session) {
+		if seen[p] || !filepath.IsAbs(p) || reg.sessionOff(c.Session) || s.held[c.Session] {
 			continue
 		}
 		p = filepath.Clean(p)
@@ -318,9 +318,11 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	known := s.knownFolderList()
 	sort.SliceStable(known, func(i, j int) bool { return strings.Count(known[i], "/") < strings.Count(known[j], "/") })
 	probe := objects == nil && !useCache // the agent's local probe: no markers to go by
+	s.offFolders = nil
 	for _, rel := range known {
 		if reg.folderOff(rel) {
-			continue // only sessions of accounts that don't sync work there
+			s.offFolders = append(s.offFolders, rel) // kept on the list (see reconcile's wasRoot)
+			continue                                 // only sessions of accounts that don't sync work there
 		}
 		if probe || !insideAny(s.home, candidates, filepath.Join(s.home, filepath.FromSlash(rel)), fold) || containsFold(candidates, rel, fold) {
 			add(filepath.Join(s.home, filepath.FromSlash(rel)))
@@ -329,11 +331,17 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	// A submodule a session needs brings its superproject, which holds its
 	// git data.
 	for i := 0; i < len(candidates); i++ {
-		if super := s.superproject(candidates[i]); super != "" {
-			add(super)
-		}
-		if main := s.mainWorktree(candidates[i]); main != "" {
-			add(main)
+		// The repository holding a submodule's or worktree's git data
+		// belongs to the same accounts.
+		accts := s.folderAccounts[candidates[i]]
+		for _, extra := range []string{s.superproject(candidates[i]), s.mainWorktree(candidates[i])} {
+			if extra == "" {
+				continue
+			}
+			rel := add(extra)
+			for acct := range accts {
+				note(rel, acct)
+			}
 		}
 	}
 	candidates = s.dropSkippedNested(candidates, fold)
@@ -547,6 +555,22 @@ func remoteFolderMarkers(objects []storage.ObjectInfo) []string {
 // subagents' included. Results are cached in the sync state (useCache) and,
 // for the background agent's probes, in memory, so each transcript is read
 // once, and then only where it grew.
+// notePlans records that session sid wrote or read plans (see claudeOff).
+func (s *Syncer) notePlans(plans []string, sid string) {
+	if len(plans) == 0 {
+		return
+	}
+	if s.planSessions == nil {
+		s.planSessions = make(map[string]map[string]bool)
+	}
+	for _, p := range plans {
+		if s.planSessions[p] == nil {
+			s.planSessions[p] = make(map[string]bool)
+		}
+		s.planSessions[p][sid] = true
+	}
+}
+
 // sessionCwd is a folder a session worked in.
 type sessionCwd struct {
 	Path, Session string
@@ -598,6 +622,7 @@ func (s *Syncer) transcriptCwds(useCache bool) (first, later []sessionCwd) {
 					}
 					if info, err := a.Info(); err == nil {
 						e := read(filepath.Join(sub, a.Name()), "projects/"+d.Name()+"/"+name+"/subagents/"+a.Name(), info)
+						s.notePlans(e.Plans, name)
 						for _, p := range append(append([]string(nil), e.Cwds...), e.touchedDirs()...) {
 							later = append(later, sessionCwd{p, name})
 						}
@@ -614,6 +639,7 @@ func (s *Syncer) transcriptCwds(useCache bool) (first, later []sessionCwd) {
 			}
 			e := read(filepath.Join(projects, d.Name(), name), "projects/"+d.Name()+"/"+name, info)
 			sid := strings.TrimSuffix(name, ".jsonl")
+			s.notePlans(e.Plans, sid)
 			if len(e.Cwds) > 0 {
 				first = append(first, sessionCwd{e.Cwds[0], sid})
 			}
@@ -661,12 +687,13 @@ func updateCwds(p string, e cwdEntry, size int64, home string) cwdEntry {
 	}
 	defer func() { _ = f.Close() }()
 	from := e.Scanned
-	cwds, touched := e.Cwds, e.Touched
+	cwds, touched, plans := e.Cwds, e.Touched, e.Plans
 	if from > size || from == 0 || e.Tail == 0 || tailSum(f, from) != e.Tail {
 		// New, truncated, or rewritten before where the last read stopped
 		// (MergeJSONL interleaves another Mac's lines by time).
-		from, cwds, touched = 0, nil, nil
+		from, cwds, touched, plans = 0, nil, nil, nil
 	}
+	plansDir := filepath.Join(home, ".claude", "plans")
 	seen := make(map[string]bool, len(cwds)+len(touched))
 	for _, c := range cwds {
 		seen[c] = true
@@ -674,8 +701,11 @@ func updateCwds(p string, e cwdEntry, size int64, home string) cwdEntry {
 	for _, c := range touched {
 		seen["\x00"+c] = true
 	}
+	for _, p := range plans {
+		seen["\x01"+p] = true
+	}
 	if _, err := f.Seek(from, io.SeekStart); err != nil {
-		return cwdEntry{Size: size, Cwds: cwds, Touched: touched, Scanned: from, Tail: e.Tail}
+		return cwdEntry{Size: size, Cwds: cwds, Touched: touched, Plans: plans, Scanned: from, Tail: e.Tail}
 	}
 	r := bufio.NewReaderSize(f, 256<<10)
 	pos := from
@@ -699,6 +729,10 @@ func updateCwds(p string, e cwdEntry, size int64, home string) cwdEntry {
 					continue
 				}
 				dir := filepath.Dir(filepath.Clean(p))
+				if dir == plansDir && !seen["\x01"+filepath.Base(p)] {
+					seen["\x01"+filepath.Base(p)] = true
+					plans = append(plans, filepath.Base(p))
+				}
 				if r, ok := homeRel(home, dir); !ok || neverProject(r) {
 					continue
 				}
@@ -722,7 +756,7 @@ func updateCwds(p string, e cwdEntry, size int64, home string) cwdEntry {
 	if len(cwds) > 0 {
 		first = cwds[0]
 	}
-	return cwdEntry{Size: size, Cwd: first, Cwds: cwds, Touched: touched, Scanned: pos, Tail: tailSum(f, pos)}
+	return cwdEntry{Size: size, Cwd: first, Cwds: cwds, Touched: touched, Plans: plans, Scanned: pos, Tail: tailSum(f, pos)}
 }
 
 // tailSum checksums up to 64 bytes of f ending at pos (0 when pos is 0 or
@@ -791,7 +825,11 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 	}
 	markers := make(map[string]bool)
 	for _, rel := range remoteFolderMarkers(objects) {
-		markers[rel] = true
+		// One only accounts that don't sync work in isn't a folder here: a
+		// repository there stays out of the folder holding it.
+		if !s.registry().folderOff(rel) {
+			markers[rel] = true
+		}
 	}
 	for _, r := range folders {
 		// A registered submodule never belongs to the repository holding
@@ -1335,6 +1373,9 @@ func (s *Syncer) folderListFile() string {
 type folderList struct {
 	Folders []string            `json:"folders"`
 	Nested  map[string][]string `json:"nested,omitempty"`
+	// Off are folders that sat the sync out only because the accounts whose
+	// sessions use them don't sync; they come back when one does.
+	Off []string `json:"off,omitempty"`
 }
 
 func (s *Syncer) readFolderList() folderList {
@@ -1351,13 +1392,17 @@ func (s *Syncer) readFolderList() folderList {
 	return list
 }
 
-// knownFolderList returns the project folders the last sync covered.
-func (s *Syncer) knownFolderList() []string { return s.readFolderList().Folders }
+// knownFolderList returns the project folders the last sync covered, with
+// those that sat it out only because their accounts don't sync.
+func (s *Syncer) knownFolderList() []string {
+	l := s.readFolderList()
+	return append(l.Folders, l.Off...)
+}
 
 // saveFolderList records the folders this sync covered, for the agent's
 // local probe and the app, and the repositories each left out.
-func (s *Syncer) saveFolderList(folders []string, nested map[string][]string) error {
-	data, err := json.MarshalIndent(folderList{folders, nested}, "", "  ")
+func (s *Syncer) saveFolderList(folders []string, nested map[string][]string, off []string) error {
+	data, err := json.MarshalIndent(folderList{folders, nested, off}, "", "  ")
 	if err != nil {
 		return err
 	}

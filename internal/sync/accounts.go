@@ -1,11 +1,14 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -101,6 +104,19 @@ func (r *AccountRegistry) off(id string) bool {
 	}
 	a := r.Accounts[id]
 	return a != nil && a.Sync != nil && !*a.Sync
+}
+
+// anyOff reports whether the user chose not to sync some account.
+func (r *AccountRegistry) anyOff() bool {
+	if r == nil {
+		return false
+	}
+	for id := range r.Accounts {
+		if r.off(id) {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionOff reports whether session id belongs to an account that doesn't
@@ -229,11 +245,16 @@ func (s *Syncer) activeAccount() activeAccount {
 // localRecords lists this Mac's sidebar records by account: the account and
 // organization each lives under and the transcript (session) it shows.
 type localRecord struct {
-	Account, Org, Session, Cwd, OriginCwd string
+	Account, Org, Record, Session, Cwd, OriginCwd string
 }
 
 func (s *Syncer) localRecords() []localRecord {
-	dir := s.cfg.EffectiveDesktopDir()
+	// Read whether or not the sidebar syncs: records are how a desktop
+	// session's account is known.
+	dir := s.cfg.DesktopDirOverride
+	if dir == "" {
+		dir = config.DesktopSessionsDir()
+	}
 	if dir == "" {
 		return nil
 	}
@@ -257,7 +278,8 @@ func (s *Syncer) localRecords() []localRecord {
 		if json.Unmarshal(data, &rec) != nil {
 			continue
 		}
-		out = append(out, localRecord{Account: strings.ToLower(parts[0]), Org: strings.ToLower(parts[1]), Session: rec.CliSessionID, Cwd: rec.Cwd, OriginCwd: rec.OriginCwd})
+		out = append(out, localRecord{Account: strings.ToLower(parts[0]), Org: strings.ToLower(parts[1]),
+			Record: strings.TrimSuffix(parts[2], ".json"), Session: rec.CliSessionID, Cwd: rec.Cwd, OriginCwd: rec.OriginCwd})
 	}
 	return out
 }
@@ -265,9 +287,10 @@ func (s *Syncer) localRecords() []localRecord {
 // noteLocalAccounts adds what this Mac knows to the registry: the accounts
 // and organizations it has sidebar records for and the one it's signed in
 // to, and which session each record shows. With attribute, also which
-// account each transcript first written here belongs to (the one signed in
-// when it was); transcripts that came from another Mac, or that synced
-// before, are never guessed at. It reports whether the registry changed.
+// account each terminal session written or continued here without one
+// belongs to: the account this Mac was signed in to when it was written
+// (its sign-in history), never a guess. A desktop session waits for its
+// sidebar record. It reports whether the registry changed.
 func (s *Syncer) noteLocalAccounts(reg *AccountRegistry, objects []storage.ObjectInfo, attribute bool) bool {
 	changed := false
 	active := s.activeAccount()
@@ -309,9 +332,28 @@ func (s *Syncer) noteLocalAccounts(reg *AccountRegistry, objects []storage.Objec
 			}
 		}
 	}
-	if active.ID == "" || !attribute {
+	if !attribute {
 		return changed
 	}
+	stored := s.storedSessions(objects)
+	history := s.readSignIns()
+	for np, sid := range s.localTranscripts() {
+		if _, known := reg.Sessions[sid]; known {
+			continue
+		}
+		t, ok := s.writtenHere(np, stored[sid])
+		if !ok || transcriptEntrypoint(s.transcriptPath(np)) == "claude-desktop" {
+			continue // synced as it is, or a desktop session: its record says
+		}
+		if acct := accountAt(history, t); acct != "" {
+			reg.Sessions[sid], changed = acct, true
+		}
+	}
+	return changed
+}
+
+// storedSessions lists the sessions whose transcripts storage holds.
+func (s *Syncer) storedSessions(objects []storage.ObjectInfo) map[string]bool {
 	stored := make(map[string]bool)
 	for _, obj := range objects {
 		if np, ok, _ := s.npathForKey(obj.Key); ok {
@@ -320,13 +362,132 @@ func (s *Syncer) noteLocalAccounts(reg *AccountRegistry, objects []storage.Objec
 			}
 		}
 	}
+	return stored
+}
+
+func (s *Syncer) transcriptPath(np string) string {
+	return filepath.Join(s.claudeDir, filepath.FromSlash(np))
+}
+
+// writtenHere reports whether the transcript at np was written on this Mac
+// since it last synced (new here, or continued here), and when: its birth
+// for a new one, its last write for one continued.
+func (s *Syncer) writtenHere(np string, stored bool) (time.Time, bool) {
+	info, err := os.Stat(s.transcriptPath(np))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var st *FileState
+	if s.state != nil {
+		st = s.state.GetFile(np)
+	}
+	switch {
+	case st == nil && !stored:
+		return fileBirth(info), true
+	case st != nil && (st.LocalDeleted || st.Size != info.Size() || !st.ModTime.Equal(info.ModTime())):
+		return info.ModTime(), true
+	}
+	return time.Time{}, false
+}
+
+var entrypointRe = regexp.MustCompile(`"entrypoint"\s*:\s*"([^"]+)"`)
+
+// transcriptEntrypoint returns how a transcript's session was started
+// ("claude-desktop" for the desktop app, "cli" for the terminal), from its
+// first lines.
+func transcriptEntrypoint(abs string) string {
+	f, err := os.Open(abs)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	buf := make([]byte, 64<<10)
+	n, _ := io.ReadFull(f, buf)
+	if m := entrypointRe.FindSubmatch(buf[:n]); m != nil {
+		return string(m[1])
+	}
+	return ""
+}
+
+// heldSessions lists sessions that sit a pass out: while some account
+// doesn't sync, a session written or continued here that has no account
+// yet waits until it has one (its sidebar record, or this Mac's sign-in
+// history), so an account the user keeps on each Mac never leaks through
+// the gap.
+func (s *Syncer) heldSessions(stored map[string]bool) map[string]bool {
+	reg := s.registry()
+	if !reg.anyOff() {
+		return nil
+	}
+	held := make(map[string]bool)
 	for np, sid := range s.localTranscripts() {
-		if _, known := reg.Sessions[sid]; known || stored[sid] || s.state.GetFile(np) != nil {
+		if reg.Sessions[sid] != "" {
 			continue
 		}
-		reg.Sessions[sid], changed = active.ID, true
+		if _, ok := s.writtenHere(np, stored[sid]); ok {
+			held[sid] = true
+		}
 	}
-	return changed
+	return held
+}
+
+// --- sign-ins ---------------------------------------------------------------------
+
+// signInsFile is this Mac's sign-in history: which account Claude Code was
+// signed in to from when, as noticed at each sync and by the agent's local
+// check every few seconds. A terminal session belongs to the account
+// signed in when it was written.
+const signInsFile = "signins.json"
+
+type signIn struct {
+	Since   time.Time `json:"since"`
+	Account string    `json:"account"` // "" signed out
+}
+
+func (s *Syncer) readSignIns() []signIn {
+	data, err := os.ReadFile(filepath.Join(s.stateDir(), signInsFile))
+	if err != nil {
+		return nil
+	}
+	var h []signIn
+	if json.Unmarshal(data, &h) != nil {
+		return nil
+	}
+	return h
+}
+
+// noteSignIn records the account signed in now when it differs from the last
+// one noted.
+func (s *Syncer) noteSignIn(now time.Time) {
+	acct := s.activeAccount().ID
+	h := s.readSignIns()
+	if len(h) > 0 && h[len(h)-1].Account == acct {
+		return
+	}
+	h = append(h, signIn{Since: now.UTC(), Account: acct})
+	if len(h) > 500 {
+		h = h[len(h)-500:]
+	}
+	data, err := json.Marshal(h)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(s.stateDir(), 0700); err == nil {
+		_ = writeFileAtomic(filepath.Join(s.stateDir(), signInsFile), data, 0600)
+	}
+}
+
+// accountAt returns the account signed in at t ("" when the history doesn't
+// reach back that far, or no account was signed in).
+func accountAt(h []signIn, t time.Time) string {
+	acct := ""
+	for _, e := range h {
+		if e.Since.After(t) {
+			break
+		}
+		acct = e.Account
+	}
+	return acct
 }
 
 // localTranscripts lists this Mac's top-level transcripts: npath -> session.
@@ -371,8 +532,135 @@ func claudeSession(rel string) string {
 	case len(parts) == 2 && parts[0] == "todos":
 		sid, _, _ := strings.Cut(parts[1], "-agent-")
 		return strings.TrimSuffix(sid, ".json")
+	case len(parts) >= 2 && parts[0] == "tasks":
+		return parts[1]
 	}
 	return ""
+}
+
+// claudeOff reports a ~/.claude path holding work of accounts that don't
+// sync: a session's own files, a project's memory when every known session
+// of that project belongs to such an account, a plan only such sessions
+// wrote, and a paste only their prompts hold.
+func (s *Syncer) claudeOff(rel string) bool {
+	reg := s.registry()
+	if !reg.anyOff() {
+		return false
+	}
+	parts := strings.Split(rel, "/")
+	switch {
+	case len(parts) >= 3 && parts[0] == "projects" && parts[2] == "memory":
+		return s.allOff(s.projectSessions()[parts[1]])
+	case len(parts) == 2 && parts[0] == "plans":
+		return s.allOff(s.planSessions[parts[1]])
+	case len(parts) == 2 && parts[0] == "paste-cache":
+		return s.allOff(s.historyRefs().pastes[strings.TrimSuffix(parts[1], path.Ext(parts[1]))])
+	}
+	sid := claudeSession(rel)
+	return sid != "" && reg.sessionOff(sid)
+}
+
+// allOff reports a non-empty set of sessions that all belong to accounts
+// that don't sync.
+func (s *Syncer) allOff(sessions map[string]bool) bool {
+	reg := s.registry()
+	for sid := range sessions {
+		if !reg.sessionOff(sid) {
+			return false
+		}
+	}
+	return len(sessions) > 0
+}
+
+// projectSessions maps each ~/.claude/projects folder to its sessions, here
+// and in storage.
+func (s *Syncer) projectSessions() map[string]map[string]bool {
+	if s.projects != nil {
+		return s.projects
+	}
+	out := make(map[string]map[string]bool)
+	addTo := func(np string) {
+		parts := strings.Split(np, "/")
+		if sid, ok := transcriptSessionID(np); ok && len(parts) >= 3 && sid != "memory" {
+			if out[parts[1]] == nil {
+				out[parts[1]] = make(map[string]bool)
+			}
+			out[parts[1]][sid] = true
+		}
+	}
+	for np := range s.localTranscripts() {
+		addTo(np)
+	}
+	for _, obj := range s.listing {
+		if np, ok, _ := s.npathForKey(obj.Key); ok {
+			addTo(np)
+		}
+	}
+	s.projects = out
+	return out
+}
+
+// historyIndex is what ~/.claude/history.jsonl says about pastes: which
+// sessions' prompts hold each pasted text.
+type historyIndex struct {
+	pastes map[string]map[string]bool // content hash -> sessions
+}
+
+var contentHashRe = regexp.MustCompile(`"contentHash"\s*:\s*"([0-9A-Za-z]+)"`)
+
+func (s *Syncer) historyRefs() historyIndex {
+	if s.history != nil {
+		return *s.history
+	}
+	idx := historyIndex{pastes: make(map[string]map[string]bool)}
+	data, err := os.ReadFile(filepath.Join(s.claudeDir, "history.jsonl"))
+	if err == nil {
+		for _, line := range bytes.Split(data, []byte("\n")) {
+			sid := historyLineSession(line)
+			for _, m := range contentHashRe.FindAllSubmatch(line, -1) {
+				h := string(m[1])
+				if idx.pastes[h] == nil {
+					idx.pastes[h] = make(map[string]bool)
+				}
+				// A paste in a line with no session can't be placed: it
+				// counts as a session that syncs.
+				if sid == "" {
+					sid = "-"
+				}
+				idx.pastes[h][sid] = true
+			}
+		}
+	}
+	s.history = &idx
+	return idx
+}
+
+func historyLineSession(line []byte) string {
+	var l struct {
+		SessionID string `json:"sessionId"`
+	}
+	if json.Unmarshal(line, &l) != nil {
+		return ""
+	}
+	return l.SessionID
+}
+
+// withoutOffSessions returns history.jsonl content without the prompts of
+// sessions whose account doesn't sync (they stay in this Mac's copy).
+func (s *Syncer) withoutOffSessions(data []byte) []byte {
+	reg := s.registry()
+	if !reg.anyOff() {
+		return data
+	}
+	lines := bytes.SplitAfter(data, []byte("\n"))
+	out := make([]byte, 0, len(data))
+	for _, line := range lines {
+		if sid := historyLineSession(bytes.TrimSpace(line)); sid != "" && reg.sessionOff(sid) {
+			continue
+		}
+		out = append(out, line...)
+	}
+	return out
 }
 
 // noteFolderAccounts adds the folders this pass's discovery saw sessions in
@@ -438,31 +726,38 @@ func (s *Syncer) decodeAccounts(enc []byte) (*AccountRegistry, error) {
 	return reg.normalize(), nil
 }
 
-// loadAccounts reads the registry from storage, with the ETag it had (""
-// when there is none yet).
-func (s *Syncer) loadAccounts(ctx context.Context) (*AccountRegistry, string, error) {
+// loadAccounts reads the registry from storage, with the ETag it had ("" on
+// backends without one); missing is true when storage has none.
+func (s *Syncer) loadAccounts(ctx context.Context) (reg *AccountRegistry, etag string, missing bool, err error) {
 	cond, ok := s.storage.(storage.Conditional)
-	var (
-		enc  []byte
-		etag string
-		err  error
-	)
+	var enc []byte
 	if ok {
 		enc, etag, err = cond.DownloadWithETag(ctx, AccountsKey)
+		if errors.Is(err, storage.ErrNotFound) {
+			return newAccountRegistry(), "", true, nil
+		}
 	} else {
+		// Backends word "not found" differently: ask the listing.
+		objs, lerr := s.storage.List(ctx, AccountsKey)
+		if lerr != nil {
+			return nil, "", false, fmt.Errorf("failed to read the account registry: %w", lerr)
+		}
+		found := false
+		for _, o := range objs {
+			found = found || o.Key == AccountsKey
+		}
+		if !found {
+			return newAccountRegistry(), "", true, nil
+		}
 		enc, err = s.storage.Download(ctx, AccountsKey)
 	}
-	if errors.Is(err, storage.ErrNotFound) || (err != nil && !ok && strings.Contains(err.Error(), "not found")) {
-		return newAccountRegistry(), "", nil
-	}
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to read the account registry: %w", err)
+		return nil, "", false, fmt.Errorf("failed to read the account registry: %w", err)
 	}
-	reg, err := s.decodeAccounts(enc)
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read the account registry: %w", err)
+	if reg, err = s.decodeAccounts(enc); err != nil {
+		return nil, "", false, fmt.Errorf("failed to read the account registry: %w", err)
 	}
-	return reg, etag, nil
+	return reg, etag, false, nil
 }
 
 // updateAccounts applies change to the registry in storage, with
@@ -471,11 +766,15 @@ func (s *Syncer) loadAccounts(ctx context.Context) (*AccountRegistry, string, er
 // and keeps this Mac's copy current.
 func (s *Syncer) updateAccounts(ctx context.Context, change func(*AccountRegistry) bool) (*AccountRegistry, error) {
 	for attempt := 0; attempt < 5; attempt++ {
-		reg, etag, err := s.loadAccounts(ctx)
+		reg, etag, missing, err := s.loadAccounts(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if !change(reg) {
+		// Gone from storage (a new container, a passphrase change): this
+		// Mac's copy brings back the choices, so an account turned off
+		// doesn't start syncing again.
+		seeded := missing && reg.merge(s.cachedAccounts())
+		if !change(reg) && !seeded {
 			s.saveAccountsCache(reg)
 			return reg, nil
 		}
@@ -488,8 +787,12 @@ func (s *Syncer) updateAccounts(ctx context.Context, change func(*AccountRegistr
 			if errors.Is(err, storage.ErrPreconditionFailed) {
 				continue
 			}
-		} else {
-			err = s.storage.Upload(ctx, AccountsKey, enc)
+		} else if err = s.storage.Upload(ctx, AccountsKey, enc); err == nil {
+			// No compare-and-swap here: read it back, and apply the change
+			// again if another Mac's write landed over this one.
+			if back, _, _, rerr := s.loadAccounts(ctx); rerr == nil && change(back.clone()) {
+				continue
+			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to save the account registry: %w", err)
@@ -543,12 +846,15 @@ func (s *Syncer) registry() *AccountRegistry {
 // written here; objects is the pass's listing), and saves it when that
 // changed (not in a preview).
 func (s *Syncer) prepareAccounts(ctx context.Context, objects []storage.ObjectInfo, dryRun, attribute bool) error {
-	reg, _, err := s.loadAccounts(ctx)
+	s.listing, s.projects, s.history, s.planSessions = objects, nil, nil, make(map[string]map[string]bool)
+	s.noteSignIn(time.Now())
+	reg, _, missing, err := s.loadAccounts(ctx)
 	if err != nil {
 		return err
 	}
 	local := reg.clone()
-	if s.noteLocalAccounts(local, objects, attribute) && !dryRun {
+	seeded := missing && local.merge(s.cachedAccounts())
+	if (s.noteLocalAccounts(local, objects, attribute) || seeded) && !dryRun {
 		// Applied to the registry as stored (not merged), so what a sidebar
 		// record says about its session overrides an earlier guess.
 		if reg, err = s.updateAccounts(ctx, func(r *AccountRegistry) bool { return s.noteLocalAccounts(r, objects, attribute) }); err != nil {

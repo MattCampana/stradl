@@ -35,7 +35,7 @@ func v222Pair(t *testing.T) (a, b *device, store *casStore) {
 	syncAll(2, a, b)
 	dropMarker(store, "code/work/r2")
 	for _, d := range []*device{a, b} {
-		_ = d.s.saveFolderList([]string{"code/work"}, nil)
+		_ = d.s.saveFolderList([]string{"code/work"}, nil, nil)
 		d.s.cfg.ExtraFolders = []string{filepath.Join(d.home, "code", "work")}
 	}
 	return a, b, store
@@ -53,7 +53,7 @@ func syncAsV222(d *device, store *casStore) {
 	defer func() { d.s.cfg.ExtraFolders = saved }()
 	d.sync()
 	dropMarker(store, "code/work/r2")
-	_ = d.s.saveFolderList([]string{"code/work"}, nil)
+	_ = d.s.saveFolderList([]string{"code/work"}, nil, nil)
 }
 
 func TestStaleNeverRollsBackWhatAMacStillOnTheOldVersionMovedAhead(t *testing.T) {
@@ -264,7 +264,7 @@ func TestProbeWatchesReposKeptOnlyByAMarker(t *testing.T) {
 	a.write("code/work/lib/x.go", "v1\n")
 	a.s.cfg.ExtraFolders = []string{filepath.Join(a.home, "code", "work")}
 	// The last sync covered lib because another Mac's marker names it.
-	if err := a.s.saveFolderList([]string{"code/work", "code/work/lib"}, nil); err != nil {
+	if err := a.s.saveFolderList([]string{"code/work", "code/work/lib"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	f1, err := a.s.LocalFingerprint()

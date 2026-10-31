@@ -52,6 +52,8 @@ type cwdEntry struct {
 	// Touched are the folders of files its tools read or edited; "./x"
 	// is relative to the first of Cwds.
 	Touched []string `json:"touched,omitempty"`
+	// Plans are the files in ~/.claude/plans it wrote or read.
+	Plans []string `json:"plans,omitempty"`
 	// Tail checksums the bytes just before Scanned: a merge that inserts
 	// lines earlier in the file shifts them, and the file is read again.
 	Tail uint32 `json:"tail,omitempty"`

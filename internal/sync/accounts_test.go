@@ -3,11 +3,14 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tawanorg/claude-sync/internal/storage"
 )
 
 // Claude accounts: the Circle syncs the accounts the user chose, and keeps
@@ -29,6 +32,7 @@ func (d *device) signIn(acct, org, email string) {
 	if err := os.WriteFile(d.s.cfg.ClaudeJSONOverride, data, 0600); err != nil {
 		d.t.Fatal(err)
 	}
+	d.s.noteSignIn(time.Now()) // as the agent's local check does within seconds
 }
 
 // writeAccountSession writes a desktop session of acct: its sidebar record
@@ -160,7 +164,7 @@ func TestTerminalSessionsBelongToTheSignedInAccount(t *testing.T) {
 	a.signIn(judgeAcct, judgeOrg, "mcampana@judge.com")
 	a.writeSession("p", "mine", cwdLine("u1", filepath.Join(a.home, "code", "x")))
 	a.sync()
-	reg, _, err := a.s.loadAccounts(context.Background())
+	reg, _, _, err := a.s.loadAccounts(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +195,7 @@ func TestAccountChoicesFromTwoMacsKeepTheLatest(t *testing.T) {
 	if err := b.s.SetAccountLabel(ctx, bpAcct, "Breakpoint", now); err != nil {
 		t.Fatal(err)
 	}
-	reg, _, err := a.s.loadAccounts(ctx)
+	reg, _, _, err := a.s.loadAccounts(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +265,7 @@ func TestASidebarRecordOverridesAGuessedAccount(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.sync()
-	reg, _, err := a.s.loadAccounts(context.Background())
+	reg, _, _, err := a.s.loadAccounts(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,5 +287,346 @@ func TestAnAccountChoiceOnAnotherMacMovesTheRemoteFingerprint(t *testing.T) {
 	b.setSync(judgeAcct, false)
 	if f2, _ := a.s.RemoteFingerprint(ctx); f2 == f1 {
 		t.Fatal("an account choice on another Mac didn't move the remote fingerprint")
+	}
+}
+
+func TestTheSidebarLayoutOfAnAccountThatDoesntSyncStaysHere(t *testing.T) {
+	store := newCASStore()
+	a, b := newSidebarPair(t, store)
+	stubDesktopApp(t, false)
+	a.setSync(testAcct, false)
+	a.syncSidebar(false)
+	if st, _, exists, err := a.s.fetchSidebar(context.Background()); err != nil {
+		t.Fatal(err)
+	} else if exists && len(st.Scopes) != 0 {
+		t.Fatalf("the layout of an account that doesn't sync uploaded: %v", st.Scopes)
+	}
+	b.syncSidebar(false)
+	gs := groupScopeOf(sidebarFile(b).load()["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any))
+	if len(gs["assignments"].(map[string]any)) != 0 {
+		t.Fatal("bob got alice's group membership for an account that doesn't sync")
+	}
+	gsA := groupScopeOf(sidebarFile(a).load()["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any))
+	if len(gsA["assignments"].(map[string]any)) == 0 {
+		t.Fatal("alice's own layout should stay as it is")
+	}
+}
+
+func TestPromptHistoryKeepsAnOffAccountsPromptsHere(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	a.writeAccountSession(judgeAcct, judgeOrg, "j1", filepath.Join(a.home, "code", "x"))
+	a.writeAccountSession(bpAcct, bpOrg, "b1", filepath.Join(a.home, "code", "y"))
+	a.sync()
+	a.setSync(judgeAcct, false)
+	hist := `{"display":"judge secret","pastedContents":{"1":{"id":1,"type":"text","contentHash":"abc123"}},"sessionId":"cli-j1"}` + "\n" +
+		`{"display":"my own prompt","pastedContents":{},"sessionId":"cli-b1"}` + "\n"
+	if err := os.WriteFile(filepath.Join(a.claude, "history.jsonl"), []byte(hist), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(a.claude, "paste-cache"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.claude, "paste-cache", "abc123.txt"), []byte("pasted judge text"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.sync()
+	b.sync()
+	got, _ := os.ReadFile(filepath.Join(b.claude, "history.jsonl"))
+	if strings.Contains(string(got), "judge secret") || !strings.Contains(string(got), "my own prompt") {
+		t.Fatalf("bob's history:\n%s", got)
+	}
+	if len(keysWithPrefix(store, "paste-cache/")) != 0 {
+		t.Fatal("a paste only an off account's prompt holds synced")
+	}
+	mine, _ := os.ReadFile(filepath.Join(a.claude, "history.jsonl"))
+	if !strings.Contains(string(mine), "judge secret") {
+		t.Fatal("alice's own history should keep every prompt")
+	}
+}
+
+func TestAnOffAccountsTasksMemoryAndPlansStayHere(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	a.setSync(judgeAcct, false)
+	a.writeAccountSession(judgeAcct, judgeOrg, "j1", filepath.Join(a.home, "code", "x"))
+	plan := filepath.Join(a.home, ".claude", "plans", "brave-otter.md")
+	a.appendSession("p", "cli-j1", `{"uuid":"u9","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"`+plan+`"}}]}}`+"\n")
+	a.write(".claude/plans/brave-otter.md", "the plan\n")
+	a.write(".claude/tasks/cli-j1/1.json", "{}\n")
+	if err := os.MkdirAll(filepath.Join(a.projectDir("p"), "memory"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.projectDir("p"), "memory", "notes.md"), []byte("judge notes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.sync()
+	for _, prefix := range []string{"plans/", "tasks/"} {
+		if keys := keysWithPrefix(store, prefix); len(keys) != 0 {
+			t.Fatalf("%v synced", keys)
+		}
+	}
+	for _, k := range keysWithPrefix(store, "projects/") {
+		if strings.Contains(k, "/memory/") {
+			t.Fatalf("the project memory of an account that doesn't sync synced: %s", k)
+		}
+	}
+}
+
+func TestATerminalSessionWrittenBeforeASignInSwitchKeepsItsAccount(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	a.setSync(judgeAcct, false)
+	a.signIn(judgeAcct, judgeOrg, "mcampana@judge.com")
+	a.writeSession("cli", "judge-work", cwdLine("u1", filepath.Join(a.home, "code", "jw")))
+	time.Sleep(20 * time.Millisecond)
+	a.signIn(bpAcct, bpOrg, "matt@breakpointdata.com") // /login before the next sync
+	a.sync()
+	if hasSession(store, "judge-work") {
+		t.Fatal("work written while signed in to an account that doesn't sync uploaded after switching")
+	}
+}
+
+func TestADesktopSessionWaitsForItsRecord(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	a.setSync(judgeAcct, false)
+	a.signIn(bpAcct, bpOrg, "matt@breakpointdata.com") // the terminal is on another account
+	a.writeSession("p", "cli-d1", `{"type":"user","entrypoint":"claude-desktop","uuid":"u1","cwd":"`+filepath.Join(a.home, "code", "x")+`"}`+"\n")
+	a.sync() // the app hasn't written the record yet
+	if hasSession(store, "cli-d1") {
+		t.Fatal("a desktop session uploaded before its record said whose it is")
+	}
+	p := filepath.Join(a.desktop, judgeAcct, judgeOrg, "local_d1.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(desktopRecord("local_d1", "cli-d1", filepath.Join(a.home, "code", "x"), time.Now().UnixMilli(), "d1")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.sync()
+	if hasSession(store, "cli-d1") {
+		t.Fatal("the Judge desktop session uploaded")
+	}
+}
+
+func TestAccountChoicesSurviveANewContainer(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	a.setSync(judgeAcct, false)
+	a.sync()
+	a.s.storage = newCASStore() // a passphrase change emptied it, or a new container
+	a.writeAccountSession(judgeAcct, judgeOrg, "j1", filepath.Join(a.home, "code", "x"))
+	a.sync()
+	if !a.s.registry().off(judgeAcct) {
+		t.Fatal("the choice to keep Judge on each Mac was lost")
+	}
+}
+
+// plainStore is a backend without compare-and-swap (S3, R2, GCS, WebDAV)
+// whose "missing" error doesn't say "not found".
+type plainStore struct{ inner *casStore }
+
+func (p plainStore) Upload(ctx context.Context, key string, data []byte) error {
+	return p.inner.Upload(ctx, key, data)
+}
+func (p plainStore) Download(ctx context.Context, key string) ([]byte, error) {
+	data, err := p.inner.Download(ctx, key)
+	if err != nil {
+		return nil, errors.New("api error NoSuchKey: The specified key does not exist.")
+	}
+	return data, nil
+}
+func (p plainStore) Delete(ctx context.Context, key string) error { return p.inner.Delete(ctx, key) }
+func (p plainStore) DeleteBatch(ctx context.Context, keys []string) error {
+	return p.inner.DeleteBatch(ctx, keys)
+}
+func (p plainStore) List(ctx context.Context, prefix string) ([]storage.ObjectInfo, error) {
+	return p.inner.List(ctx, prefix)
+}
+func (p plainStore) Head(ctx context.Context, key string) (*storage.ObjectInfo, error) {
+	return p.inner.Head(ctx, key)
+}
+func (p plainStore) BucketExists(ctx context.Context) (bool, error) { return true, nil }
+
+func TestBackendsWithoutCompareAndSwapSync(t *testing.T) {
+	root := t.TempDir()
+	inner := newCASStore()
+	a := newEverythingDevice(t, root, "alice", inner)
+	a.s.storage = plainStore{inner}
+	a.writeAccountSession(bpAcct, bpOrg, "b1", filepath.Join(a.home, "code", "y"))
+	a.sync() // fails if a missing registry reads as an error
+	a.setSync(judgeAcct, false)
+	if !a.s.cachedAccounts().off(judgeAcct) {
+		t.Fatal("the choice wasn't saved")
+	}
+}
+
+func TestAnOffAccountsRepoInsideASyncedFolderStaysOut(t *testing.T) {
+	needGit(t)
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	app := filepath.Join(a.home, "code", "app")
+	if err := os.MkdirAll(app, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, app, "init", "-q")
+	a.write("code/app/a.go", "package app\n")
+	a.writeAccountSession(judgeAcct, judgeOrg, "j1", app)
+	for _, d := range []*device{a, b} {
+		d.s.cfg.ExtraFolders = []string{filepath.Join(d.home, "code")}
+	}
+	a.write("code/notes.md", "outer\n")
+	syncAll(2, a, b)
+	if b.read("code/app/a.go") != "package app\n" {
+		t.Fatal("setup: bob should have the repo")
+	}
+	a.setSync(judgeAcct, false)
+	// bob cleans up his clone of the work repo, and a new Mac joins.
+	if err := os.RemoveAll(filepath.Join(b.home, "code", "app")); err != nil {
+		t.Fatal(err)
+	}
+	c := newEverythingDevice(t, root, "carol", store)
+	c.s.cfg.ExtraFolders = []string{filepath.Join(c.home, "code")}
+	rb := b.sync()
+	c.sync()
+	c.sync()
+	if len(rb.Deleted) != 0 || !keysHave(store, FoldersPrefix+"code/app/a.go") {
+		t.Fatalf("bob's cleanup deleted the off account's repo from storage: %v", rb.Deleted)
+	}
+	if c.exists("code/app/a.go") {
+		t.Fatal("a new Mac downloaded the off account's repo as part of ~/code")
+	}
+	if c.read("code/notes.md") != "outer\n" {
+		t.Fatal("carol should get the outer folder")
+	}
+}
+
+func TestAWorktreeSessionsMainRepoBelongsToItsAccount(t *testing.T) {
+	needGit(t)
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	repo := filepath.Join(a.home, "code", "jr")
+	if err := os.MkdirAll(repo, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "init", "-q", "-b", "main")
+	a.write("code/jr/a.txt", "a\n")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-q", "-m", "a")
+	wt := filepath.Join(repo, ".claude", "worktrees", "w1")
+	git(t, repo, "worktree", "add", "-q", "-b", "claude/w1", wt)
+	a.signIn(judgeAcct, judgeOrg, "mcampana@judge.com")
+	a.writeSession("cli", "jw", cwdLine("u1", wt))
+	a.sync()
+	a.setSync(judgeAcct, false)
+	a.write("code/jr/b.txt", "new\n")
+	a.sync()
+	if keysHave(store, FoldersPrefix+"code/jr/b.txt") {
+		t.Fatal("the main repo of an off account's worktree session kept syncing")
+	}
+}
+
+func TestTurningAnAccountOffAndOnKeepsDeletesWorking(t *testing.T) {
+	needGit(t)
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	app := filepath.Join(a.home, "code", "app")
+	if err := os.MkdirAll(app, 0755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, app, "init", "-q")
+	a.write("code/app/a.go", "a\n")
+	a.write("code/app/b.go", "b\n")
+	a.writeAccountSession(judgeAcct, judgeOrg, "j1", app)
+	for _, d := range []*device{a, b} {
+		d.s.cfg.ExtraFolders = []string{filepath.Join(d.home, "code")}
+	}
+	syncAll(2, a, b)
+	a.setSync(judgeAcct, false)
+	syncAll(1, a, b)
+	a.setSync(judgeAcct, true)
+	a.remove("code/app/b.go")
+	syncAll(2, a, b)
+	if b.exists("code/app/b.go") || keysHave(store, FoldersPrefix+"code/app/b.go") {
+		t.Fatal("a delete after turning the account back on was undone")
+	}
+}
+
+func TestTheProbeFollowsAnAccountChoice(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	b.writeAccountSession(judgeAcct, judgeOrg, "j1", filepath.Join(b.home, "code", "x"))
+	syncAll(1, b, a)
+	ctx := context.Background()
+	a.setSync(judgeAcct, false)
+	a.sync()
+	// The agent's probe lives across passes, built while Judge is off.
+	probe := newScopeSyncer(a.s.cfg)
+	probe.storage = store
+	if _, err := probe.RemoteFingerprint(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a.setSync(judgeAcct, true)
+	a.sync()
+	f1, _ := probe.RemoteFingerprint(ctx)
+	b.appendSession("p", "cli-j1", cwdLine("u2", filepath.Join(b.home, "code", "x")))
+	b.sync()
+	if f2, _ := probe.RemoteFingerprint(ctx); f2 == f1 {
+		t.Fatal("the probe kept the old choice: a change to a Judge session didn't move it")
+	}
+}
+
+func TestAccountsKnownEvenWithTheSidebarNotSyncing(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	off := false
+	a.s.cfg.DesktopSync = &off
+	a.setSync(judgeAcct, false)
+	a.signIn(bpAcct, bpOrg, "matt@breakpointdata.com")
+	p := filepath.Join(a.desktop, judgeAcct, judgeOrg, "local_d1.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(desktopRecord("local_d1", "cli-d1", filepath.Join(a.home, "code", "x"), time.Now().UnixMilli(), "d1")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.writeSession("p", "cli-d1", `{"type":"user","entrypoint":"claude-desktop","uuid":"u1","cwd":"`+filepath.Join(a.home, "code", "x")+`"}`+"\n")
+	a.sync()
+	if hasSession(store, "cli-d1") {
+		t.Fatal("a Judge desktop session uploaded because the sidebar doesn't sync")
+	}
+}
+
+func TestAnOldSessionResumedUnderAnOffAccountStaysHere(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	// Synced before Stradl knew accounts: no account on record.
+	a.writeSession("cli", "old", cwdLine("u1", filepath.Join(a.home, "code", "x")))
+	syncAll(1, a, b)
+	a.setSync(judgeAcct, false)
+	a.signIn(judgeAcct, judgeOrg, "mcampana@judge.com")
+	time.Sleep(10 * time.Millisecond)
+	a.appendSession("cli", "old", cwdLine("u2", filepath.Join(a.home, "code", "x")))
+	a.sync()
+	b.sync()
+	if got := b.readSession("cli", "old"); strings.Contains(got, "u2") {
+		t.Fatal("work resumed under an account that doesn't sync reached bob")
 	}
 }

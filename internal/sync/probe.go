@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/tawanorg/claude-sync/internal/config"
 	"github.com/tawanorg/claude-sync/internal/storage"
@@ -34,6 +35,8 @@ func LocalFingerprint(cfg *config.Config) (string, error) {
 // plus the list the last sync recorded (which includes folders learned from
 // other Macs).
 func (s *Syncer) LocalFingerprint() (string, error) {
+	s.noteSignIn(time.Now()) // the sign-in history terminal sessions are judged by
+	s.accounts = nil
 	var lines []string
 	roots := s.syncRoots(nil, false)
 	sort.SliceStable(roots, func(i, j int) bool { return roots[i].prefix < roots[j].prefix })
@@ -79,6 +82,7 @@ func (s *Syncer) RemoteFingerprint(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to list remote objects: %w", err)
 	}
+	s.accounts = nil // this Mac's copy of the registry, as the last sync left it
 	roots := s.syncRoots(objects, false)
 	lines := make([]string, 0, len(objects))
 	for _, obj := range objects {

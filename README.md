@@ -100,7 +100,7 @@ Look for the Stradl mark in the menu bar:
 
 **Deleting a file in a project folder deletes it on every Mac,** the way it would in one folder. Nothing is lost: on the other Macs it moves to `~/.stradl/trash` for 30 days, and storage keeps old versions for 30 days too. If one sync would delete more than half of a folder at once, Stradl stops and asks you to confirm with `stradl sync --allow-mass-delete`.
 
-**You choose which Claude accounts sync.** If your Macs sign in to more than one Claude account (a work one and your own, say), Stradl lists each in **Accounts** and asks which ones to sync, for your whole Circle. An account you keep on each Mac stops sending its sessions, and the project folders only its sessions use, to your storage; nothing already there is deleted. Until you choose, an account syncs as before. Each Mac's own sign-ins, and your organization's managed settings and policy files, never sync.
+**You choose which Claude accounts sync.** If your Macs sign in to more than one Claude account (a work one and your own, say), Stradl lists each in **Accounts** and asks which ones to sync, for your whole Circle. An account you keep on each Mac stops sending its sessions (with their prompts, plans, tasks and sidebar layout), and the project folders only its sessions use, to your storage; nothing already there is deleted. Until you choose, an account syncs as before. Each Mac's own sign-ins, and your organization's managed settings and policy files, never sync.
 
 **Sessions you use from your phone show once.** A session you control from the Claude app on your phone (Remote Control) already appears on every Mac through your Claude account, so Stradl doesn't add a second copy. It syncs normally once Remote Control is off.
 

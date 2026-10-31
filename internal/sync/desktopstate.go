@@ -14,9 +14,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/tawanorg/claude-sync/internal/config"
@@ -308,8 +310,18 @@ func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (Sideb
 		if err != nil {
 			return res, err
 		}
+		// The layout of accounts that don't sync stays out: only the rest
+		// merges and uploads; storage keeps its copy of theirs as it was,
+		// and this Mac keeps its own.
+		fullLocal := local
+		var localOff, remoteOff SidebarState
+		if off := s.sidebarOff(); off != nil {
+			local, localOff = splitSidebar(local, off)
+			remote, remoteOff = splitSidebar(remote, off)
+			base.State, _ = splitSidebar(base.State, off)
+		}
 		mergeLocal := assumeUnchanged(local, base.State)
-		if base.Replaced != "" && sidebarHash(local) == base.Replaced && !sidebarEqual(local, base.State) {
+		if base.Replaced != "" && sidebarHash(fullLocal) == base.Replaced && !sidebarEqual(local, base.State) {
 			// The file is back to exactly the layout Stradl last replaced: the
 			// app wrote out what it had in memory before loading the new one.
 			// That is not an edit, and merging it as one would undo the other
@@ -326,7 +338,7 @@ func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (Sideb
 			if !exists {
 				etag = ""
 			}
-			if _, err := s.putSidebar(ctx, merged, etag, exists); errors.Is(err, storage.ErrPreconditionFailed) {
+			if _, err := s.putSidebar(ctx, joinSidebar(merged, remoteOff), etag, exists); errors.Is(err, storage.ErrPreconditionFailed) {
 				continue // another Mac wrote it meanwhile: merge against theirs
 			} else if err != nil {
 				return res, fmt.Errorf("failed to upload sidebar layout: %w", err)
@@ -349,19 +361,120 @@ func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (Sideb
 			res.PendingRestart = true
 			return res, nil
 		}
-		written, err := writeSidebar(path, merged)
+		written, err := writeSidebar(path, joinSidebar(merged, localOff))
 		if err != nil {
 			return res, err
 		}
 		replaced := ""
 		if written {
 			res.AppliedLocally = true
-			replaced = sidebarHash(local)
+			replaced = sidebarHash(fullLocal)
 		}
 		_ = os.Remove(pendingPath)
 		return res, saveSidebarSnapshot(basePath, storageID, merged, replaced)
 	}
 	return res, fmt.Errorf("sidebar layout: gave up after %d attempts: other Macs keep changing it; will retry next sync", maxRaceRetries)
+}
+
+// sidebarOff returns, while some account doesn't sync, which parts of the
+// sidebar layout belong to such an account; nil otherwise.
+func (s *Syncer) sidebarOff() *sidebarFilter {
+	reg := s.registry()
+	if !reg.anyOff() {
+		return nil
+	}
+	f := &sidebarFilter{reg: reg, records: make(map[string]string)}
+	for _, rec := range s.localRecords() {
+		f.records[rec.Record] = rec.Account
+	}
+	return f
+}
+
+type sidebarFilter struct {
+	reg     *AccountRegistry
+	records map[string]string // "local_<id>" -> account
+}
+
+var sidebarSessionRe = regexp.MustCompile(`local_[A-Za-z0-9_-]+`)
+
+func (f *sidebarFilter) scopeOff(scope string) bool {
+	acct, _, _ := strings.Cut(scope, "/")
+	return f.reg.off(strings.ToLower(acct))
+}
+
+// entryOff reports a starred or pinned entry naming a session of an
+// account that doesn't sync.
+func (f *sidebarFilter) entryOff(raw json.RawMessage) bool {
+	for _, id := range sidebarSessionRe.FindAll(raw, -1) {
+		if f.reg.off(f.records[string(id)]) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitSidebar separates the parts of st that belong to accounts that don't
+// sync (off) from the rest (on).
+func splitSidebar(st SidebarState, f *sidebarFilter) (on, off SidebarState) {
+	for k, v := range st.Scopes {
+		dst := &on
+		if f.scopeOff(k) {
+			dst = &off
+		}
+		if dst.Scopes == nil {
+			dst.Scopes = map[string]*GroupScope{}
+		}
+		dst.Scopes[k] = v
+	}
+	for k, v := range st.Sections {
+		dst := &on
+		if f.scopeOff(k) {
+			dst = &off
+		}
+		if dst.Sections == nil {
+			dst.Sections = map[string]*SectionScope{}
+		}
+		dst.Sections[k] = v
+	}
+	split := func(list []json.RawMessage, on, off *[]json.RawMessage) {
+		for _, e := range list {
+			if f.entryOff(e) {
+				*off = append(*off, e)
+			} else {
+				*on = append(*on, e)
+			}
+		}
+	}
+	split(st.StarredLocalCodeSessions, &on.StarredLocalCodeSessions, &off.StarredLocalCodeSessions)
+	on.StarredSessionGroups = st.StarredSessionGroups
+	split(st.PinnedOrder, &on.PinnedOrder, &off.PinnedOrder)
+	split(st.HomeProjectsPinnedOrder, &on.HomeProjectsPinnedOrder, &off.HomeProjectsPinnedOrder)
+	return on, off
+}
+
+// joinSidebar puts the parts splitSidebar separated back together.
+func joinSidebar(on, off SidebarState) SidebarState {
+	out := on
+	for k, v := range off.Scopes {
+		if out.Scopes == nil {
+			out.Scopes = map[string]*GroupScope{}
+		}
+		if _, ok := out.Scopes[k]; !ok {
+			out.Scopes[k] = v
+		}
+	}
+	for k, v := range off.Sections {
+		if out.Sections == nil {
+			out.Sections = map[string]*SectionScope{}
+		}
+		if _, ok := out.Sections[k]; !ok {
+			out.Sections[k] = v
+		}
+	}
+	out.StarredLocalCodeSessions = append(append([]json.RawMessage(nil), on.StarredLocalCodeSessions...), off.StarredLocalCodeSessions...)
+	out.PinnedOrder = append(append([]json.RawMessage(nil), on.PinnedOrder...), off.PinnedOrder...)
+	out.HomeProjectsPinnedOrder = append(append([]json.RawMessage(nil), on.HomeProjectsPinnedOrder...), off.HomeProjectsPinnedOrder...)
+	return out
 }
 
 // ApplyPendingSidebar writes a layout SyncSidebar held back while the desktop

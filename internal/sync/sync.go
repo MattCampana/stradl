@@ -76,6 +76,17 @@ type Syncer struct {
 	// in each folder.
 	accounts       *AccountRegistry
 	folderAccounts map[string]map[string]bool
+	// For the pass's account rules (see claudeOff): its listing, the
+	// sessions of each ~/.claude/projects folder, the history index, the
+	// sessions that wrote each plan, and the sessions sitting the pass out.
+	listing      []storage.ObjectInfo
+	projects     map[string]map[string]bool
+	history      *historyIndex
+	planSessions map[string]map[string]bool
+	held         map[string]bool
+	// offFolders are folders the last sync covered that sit out only
+	// because their accounts don't sync; they stay on the folder list.
+	offFolders []string
 
 	// reindex collects the .git folders whose HEAD or refs this pass changed
 	// (see reindexRepos).

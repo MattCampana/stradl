@@ -168,8 +168,8 @@ func (s *Syncer) roots() []*syncRoot {
 			if strings.Contains(rel, ".conflict.") || isDeviceLocalFile(rel) || claudeDenied(rel) || s.isExcluded(rel) {
 				return false
 			}
-			if sid := claudeSession(rel); sid != "" && s.registry().sessionOff(sid) {
-				return false // a session of an account that doesn't sync
+			if s.claudeOff(rel) {
+				return false // work of an account that doesn't sync
 			}
 			return !everything || !s.cfg.IsBuildArtifact(rel)
 		},
@@ -468,6 +468,8 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	if err := s.prepareAccounts(ctx, objects, dryRun, true); err != nil {
 		return nil, err
 	}
+	stored := s.storedSessions(objects)
+	s.held = s.heldSessions(stored)
 	roots := s.syncRoots(objects, true)
 	if !dryRun {
 		s.noteFolderAccounts(ctx)
@@ -620,6 +622,16 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	for p := range known {
 		if _, _, in := active(p); in {
 			paths[p] = true
+		}
+	}
+	// Sessions without an account yet while some account doesn't sync sit
+	// the pass out (see heldSessions), also one that appeared during it.
+	for sid := range s.heldSessions(stored) {
+		s.held[sid] = true
+	}
+	for p := range paths {
+		if sid := claudeSession(p); sid != "" && s.held[sid] {
+			delete(paths, p)
 		}
 	}
 
@@ -982,7 +994,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 			}
 			sort.Strings(nested[rel])
 		}
-		if err := s.saveFolderList(folders, nested); err != nil {
+		if err := s.saveFolderList(folders, nested, s.offFolders); err != nil {
 			s.log("Warning: failed to record project folders: %v", err)
 		}
 	}
@@ -1259,6 +1271,9 @@ func (s *Syncer) put(ctx context.Context, npath string, plain []byte, ifMatch st
 		return s.putStream(ctx, npath, bytes.NewReader(plain), ifMatch)
 	}
 	data := plain
+	if npath == "history.jsonl" {
+		data = s.withoutOffSessions(data) // prompts of accounts that don't sync stay here
+	}
 	if strings.HasPrefix(npath, DesktopPrefix) {
 		data = prepareDesktopUpload(data)
 		data = s.paths.NormalizeContent("record.json", data)
