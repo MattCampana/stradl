@@ -142,8 +142,8 @@ struct AccountRow: View {
             .disabled(busy)
             .popover(isPresented: $naming) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Name this account").font(.headline)
-                    TextField(account.email ?? "you@company.com", text: $draft)
+                    Text("Nickname").font(.headline)
+                    TextField("Work, Personal… (empty: its email)", text: $draft)
                         .frame(width: 220)
                         .onSubmit { save() }
                     HStack {
@@ -165,7 +165,7 @@ struct AccountRow: View {
     }
 
     private var details: String {
-        var parts: [String] = []
+        var parts: [String] = ["ID \(account.shortID)"]
         if let e = account.email, e != account.name { parts.append(e) }
         let orgs = (account.orgs ?? []).compactMap { $0.name }.filter { !$0.isEmpty }
         if !orgs.isEmpty { parts.append(orgs.joined(separator: ", ")) }
@@ -199,14 +199,20 @@ struct NewAccountSheet: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Email").font(.headline)
-                TextField("you@company.com", text: $name)
-                    .textFieldStyle(.roundedBorder)
-                Text("The email you sign in to Claude with, so every Mac shows which account this is (or any name you like).")
+            VStack(alignment: .leading, spacing: 4) {
+                Text(account.email ?? "Account \(account.shortID)").font(.headline)
+                Text(account.email == nil
+                     ? "ID \(account.id). Its email shows here once Stradl learns it."
+                     : "ID \(account.id)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Nickname (optional)").font(.headline)
+                TextField("Work, Personal, a client…", text: $name)
+                    .textFieldStyle(.roundedBorder)
             }
             VStack(alignment: .leading, spacing: 6) {
                 Text("Its sessions").font(.headline)
@@ -224,14 +230,14 @@ struct NewAccountSheet: View {
                 Spacer()
                 Button("Save") { model.setUpAccount(account, name: name, syncs: syncs) }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || model.busy.contains("account:\(account.id)"))
+                    .disabled(model.busy.contains("account:\(account.id)"))
             }
         }
         .padding(22)
         .frame(width: 420)
         .interactiveDismissDisabled(true)
         .onAppear {
-            name = account.label ?? account.email ?? ""
+            name = account.label ?? ""
         }
     }
 }

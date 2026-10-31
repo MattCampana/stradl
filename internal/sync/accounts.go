@@ -282,6 +282,55 @@ func (s *Syncer) desktopAccount() string {
 	return strings.ToLower(c.LastKnownAccountUUID)
 }
 
+// learnEmails fills in the email of accounts the registry has none for, from
+// what the Claude app keeps on this Mac: its agent-mode sessions each carry a
+// Claude Code config naming the account they ran under. An account is its
+// ID; the email is only what it is shown as. It reports whether any was
+// learned.
+func (s *Syncer) learnEmails(reg *AccountRegistry) bool {
+	dir := s.cfg.DesktopDirOverride
+	if dir == "" {
+		dir = config.DesktopSessionsDir()
+	}
+	if dir == "" {
+		return false
+	}
+	base := filepath.Join(filepath.Dir(dir), "local-agent-mode-sessions")
+	accts, err := os.ReadDir(base)
+	if err != nil {
+		return false
+	}
+	changed := false
+	for _, d := range accts {
+		id := strings.ToLower(d.Name())
+		if !d.IsDir() || !accountIDRe.MatchString(id) || (reg.Accounts[id] != nil && reg.Accounts[id].Email != "") {
+			continue
+		}
+		var configs []string
+		for _, pattern := range []string{"*/*/.claude/.claude.json", "*/*/*/.claude/.claude.json"} {
+			m, _ := filepath.Glob(filepath.Join(base, d.Name(), pattern))
+			configs = append(configs, m...)
+		}
+		for _, p := range configs {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			var f struct {
+				OAuthAccount struct {
+					AccountUUID  string `json:"accountUuid"`
+					EmailAddress string `json:"emailAddress"`
+				} `json:"oauthAccount"`
+			}
+			if json.Unmarshal(data, &f) == nil && strings.EqualFold(f.OAuthAccount.AccountUUID, id) && f.OAuthAccount.EmailAddress != "" {
+				reg.account(id).Email, changed = f.OAuthAccount.EmailAddress, true
+				break
+			}
+		}
+	}
+	return changed
+}
+
 // localRecords lists this Mac's sidebar records by account: the account and
 // organization each lives under and the transcript (session) it shows.
 type localRecord struct {
@@ -340,6 +389,9 @@ func (s *Syncer) noteLocalAccounts(reg *AccountRegistry, objects []storage.Objec
 			reg.account(id)
 			changed = true
 		}
+	}
+	if s.learnEmails(reg) {
+		changed = true
 	}
 	active := s.activeAccount()
 	if active.ID != "" {

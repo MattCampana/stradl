@@ -826,3 +826,21 @@ func TestTheClaudeAppsAccountShowsAsSignedInFromTheStart(t *testing.T) {
 		t.Fatalf("list[1] = %+v, want Judge as the terminal's account", list[1])
 	}
 }
+
+func TestAnAccountsEmailIsLearnedFromTheClaudeApp(t *testing.T) {
+	root := t.TempDir()
+	a := newEverythingDevice(t, root, "alice", newCASStore())
+	cfg := filepath.Join(filepath.Dir(a.desktop), "local-agent-mode-sessions", bpAcct, bpOrg, "local_x", ".claude", ".claude.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte(`{"oauthAccount":{"accountUuid":"`+bpAcct+`","emailAddress":"matt@breakpointdata.com"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.writeAccountSession(bpAcct, bpOrg, "b1", filepath.Join(a.home, "code", "y"))
+	a.sync()
+	list := ListAccounts(a.s.cfg)
+	if len(list) != 1 || list[0].Email != "matt@breakpointdata.com" || list[0].Name != "matt@breakpointdata.com" {
+		t.Fatalf("list = %+v, want the account shown by the email the app knows", list)
+	}
+}

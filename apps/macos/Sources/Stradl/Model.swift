@@ -179,8 +179,10 @@ struct ClaudeAccount: Decodable, Identifiable, Hashable {
 
     var syncs: Bool { sync != "off" }
     var undecided: Bool { sync == "ask" }
-    /// New to the Circle: nobody has named it or chosen for it yet.
-    var isNew: Bool { undecided && (label ?? "").isEmpty }
+    /// New to the Circle: nobody has chosen whether it syncs yet.
+    var isNew: Bool { undecided }
+    /// The account's ID as shown: its first characters.
+    var shortID: String { String(id.prefix(8)) }
 }
 
 /// A session waiting because its account isn't known (`stradl accounts held`).

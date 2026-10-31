@@ -225,8 +225,11 @@ final class AppModel: ObservableObject {
     /// Names an account new to the Circle and records whether it syncs.
     func setUpAccount(_ account: ClaudeAccount, name: String, syncs: Bool) {
         let label = name.trimmingCharacters(in: .whitespaces)
-        perform("account:\(account.id)", success: syncs ? "\(label) syncs to all your Macs" : "\(label) stays on each Mac") {
-            try await StradlCLI.run(["accounts", "label", account.id, label], timeout: 90)
+        let shown = label.isEmpty ? account.name : label
+        perform("account:\(account.id)", success: syncs ? "\(shown) syncs to all your Macs" : "\(shown) stays on each Mac") {
+            if !label.isEmpty {
+                try await StradlCLI.run(["accounts", "label", account.id, label], timeout: 90)
+            }
             try await StradlCLI.run(["accounts", "sync", account.id, syncs ? "on" : "off"], timeout: 90)
             try? await AgentAPI.syncNow()
         }
