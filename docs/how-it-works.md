@@ -143,6 +143,18 @@ An account you choose not to sync keeps on the Mac they were made on: its sideba
 
 Never synced, whatever you choose: each Mac's sign-ins (credentials stay on each Mac) and the managed settings and policy limits of the organization a Mac is signed in to (`remote-settings.json`, `policy-limits.json`), which belong to that sign-in.
 
+### Claude profiles
+
+The Claude desktop app keeps its sign-in, windows and preferences in one data folder (`~/Library/Application Support/Claude`) and is signed in to one account at a time. Started with `--user-data-dir`, it uses another folder, as a separate instance with a sign-in of its own. Stradl gives each account such a folder, a profile:
+
+- The app's own folder is the main profile. It stays exactly as it was, the profile of the account it's signed in to.
+- Every other account the Circle knows gets `~/Library/Application Support/Stradl/Profiles/<account ID>`, made by each sync (the first one after updating converts the accounts a Mac already used) or when you open it. It starts with a copy of the main profile's preferences (MCP servers, sidebar layout) and asks you to sign in once, the first time it opens; after that it stays signed in. **Sign In to Another Account…** (`stradl profile new`) makes one for an account Stradl hasn't seen yet.
+- `claude-code-sessions` in every profile is a link to the main profile's, so all profiles share one set of sidebar records (the app shows the signed-in account's) and each record syncs once. If the app ever replaces the link with a folder of its own, Stradl adds that folder's records to the main one (the newer copy of a record wins), renames the folder aside and puts the link back.
+- Each profile's sidebar layout merges with your other Macs' on its own, like another Mac would, and changes for an open profile wait until it quits.
+- **Open Claude As**, **Open** in Accounts, the **Claude (account)** apps and `stradl open <account>` open that account's profile, or bring its window forward when it's open. **Restart Claude** reopens every open profile.
+
+A sign-in can finish through the browser (the `claude://` link). If one doesn't reach a new profile while another is open, `stradl open <account> --alone` quits the other profiles first.
+
 ## The desktop sidebar
 
 The Claude desktop app keeps one small JSON record per Code-tab session, which points at a transcript (`cliSessionId`) and a working folder (`cwd`). It reads these records when it launches. Stradl syncs them like any other file, with paths and folders remapped for each Mac, so the same sessions appear in every Mac's sidebar.
@@ -190,5 +202,6 @@ Without a running agent, `stradl dashboard` serves the dashboard itself until yo
 ├── trash/          files other Macs deleted, by day, kept 30 days
 ├── conflicts/      losing copies of conflicts inside git repositories and plugins
 ├── folders.json    the project folders the last sync covered
+├── profiles.json   the Claude profiles Stradl made, and the account each is for
 └── sync.lock       held while a sync runs
 ```

@@ -69,7 +69,7 @@ Open **Stradl** from Applications (or **Open Stradl…** in the menu bar):
 | **Overview** | Whether you're in sync, this week's sessions, and your Circle at a glance; Sync Now and Restart Claude |
 | **Circle** | Every Mac syncing into your storage: its name, version, last sync and what it worked on this week. Each Mac checks in after every sync; remove one you retired with a right-click |
 | **Sessions** | Every session on this Mac, searchable, with its sync state, prompts, files touched and a copyable `claude --resume` command |
-| **Accounts** | The Claude accounts your Macs have used (work and personal, say) and which of them sync, with a green light on the one the Claude app is signed in to. When Claude signs in to an account new to your Circle, Stradl asks you to name it and choose whether it syncs; rename it any time |
+| **Accounts** | The Claude accounts your Macs have used (work and personal, say): open Claude signed in to any of them, and choose which of them sync, with a green light on the ones the Claude app is signed in to. When Claude signs in to an account new to your Circle, Stradl asks you to name it and choose whether it syncs; rename it any time. **Add to Applications** puts a Claude app for each account in Launchpad and Spotlight |
 | **Folders** | The project folders that sync, git repositories marked, with size and last change; add any other folder |
 | **Next Sync** | What the next sync will upload, download, merge, hold or move to the trash |
 | **Settings** | What syncs (scope, project folders, sidebar, MCP servers, build output), extra folders, patterns to leave out, this Mac's name in the Circle, how often to check, start at login, pause |
@@ -86,6 +86,7 @@ Look for the Stradl mark in the menu bar:
 | **Open Dashboard…** | Your Circle, this week's sessions and the sync state of each one, in your browser |
 | **Sync Now** | Sync immediately |
 | **Pause Syncing** | Stop syncing until you resume (handy on a metered connection) |
+| **Open Claude As** | Open the Claude app signed in to one of your accounts (🟢: open now), or sign in to another one |
 | **Claude Accounts** | Check the accounts whose sessions sync; uncheck one to keep its sessions on each Mac |
 | **Restart Claude to show N new sessions** | Appears when sessions arrive from another Mac; see below |
 | **Open Log** | `~/.stradl/agent.log` |
@@ -102,6 +103,8 @@ Look for the Stradl mark in the menu bar:
 
 **You choose which Claude accounts sync.** If your Macs sign in to more than one Claude account (a work one and your own, say), Stradl lists each in **Accounts** and asks which ones to sync, for your whole Circle. An account you keep on each Mac stops sending its sessions (with their prompts, plans, tasks and sidebar layout), and the project folders only its sessions use, to your storage; nothing already there is deleted. Until you choose, an account syncs as before. Each Mac's own sign-ins, and your organization's managed settings and policy files, never sync.
 
+**Open Claude signed in to any of your accounts.** Each Claude account gets a Claude profile of its own on each Mac, so they all stay signed in: choose **Open Claude As** in the menu bar, **Open** in Accounts, one of the **Claude (account)** apps from **Add to Applications**, or run `stradl open`. Claude's own profile stays as it is, signed in to the account it already was; another account's profile asks you to sign in once, the first time it opens. Several can be open at once. Every profile shows the same sidebar sessions for its account, and they sync as before. A Mac that already used several accounts gets a profile for each automatically.
+
 **Sessions you use from your phone show once.** A session you control from the Claude app on your phone (Remote Control) already appears on every Mac through your Claude account, so Stradl doesn't add a second copy. It syncs normally once Remote Control is off.
 
 ### Commands
@@ -113,6 +116,8 @@ Look for the Stradl mark in the menu bar:
 | `stradl circle` | The Macs in your Circle (`forget <name>` removes a retired one) |
 | `stradl folders` | The project folders that sync |
 | `stradl accounts` | Your Claude accounts and which sync (`sync <account> on\|off`, `label <account> <name>`, `held` and `assign` for sessions waiting for an account) |
+| `stradl open [account]` | Open Claude signed in to an account (none: choose from a list) |
+| `stradl profile` | Your accounts' Claude profiles (`new` for another account, `launchers` to add a Claude app per account to ~/Applications) |
 | `stradl config show` / `set` / `add` / `remove` | See or change settings without editing YAML |
 | `stradl claude restart` | Restart Claude so its sidebar shows what arrived |
 | `stradl diagnostics` | A troubleshooting report with secrets removed |
