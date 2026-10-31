@@ -30,7 +30,10 @@ final class AppModel: ObservableObject {
     init() {
         Task { await refreshAll() }
         timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refreshOverview() }
+            Task { @MainActor in
+                await self?.refreshOverview()
+                await self?.refreshAccounts() // a new sign-in shows up within seconds
+            }
         }
         // Progress is cheap to ask for: once a second, so the bar moves.
         progressTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
@@ -217,6 +220,22 @@ final class AppModel: ObservableObject {
             try await StradlCLI.run(["accounts", "sync", account.id, on ? "on" : "off"], timeout: 90)
             try? await AgentAPI.syncNow()
         }
+    }
+
+    /// Names an account new to the Circle and records whether it syncs.
+    func setUpAccount(_ account: ClaudeAccount, name: String, syncs: Bool) {
+        let label = name.trimmingCharacters(in: .whitespaces)
+        perform("account:\(account.id)", success: syncs ? "\(label) syncs to all your Macs" : "\(label) stays on each Mac") {
+            try await StradlCLI.run(["accounts", "label", account.id, label], timeout: 90)
+            try await StradlCLI.run(["accounts", "sync", account.id, syncs ? "on" : "off"], timeout: 90)
+            try? await AgentAPI.syncNow()
+        }
+    }
+
+    /// The first account new to the Circle, the one the Claude app is
+    /// signed in to first: the app asks about it.
+    var newAccount: ClaudeAccount? {
+        accounts.filter(\.isNew).sorted { $0.active && !$1.active }.first
     }
 
     func setAccountLabel(_ account: ClaudeAccount, _ label: String) {

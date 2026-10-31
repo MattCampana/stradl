@@ -113,6 +113,7 @@ func runTray(opts agent.Options) error {
 		var accountItems []*systray.MenuItem
 		var shownAccounts [maxMenuAccounts]sync.Account
 		var accountsMu gosync.Mutex
+		var seenAccounts map[string]bool // nil until the first redraw
 		accountClicked := make(chan int, 1)
 		for i := 0; i < maxMenuAccounts; i++ {
 			item := mAccounts.AddSubMenuItemCheckbox("", "", false)
@@ -176,6 +177,18 @@ func runTray(opts agent.Options) error {
 			}
 			if cfg, err := opts.LoadConfig(); err == nil {
 				list := sync.ListAccounts(cfg)
+				for _, a := range list {
+					// One Claude hasn't been told about: ask about it once
+					// (not for those already there when the agent started).
+					if seenAccounts != nil && !seenAccounts[a.ID] && a.Sync == "ask" && a.Label == "" {
+						go notify("New Claude account", a.Name+" is new to your Circle. Open Stradl to name it and choose whether it syncs.")
+					}
+				}
+				seen := make(map[string]bool, len(list))
+				for _, a := range list {
+					seen[a.ID] = true
+				}
+				seenAccounts = seen
 				accountsMu.Lock()
 				for i, item := range accountItems {
 					if i >= len(list) {
@@ -186,7 +199,7 @@ func runTray(opts agent.Options) error {
 					shownAccounts[i] = a
 					title := a.Name
 					if a.Active {
-						title += " (signed in)"
+						title = "🟢 " + title + " (signed in to Claude)"
 					}
 					item.SetTitle(title)
 					if a.Sync == "off" {

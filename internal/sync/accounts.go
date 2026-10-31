@@ -258,6 +258,30 @@ func (s *Syncer) readActiveAccount() (activeAccount, bool) {
 	return activeAccount{ID: strings.ToLower(a.AccountUUID), Email: a.EmailAddress, OrgID: strings.ToLower(a.OrganizationUUID), OrgName: a.OrganizationName}, true
 }
 
+// desktopAccount returns the account the Claude desktop app on this Mac is
+// signed in to ("" unknown), from the app's own config.json. It can differ
+// from Claude Code's in the terminal (~/.claude.json).
+func (s *Syncer) desktopAccount() string {
+	dir := s.cfg.DesktopDirOverride
+	if dir == "" {
+		dir = config.DesktopSessionsDir()
+	}
+	if dir == "" {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(dir), "config.json"))
+	if err != nil {
+		return ""
+	}
+	var c struct {
+		LastKnownAccountUUID string `json:"lastKnownAccountUuid"`
+	}
+	if json.Unmarshal(data, &c) != nil || !accountIDRe.MatchString(c.LastKnownAccountUUID) {
+		return ""
+	}
+	return strings.ToLower(c.LastKnownAccountUUID)
+}
+
 // localRecords lists this Mac's sidebar records by account: the account and
 // organization each lives under and the transcript (session) it shows.
 type localRecord struct {
@@ -309,6 +333,14 @@ func (s *Syncer) localRecords() []localRecord {
 // sidebar record. It reports whether the registry changed.
 func (s *Syncer) noteLocalAccounts(reg *AccountRegistry, objects []storage.ObjectInfo, attribute bool) bool {
 	changed := false
+	// The account the Claude app is signed in to is known from the moment
+	// it signs in, before it has any session, so the app can ask about it.
+	if id := s.desktopAccount(); id != "" {
+		if _, ok := reg.Accounts[id]; !ok {
+			reg.account(id)
+			changed = true
+		}
+	}
 	active := s.activeAccount()
 	if active.ID != "" {
 		a := reg.account(active.ID)
@@ -1020,7 +1052,8 @@ type Account struct {
 	Name     string       `json:"name"` // label, else email, else a short ID
 	Orgs     []AccountOrg `json:"orgs,omitempty"`
 	Sync     string       `json:"sync"`     // "on", "off" or "ask" (not chosen yet; syncs)
-	Active   bool         `json:"active"`   // Claude on this Mac is signed in to it
+	Active   bool         `json:"active"`   // the Claude app on this Mac is signed in to it
+	Terminal bool         `json:"terminal"` // Claude Code in the terminal is signed in to it
 	Here     bool         `json:"here"`     // this Mac has sidebar sessions of it
 	Sessions int          `json:"sessions"` // sessions known to belong to it
 }
@@ -1037,10 +1070,18 @@ func ListAccounts(cfg *config.Config) []Account {
 	s := newScopeSyncer(cfg)
 	reg := s.cachedAccounts()
 	s.noteLocalAccounts(reg, nil, false)
-	return accountList(reg, s.activeAccount().ID, s.localRecords())
+	return s.accountList(reg)
 }
 
-func accountList(reg *AccountRegistry, active string, records []localRecord) []Account {
+// accountList lists the registry's accounts for the app and the CLI: the
+// one the Claude app is signed in to first.
+func (s *Syncer) accountList(reg *AccountRegistry) []Account {
+	records := s.localRecords()
+	terminal := s.activeAccount().ID
+	active := s.desktopAccount()
+	if active == "" {
+		active = terminal
+	}
 	here := make(map[string]bool)
 	for _, r := range records {
 		here[r.Account] = true
@@ -1051,7 +1092,7 @@ func accountList(reg *AccountRegistry, active string, records []localRecord) []A
 	}
 	var out []Account
 	for id, a := range reg.Accounts {
-		acc := Account{ID: id, Email: a.Email, Label: a.Label, Active: id == active, Here: here[id], Sessions: count[id], Sync: "ask"}
+		acc := Account{ID: id, Email: a.Email, Label: a.Label, Active: id == active, Terminal: id == terminal, Here: here[id], Sessions: count[id], Sync: "ask"}
 		if a.Sync != nil {
 			acc.Sync = map[bool]string{true: "on", false: "off"}[*a.Sync]
 		}
@@ -1134,5 +1175,5 @@ func (s *Syncer) RefreshAccounts(ctx context.Context) ([]Account, error) {
 	if err := s.prepareAccounts(ctx, nil, false, false); err != nil {
 		return nil, err
 	}
-	return accountList(s.registry(), s.activeAccount().ID, s.localRecords()), nil
+	return s.accountList(s.registry()), nil
 }

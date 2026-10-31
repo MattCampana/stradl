@@ -123,6 +123,11 @@ struct ContentView: View {
                 }
             }
         }
+        // A Claude account new to the Circle (just signed in to): name it
+        // and choose whether it syncs before anything else.
+        .sheet(item: Binding(get: { model.newAccount }, set: { _ in })) { account in
+            NewAccountSheet(account: account).environmentObject(model)
+        }
     }
 
     private func badge(for s: Pane) -> Int {

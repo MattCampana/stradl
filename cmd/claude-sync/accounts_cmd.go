@@ -61,11 +61,15 @@ Nothing already in storage is deleted.`,
 					"off": colorYellow + "doesn't sync" + colorReset,
 					"ask": colorDim + "syncs (not chosen yet)" + colorReset,
 				}[a.Sync]
-				extra := ""
+				dot, extra := "  ", ""
 				if a.Active {
-					extra = colorDim + " · signed in here" + colorReset
+					dot = colorGreen + "● " + colorReset
+					extra = colorDim + " · signed in to Claude" + colorReset
 				}
-				fmt.Printf("  %-34s %s %s· %d sessions%s\n", a.Name, state, colorDim, a.Sessions, colorReset+extra)
+				if a.Terminal && !a.Active {
+					extra += colorDim + " · signed in to Claude Code in the terminal" + colorReset
+				}
+				fmt.Printf("%s%-34s %s %s· %d sessions%s\n", dot, a.Name, state, colorDim, a.Sessions, colorReset+extra)
 				if a.Email != "" && a.Email != a.Name {
 					fmt.Printf("  %s%s%s\n", colorDim, a.Email, colorReset)
 				}

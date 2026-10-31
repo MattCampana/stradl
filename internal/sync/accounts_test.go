@@ -805,3 +805,24 @@ func TestAStaleCacheNeverUndoesANewerChoice(t *testing.T) {
 		t.Fatalf("bob's newer choice to sync Judge was lost or undone: %+v", got)
 	}
 }
+
+func TestTheClaudeAppsAccountShowsAsSignedInFromTheStart(t *testing.T) {
+	root := t.TempDir()
+	a := newEverythingDevice(t, root, "alice", newCASStore())
+	a.signIn(judgeAcct, judgeOrg, "mcampana@judge.com") // the terminal
+	const fresh = "9a8b7c6d-1111-4222-8333-444455556666"
+	// The Claude app just signed in to an account with no session yet.
+	if err := os.MkdirAll(a.desktop, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(a.desktop), "config.json"), []byte(`{"lastKnownAccountUuid":"`+fresh+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	list := ListAccounts(a.s.cfg)
+	if len(list) != 2 || list[0].ID != fresh || !list[0].Active || list[0].Terminal {
+		t.Fatalf("list = %+v, want the app's new account first and signed in", list)
+	}
+	if list[1].ID != judgeAcct || list[1].Active || !list[1].Terminal {
+		t.Fatalf("list[1] = %+v, want Judge as the terminal's account", list[1])
+	}
+}

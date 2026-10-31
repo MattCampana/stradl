@@ -69,7 +69,7 @@ Open **Stradl** from Applications (or **Open Stradl…** in the menu bar):
 | **Overview** | Whether you're in sync, this week's sessions, and your Circle at a glance; Sync Now and Restart Claude |
 | **Circle** | Every Mac syncing into your storage: its name, version, last sync and what it worked on this week. Each Mac checks in after every sync; remove one you retired with a right-click |
 | **Sessions** | Every session on this Mac, searchable, with its sync state, prompts, files touched and a copyable `claude --resume` command |
-| **Accounts** | The Claude accounts your Macs have used (work and personal, say) and which of them sync; name them so every Mac shows the same name |
+| **Accounts** | The Claude accounts your Macs have used (work and personal, say) and which of them sync, with a green light on the one the Claude app is signed in to. When Claude signs in to an account new to your Circle, Stradl asks you to name it and choose whether it syncs; rename it any time |
 | **Folders** | The project folders that sync, git repositories marked, with size and last change; add any other folder |
 | **Next Sync** | What the next sync will upload, download, merge, hold or move to the trash |
 | **Settings** | What syncs (scope, project folders, sidebar, MCP servers, build output), extra folders, patterns to leave out, this Mac's name in the Circle, how often to check, start at login, pause |

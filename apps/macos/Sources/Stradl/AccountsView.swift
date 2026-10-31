@@ -92,10 +92,21 @@ struct AccountRow: View {
                 HStack(spacing: 6) {
                     Text(account.name).lineLimit(1).truncationMode(.middle)
                     if account.active {
-                        Text("Signed in here")
+                        HStack(spacing: 4) {
+                            Circle().fill(.green).frame(width: 7, height: 7)
+                            Text("Signed in to Claude")
+                        }
+                        .font(.caption2)
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(Color.green.opacity(0.12), in: Capsule())
+                        .help("The Claude app on this Mac is signed in to this account")
+                    }
+                    if account.terminal == true && !account.active {
+                        Text("Terminal")
                             .font(.caption2)
                             .padding(.horizontal, 6).padding(.vertical, 1)
-                            .background(Color.accentColor.opacity(0.15), in: Capsule())
+                            .background(Color.secondary.opacity(0.15), in: Capsule())
+                            .help("Claude Code in the terminal is signed in to this account")
                     }
                 }
                 Text(details)
@@ -165,5 +176,61 @@ struct AccountRow: View {
         default: parts.append("syncs to all your Macs")
         }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// Asks about an account new to the Circle (just signed in to, say): its
+/// name and whether its sessions sync. Shown until it has both.
+struct NewAccountSheet: View {
+    @EnvironmentObject var model: AppModel
+    var account: ClaudeAccount
+    @State private var name = ""
+    @State private var syncs = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "person.crop.circle.badge.plus")
+                    .font(.system(size: 28))
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("New Claude account").font(.title3.weight(.semibold))
+                    Text(account.active ? "The Claude app on this Mac just signed in to it." : "A Mac in your Circle has used it.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Name").font(.headline)
+                TextField("Work, Personal, a client…", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                Text(account.email ?? "Account \(account.id.prefix(8))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Its sessions").font(.headline)
+                Picker("", selection: $syncs) {
+                    Text("Sync to all my Macs").tag(true)
+                    Text("Stay on the Mac they were made on").tag(false)
+                }
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+            }
+            Text("You can rename it or change this later in Accounts.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Save") { model.setUpAccount(account, name: name, syncs: syncs) }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || model.busy.contains("account:\(account.id)"))
+            }
+        }
+        .padding(22)
+        .frame(width: 420)
+        .interactiveDismissDisabled(true)
+        .onAppear {
+            name = account.label ?? ""
+        }
     }
 }

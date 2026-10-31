@@ -172,12 +172,15 @@ struct ClaudeAccount: Decodable, Identifiable, Hashable {
     var name: String
     var orgs: [Org]?
     var sync: String          // "on", "off" or "ask" (not chosen yet; syncs)
-    var active: Bool          // Claude on this Mac is signed in to it
+    var active: Bool          // the Claude app on this Mac is signed in to it
+    var terminal: Bool?       // Claude Code in the terminal is signed in to it
     var here: Bool            // this Mac has sidebar sessions of it
     var sessions: Int
 
     var syncs: Bool { sync != "off" }
     var undecided: Bool { sync == "ask" }
+    /// New to the Circle: nobody has named it or chosen for it yet.
+    var isNew: Bool { undecided && (label ?? "").isEmpty }
 }
 
 /// A session waiting because its account isn't known (`stradl accounts held`).
