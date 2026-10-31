@@ -844,3 +844,140 @@ func TestAnAccountsEmailIsLearnedFromTheClaudeApp(t *testing.T) {
 		t.Fatalf("list = %+v, want the account shown by the email the app knows", list)
 	}
 }
+
+func TestSidebarRecordsBringNoFoldersWhileTheSidebarDoesntSync(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	off := false
+	a.s.cfg.DesktopSync = &off
+	// A record whose transcript Claude Code already cleaned up.
+	p := filepath.Join(a.desktop, bpAcct, bpOrg, "local_r1.json")
+	if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(desktopRecord("local_r1", "cli-r1", filepath.Join(a.home, "code", "old-a"), time.Now().UnixMilli(), "r1")), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.write("code/old-a/x.go", "package a\n")
+	a.sync()
+	if keys := keysWithPrefix(store, FoldersPrefix+"code/old-a/"); len(keys) != 0 {
+		t.Fatalf("a folder only a sidebar record names synced with the sidebar off: %v", keys)
+	}
+}
+
+func TestAKnownFolderStopsSyncingOnceOnlyAnOffAccountWorksThere(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	b := newEverythingDevice(t, root, "matthew", store)
+	// Synced before Stradl knew accounts: the folder has no account.
+	a.write("code/judge-app/x.go", "v1\n")
+	a.writeSession("cli", "old", cwdLine("u1", filepath.Join(a.home, "code", "judge-app")))
+	syncAll(1, a, b)
+	if !keysHave(store, FoldersPrefix+"code/judge-app/x.go") {
+		t.Fatal("setup: the folder should sync")
+	}
+	a.setSync(judgeAcct, false)
+	a.signIn(judgeAcct, judgeOrg, "mcampana@judge.com")
+	time.Sleep(10 * time.Millisecond)
+	a.appendSession("cli", "old", cwdLine("u2", filepath.Join(a.home, "code", "judge-app"))) // claude --resume
+	a.write("code/judge-app/x.go", "v2 judge work\n")
+	a.sync()
+	a.sync()
+	b.sync()
+	if got := b.read("code/judge-app/x.go"); got != "v1\n" {
+		t.Fatalf("work in a folder only an off account uses reached bob: %q", got)
+	}
+}
+
+func TestEditsToAnOffAccountsLayoutSurviveAPendingLayout(t *testing.T) {
+	store := newCASStore()
+	a, b := newSidebarPair(t, store)
+	stubDesktopApp(t, false)
+	a.syncSidebar(false)
+	a.setSync(testAcct, false)
+	a.syncSidebar(false) // a pass with nothing new saves the base
+	f := sidebarFile(b)
+	m := f.load()
+	ep := m["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any)
+	ep["dframe-group-scopes"].(map[string]any)[bpAcct+"/"+bpOrg] = map[string]any{
+		"groups": []any{map[string]any{"id": "GBP", "name": "Breakpoint"}}, "assignments": map[string]any{}, "order": map[string]any{},
+	}
+	f.save(m)
+	b.syncSidebar(false)
+	if res := a.syncSidebar(true); !res.PendingRestart {
+		t.Fatalf("setup: alice should get a pending layout: %+v", res)
+	}
+	// Alice reorganizes her off account's groups while the app runs.
+	fa := sidebarFile(a)
+	m = fa.load()
+	ep = m["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any)
+	gs := groupScopeOf(ep)
+	gs["groups"] = append(gs["groups"].([]any), map[string]any{"id": "GNEW", "name": "New"})
+	gs["assignments"] = map[string]any{}
+	fa.save(m)
+	if _, err := ApplyPendingSidebar(a.s.cfg, a.s.sidebarPath()); err != nil {
+		t.Fatal(err)
+	}
+	ep = fa.load()["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any)
+	gs = groupScopeOf(ep)
+	if len(gs["assignments"].(map[string]any)) != 0 {
+		t.Fatal("moves alice made in an off account's layout were undone when the app quit")
+	}
+	found := false
+	for _, g := range gs["groups"].([]any) {
+		found = found || g.(map[string]any)["id"] == "GNEW"
+	}
+	if !found {
+		t.Fatal("a group alice added to an off account's layout was lost when the app quit")
+	}
+	if _, ok := ep["dframe-group-scopes"].(map[string]any)[bpAcct+"/"+bpOrg]; !ok {
+		t.Fatal("bob's new group should arrive")
+	}
+	// Turning the account back on keeps alice's layout (the base remembers
+	// what storage still has).
+	a.setSync(testAcct, true)
+	a.syncSidebar(false)
+	gs = groupScopeOf(fa.load()["preferences"].(map[string]any)["epitaxyPrefs"].(map[string]any))
+	if len(gs["assignments"].(map[string]any)) != 0 {
+		t.Fatal("turning the account back on undid alice's moves")
+	}
+}
+
+func TestANewMacGetsNoneOfAnOffAccountsPlansPastesOrPrompts(t *testing.T) {
+	root := t.TempDir()
+	store := newCASStore()
+	a := newEverythingDevice(t, root, "alice", store)
+	a.writeAccountSession(judgeAcct, judgeOrg, "j1", filepath.Join(a.home, "code", "x"))
+	a.writeAccountSession(bpAcct, bpOrg, "b1", filepath.Join(a.home, "code", "y"))
+	for id, name := range map[string]string{"j1": "judge-plan", "b1": "bp-plan"} {
+		plan := filepath.Join(a.home, ".claude", "plans", name+".md")
+		a.appendSession("p", "cli-"+id, `{"uuid":"w-`+id+`","message":{"content":[{"type":"tool_use","name":"Write","input":{"file_path":"`+plan+`"}}]}}`+"\n")
+		a.write(".claude/plans/"+name+".md", name+"\n")
+	}
+	a.write(".claude/paste-cache/jjj111.txt", "judge paste")
+	a.write(".claude/paste-cache/bbb222.txt", "bp paste")
+	hist := `{"display":"judge secret","pastedContents":{"1":{"id":1,"type":"text","contentHash":"jjj111"}},"sessionId":"cli-j1"}` + "\n" +
+		`{"display":"my own prompt","pastedContents":{"1":{"id":1,"type":"text","contentHash":"bbb222"}},"sessionId":"cli-b1"}` + "\n"
+	a.write(".claude/history.jsonl", hist)
+	a.sync() // Judge syncs for a while...
+	a.setSync(judgeAcct, false)
+	a.sync()
+
+	c := newEverythingDevice(t, root, "carol", store) // ...then a new Mac joins
+	syncAll(3, c)
+	for _, rel := range []string{".claude/plans/judge-plan.md", ".claude/paste-cache/jjj111.txt"} {
+		if c.exists(rel) {
+			t.Fatalf("the new Mac got %s, an off account's", rel)
+		}
+	}
+	if got := c.read(".claude/history.jsonl"); strings.Contains(got, "judge secret") || !strings.Contains(got, "my own prompt") {
+		t.Fatalf("the new Mac's history:\n%s", got)
+	}
+	for _, rel := range []string{".claude/plans/bp-plan.md", ".claude/paste-cache/bbb222.txt"} {
+		if !c.exists(rel) {
+			t.Fatalf("the new Mac should get %s, a synced account's", rel)
+		}
+	}
+}

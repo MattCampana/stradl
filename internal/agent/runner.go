@@ -54,8 +54,13 @@ type Options struct {
 	LoadConfig func() (*config.Config, error)
 	// Sync runs one reconcile. The default is sync.RunSync(ctx, cfg, true,
 	// false), which fails fast with sync.ErrLocked while another sync runs.
-	Sync        func(ctx context.Context, cfg *config.Config) (*sync.SyncReport, error)
-	LocalProbe  func(cfg *config.Config) (string, error)
+	Sync       func(ctx context.Context, cfg *config.Config) (*sync.SyncReport, error)
+	LocalProbe func(cfg *config.Config) (string, error)
+	// NoteSignIn records the account Claude Code is signed in to, for the
+	// sign-in history terminal sessions are judged by; it runs while syncing
+	// is paused too (the local probe does it otherwise). The default is
+	// sync.NoteSignIn, or nothing when LocalProbe is set (tests).
+	NoteSignIn  func(cfg *config.Config)
 	RemoteProbe func(ctx context.Context, cfg *config.Config) (string, error)
 	// CountSessions returns the number of transcripts on this device.
 	CountSessions func(cfg *config.Config) int
@@ -140,6 +145,12 @@ func NewRunner(o Options) *Runner {
 	if o.Sync == nil {
 		o.Sync = func(ctx context.Context, cfg *config.Config) (*sync.SyncReport, error) {
 			return sync.RunSync(ctx, cfg, true, false)
+		}
+	}
+	if o.NoteSignIn == nil {
+		o.NoteSignIn = func(*config.Config) {}
+		if o.LocalProbe == nil {
+			o.NoteSignIn = sync.NoteSignIn
 		}
 	}
 	if o.LocalProbe == nil {
@@ -316,6 +327,10 @@ func (r *Runner) step(ctx context.Context, now time.Time, manual bool) {
 		return
 	case r.paused:
 		r.nextLocal = now.Add(r.o.LocalPoll)
+		// Sign-ins made while paused still decide whose sessions are whose.
+		if cfg, err := r.o.LoadConfig(); err == nil {
+			r.o.NoteSignIn(cfg)
+		}
 		return
 	case asleep:
 		r.runSync(ctx, "wake")

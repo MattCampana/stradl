@@ -821,3 +821,25 @@ func TestRunnerWaitsForConfig(t *testing.T) {
 		t.Fatalf("no notification expected for a missing config, got %q", h.notes)
 	}
 }
+
+func TestSignInsAreRecordedWhilePaused(t *testing.T) {
+	var noted int
+	h := newHarness(t, func(h *harness, o *Options) {
+		o.NoteSignIn = func(*config.Config) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			noted++
+		}
+	})
+	if err := SetPaused(h.paths, true); err != nil {
+		t.Fatal(err)
+	}
+	h.start()
+	h.advance(100 * s)
+	h.expectSyncs()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if noted == 0 {
+		t.Fatal("no sign-in recorded while paused: a switch then would be misattributed")
+	}
+}

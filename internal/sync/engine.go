@@ -1505,6 +1505,7 @@ func (s *Syncer) reconcileDownload(ctx context.Context, npath string, lf *localF
 	if s.transcriptLiveNow(npath) {
 		return errLocalChanged
 	}
+	data = s.sharedJSONL(npath, data) // prompts of accounts that don't sync don't arrive
 	if expect != nil && IsMergeableJSONL(npath) {
 		// Transcripts only grow. A remote copy missing lines this Mac has (an
 		// older version restored or replayed, or a truncated upload) must never
@@ -1682,9 +1683,9 @@ func (s *Syncer) reconcileBoth(ctx context.Context, npath string, lf *localFile,
 		)
 		switch {
 		case IsMergeableJSONL(npath):
-			merged, gotRemote := MergeJSONL(localData, remoteData)
-			// Storage needs only what this Mac would send (the prompts of
-			// accounts that don't sync stay here).
+			// Prompts of accounts that don't sync neither arrive from
+			// storage nor go to it (this Mac's own stay here).
+			merged, gotRemote := MergeJSONL(localData, s.sharedJSONL(npath, remoteData))
 			_, gotLocal := MergeJSONL(remoteData, s.sharedJSONL(npath, localData))
 			result, writeHere, uploadThere = merged, gotRemote, gotLocal
 		case strings.HasPrefix(npath, DesktopPrefix):

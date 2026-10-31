@@ -270,17 +270,41 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 		}
 		s.folderAccounts[rel][acct] = true
 	}
-	fold := homeCaseInsensitive(s.home)
-	for _, rec := range s.localRecords() {
-		if reg.off(rec.Account) {
-			continue
+	// A folder an account that doesn't sync works in is noted for it but
+	// never becomes a candidate: once only such accounts use it, it stops
+	// syncing (see folderOff).
+	offCanon := make(map[string]string)
+	noteOff := func(abs, acct string) {
+		if abs == "" || !filepath.IsAbs(abs) {
+			return
 		}
-		note(add(rec.Cwd), rec.Account)
-		note(add(rec.OriginCwd), rec.Account)
+		rel, ok := offCanon[abs]
+		if !ok {
+			rel = s.canonicalFolderIn(abs, remoteRepos)
+			offCanon[abs] = rel
+		}
+		note(rel, acct)
+	}
+	fold := homeCaseInsensitive(s.home)
+	// Sidebar records name folders only while the sidebar syncs (they are
+	// read regardless, for accounts).
+	records := s.cfg.EffectiveDesktopDir() != ""
+	for _, rec := range s.localRecords() {
+		switch {
+		case reg.off(rec.Account):
+			noteOff(rec.Cwd, rec.Account)
+			noteOff(rec.OriginCwd, rec.Account)
+		case records:
+			note(add(rec.Cwd), rec.Account)
+			note(add(rec.OriginCwd), rec.Account)
+		}
 	}
 	first, later := s.transcriptCwds(useCache)
 	for _, c := range first {
-		if !reg.sessionOff(c.Session) && !s.held[c.Session] {
+		switch {
+		case reg.sessionOff(c.Session):
+			noteOff(c.Path, reg.Sessions[c.Session])
+		case !s.held[c.Session]:
 			note(add(c.Path), reg.Sessions[c.Session])
 		}
 	}
@@ -289,7 +313,7 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	}
 	remote := make(map[string]bool)
 	for _, rel := range remoteFolderMarkers(objects) {
-		if c := s.canonicalFolderIn(filepath.Join(s.home, filepath.FromSlash(rel)), remoteRepos); c != "" && !reg.folderOff(c) {
+		if c := s.canonicalFolderIn(filepath.Join(s.home, filepath.FromSlash(rel)), remoteRepos); c != "" && !s.folderOff(c) {
 			remote[c] = true
 			candidates = append(candidates, c)
 		}
@@ -320,7 +344,7 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	probe := objects == nil && !useCache // the agent's local probe: no markers to go by
 	s.offFolders = nil
 	for _, rel := range known {
-		if reg.folderOff(rel) {
+		if s.folderOff(rel) {
 			s.offFolders = append(s.offFolders, rel) // kept on the list (see reconcile's wasRoot)
 			continue                                 // only sessions of accounts that don't sync work there
 		}
@@ -827,7 +851,7 @@ func (s *Syncer) linkFolderRoots(roots []*syncRoot, objects []storage.ObjectInfo
 	for _, rel := range remoteFolderMarkers(objects) {
 		// One only accounts that don't sync work in isn't a folder here: a
 		// repository there stays out of the folder holding it.
-		if !s.registry().folderOff(rel) {
+		if !s.folderOff(rel) {
 			markers[rel] = true
 		}
 	}

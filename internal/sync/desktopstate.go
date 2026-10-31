@@ -295,6 +295,9 @@ func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (Sideb
 	pendingPath := filepath.Join(stateDir, sidebarPendingFile)
 	storageID := StorageIdentity(s.cfg.GetStorageConfig())
 	base, _ := loadSidebarSnapshot(basePath, storageID)
+	// The base's part for accounts that don't sync is kept as it is, so the
+	// layout merges correctly when such an account syncs again.
+	var baseOff SidebarState
 
 	for attempt := 0; attempt < maxRaceRetries; attempt++ {
 		remote, etag, exists, err := s.fetchSidebar(ctx)
@@ -318,7 +321,9 @@ func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (Sideb
 		if off := s.sidebarOff(); off != nil {
 			local, localOff = splitSidebar(local, off)
 			remote, remoteOff = splitSidebar(remote, off)
-			base.State, _ = splitSidebar(base.State, off)
+			var bOff SidebarState
+			base.State, bOff = splitSidebar(base.State, off)
+			baseOff = joinSidebar(baseOff, bOff)
 		}
 		mergeLocal := assumeUnchanged(local, base.State)
 		if base.Replaced != "" && sidebarHash(fullLocal) == base.Replaced && !sidebarEqual(local, base.State) {
@@ -348,7 +353,7 @@ func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (Sideb
 
 		if !toLocal {
 			_ = os.Remove(pendingPath)
-			return res, saveSidebarSnapshot(basePath, storageID, merged, "")
+			return res, saveSidebarSnapshot(basePath, storageID, joinSidebar(merged, baseOff), "")
 		}
 		res.GroupsChanged, res.AssignmentsChanged = sidebarChanges(local, merged)
 		if appRunning() {
@@ -374,7 +379,7 @@ func (s *Syncer) SyncSidebar(ctx context.Context, appRunning func() bool) (Sideb
 			replaced = sidebarHash(fullLocal)
 		}
 		_ = os.Remove(pendingPath)
-		return res, saveSidebarSnapshot(basePath, storageID, merged, replaced)
+		return res, saveSidebarSnapshot(basePath, storageID, joinSidebar(merged, baseOff), replaced)
 	}
 	return res, fmt.Errorf("sidebar layout: gave up after %d attempts: other Macs keep changing it; will retry next sync", maxRaceRetries)
 }
@@ -455,9 +460,11 @@ func splitSidebar(st SidebarState, f *sidebarFilter) (on, off SidebarState) {
 	return on, off
 }
 
-// joinSidebar puts the parts splitSidebar separated back together.
+// joinSidebar puts the parts splitSidebar separated back together. on is
+// left as it was.
 func joinSidebar(on, off SidebarState) SidebarState {
 	out := on
+	out.Scopes, out.Sections = maps.Clone(on.Scopes), maps.Clone(on.Sections)
 	for k, v := range off.Scopes {
 		if out.Scopes == nil {
 			out.Scopes = map[string]*GroupScope{}
@@ -480,12 +487,6 @@ func joinSidebar(on, off SidebarState) SidebarState {
 	return out
 }
 
-// ApplyPendingSidebar writes a layout SyncSidebar held back while the desktop
-// app was running. Call it right after the app quits (the Restart Claude
-// flow) and when the agent starts; it does nothing while the app runs or when
-// nothing is pending. The file is re-read and merged three ways with the
-// pending layout, so sidebar edits made on this Mac in the meantime are kept
-// (and go to storage on the next sync). Callers hold the sync lock.
 // SidebarPendingExists reports whether a sidebar layout is waiting for the
 // Claude app to quit.
 func SidebarPendingExists(cfg *config.Config) bool {
@@ -493,6 +494,12 @@ func SidebarPendingExists(cfg *config.Config) bool {
 	return err == nil
 }
 
+// ApplyPendingSidebar writes a layout SyncSidebar held back while the desktop
+// app was running. Call it right after the app quits (the Restart Claude
+// flow) and when the agent starts; it does nothing while the app runs or when
+// nothing is pending. The file is re-read and merged three ways with the
+// pending layout, so sidebar edits made on this Mac in the meantime are kept
+// (and go to storage on the next sync). Callers hold the sync lock.
 func ApplyPendingSidebar(cfg *config.Config, sidebarPath string) (applied bool, err error) {
 	stateDir := sidebarStateDir(cfg)
 	pendingPath := filepath.Join(stateDir, sidebarPendingFile)
@@ -514,7 +521,21 @@ func ApplyPendingSidebar(cfg *config.Config, sidebarPath string) (applied bool, 
 	if err != nil {
 		return false, err
 	}
+	// The layout of accounts that don't sync stays as this Mac has it (the
+	// pending copy of it is older), and the base keeps its part of it.
+	fullLocal, newBase := local, pending.State
+	var localOff SidebarState
+	if off := newScopeSyncer(cfg).sidebarOff(); off != nil {
+		var baseOff, pendingOn SidebarState
+		base.State, baseOff = splitSidebar(base.State, off)
+		local, localOff = splitSidebar(local, off)
+		pendingOn, _ = splitSidebar(pending.State, off)
+		pending.State = pendingOn
+		newBase = joinSidebar(pendingOn, baseOff)
+	}
 	merged, _, _ := MergeSidebar(base.State, assumeUnchanged(local, base.State), pending.State)
+	merged = joinSidebar(merged, localOff)
+	local = fullLocal
 	replaced := ""
 	if !sidebarEqual(merged, local) {
 		if applied, err = writeSidebar(sidebarPath, merged); err != nil {
@@ -526,7 +547,7 @@ func ApplyPendingSidebar(cfg *config.Config, sidebarPath string) (applied bool, 
 	}
 	// Storage held the pending layout when it was recorded, so it is the last
 	// layout both sides agreed on; edits made here since then upload next sync.
-	if err := saveSidebarSnapshot(basePath, storageID, pending.State, replaced); err != nil {
+	if err := saveSidebarSnapshot(basePath, storageID, newBase, replaced); err != nil {
 		return applied, err
 	}
 	_ = os.Remove(pendingPath)

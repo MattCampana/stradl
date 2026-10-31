@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -202,6 +203,26 @@ func (r *AccountRegistry) folderOff(rel string) bool {
 	}
 	for _, a := range accts {
 		if !r.off(a) {
+			return false
+		}
+	}
+	return true
+}
+
+// folderOff is the registry's folderOff with what this pass saw (see
+// discoverFolders) added, so a folder stops syncing in the pass that finds
+// only accounts that don't sync work in it.
+func (s *Syncer) folderOff(rel string) bool {
+	reg := s.registry()
+	if len(s.folderAccounts[rel]) == 0 {
+		return reg.folderOff(rel)
+	}
+	accts := maps.Clone(s.folderAccounts[rel])
+	for _, a := range reg.Folders[rel] {
+		accts[a] = true
+	}
+	for a := range accts {
+		if !reg.off(a) {
 			return false
 		}
 	}
@@ -633,6 +654,12 @@ func (s *Syncer) readSignIns() []signIn {
 
 // noteSignIn records the account signed in now: a new entry when it changed,
 // else (about once a minute) when it was last seen.
+// NoteSignIn records the account Claude Code is signed in to now, for the
+// sign-in history terminal sessions are judged by. It only reads
+// ~/.claude.json and, on a change or about once a minute, writes
+// signins.json.
+func NoteSignIn(cfg *config.Config) { newScopeSyncer(cfg).noteSignIn(time.Now()) }
+
 func (s *Syncer) noteSignIn(now time.Time) {
 	a, ok := s.readActiveAccount()
 	if !ok {
@@ -751,9 +778,9 @@ func (s *Syncer) claudeOff(rel string) bool {
 	case len(parts) >= 3 && parts[0] == "projects" && parts[2] == "memory":
 		return s.allOff(s.projectSessions()[parts[1]])
 	case len(parts) == 2 && parts[0] == "plans":
-		return s.allOff(s.planIndex()[parts[1]])
+		return s.offOrUnplaced(rel, s.planIndex()[parts[1]])
 	case len(parts) == 2 && parts[0] == "paste-cache":
-		return s.allOff(s.historyRefs().pastes[strings.TrimSuffix(parts[1], path.Ext(parts[1]))])
+		return s.offOrUnplaced(rel, s.historyRefs().pastes[strings.TrimSuffix(parts[1], path.Ext(parts[1]))])
 	}
 	sid := claudeSession(rel)
 	return sid != "" && reg.sessionOff(sid)
@@ -768,6 +795,18 @@ func (s *Syncer) planIndex() map[string]map[string]bool {
 		s.transcriptCwds(s.state != nil)
 	}
 	return s.planSessions
+}
+
+// offOrUnplaced reports a plan or paste only sessions of accounts that don't
+// sync refer to, or one nothing here refers to that this Mac doesn't have:
+// from storage, it may be such an account's, and it arrives once its session
+// or prompt is here.
+func (s *Syncer) offOrUnplaced(rel string, sessions map[string]bool) bool {
+	if len(sessions) == 0 {
+		_, err := os.Lstat(filepath.Join(s.claudeDir, filepath.FromSlash(rel)))
+		return err != nil
+	}
+	return s.allOff(sessions)
 }
 
 // allOff reports a non-empty set of sessions that all belong to accounts
