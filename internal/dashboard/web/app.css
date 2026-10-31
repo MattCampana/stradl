@@ -163,7 +163,6 @@ code, kbd, .mono { font-family: var(--mono); font-size: 0.92em; }
 .brand { display: inline-flex; align-items: center; border-radius: 6px; flex: none; }
 .lockup { height: 26px; width: auto; display: block; }
 .lk-ink { fill: var(--ink); }
-.lk-dot { fill: var(--primary); }
 .tagline {
   color: var(--muted); font-size: 13px; padding-left: 16px;
   border-left: 1px solid var(--border); white-space: nowrap;

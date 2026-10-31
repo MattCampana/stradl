@@ -168,7 +168,7 @@ make test           # go test ./...
 make release VERSION=0.1.0 RELEASE_REPO=you/stradl   # all four release archives + checksums
 ```
 
-The brand assets are generated from [assets/brand/src](assets/brand/src) (`python3 assets/brand/src/build.py`).
+The app icon and menu bar glyph (Unison: three voices, one per Mac, falling into one wave) are rendered from [assets/brand/unison](assets/brand/unison) (`assets/brand/unison/render.sh`); the rest of the brand set comes from [assets/brand/src](assets/brand/src) (`python3 assets/brand/src/build.py`).
 
 ## Credits
 
