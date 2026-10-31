@@ -465,7 +465,7 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	if err := s.checkKey(ctx, objects, dryRun); err != nil {
 		return nil, err
 	}
-	if err := s.prepareAccounts(ctx, objects, dryRun); err != nil {
+	if err := s.prepareAccounts(ctx, objects, dryRun, true); err != nil {
 		return nil, err
 	}
 	roots := s.syncRoots(objects, true)

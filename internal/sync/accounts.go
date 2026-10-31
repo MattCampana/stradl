@@ -539,13 +539,14 @@ func (s *Syncer) registry() *AccountRegistry {
 }
 
 // prepareAccounts runs at the start of a pass: it reads the registry, adds
-// what this Mac knows, and saves it when that changed (not in a preview).
-func (s *Syncer) prepareAccounts(ctx context.Context, objects []storage.ObjectInfo, dryRun bool) error {
+// what this Mac knows (with attribute, the account of each transcript first
+// written here; objects is the pass's listing), and saves it when that
+// changed (not in a preview).
+func (s *Syncer) prepareAccounts(ctx context.Context, objects []storage.ObjectInfo, dryRun, attribute bool) error {
 	reg, _, err := s.loadAccounts(ctx)
 	if err != nil {
 		return err
 	}
-	attribute := objects != nil
 	local := reg.clone()
 	if s.noteLocalAccounts(local, objects, attribute) && !dryRun {
 		// Applied to the registry as stored (not merged), so what a sidebar
@@ -684,7 +685,7 @@ func (s *Syncer) SetAccountLabel(ctx context.Context, id, label string, now time
 // RefreshAccounts reads the registry from storage into this Mac's copy,
 // adding what this Mac knows.
 func (s *Syncer) RefreshAccounts(ctx context.Context) ([]Account, error) {
-	if err := s.prepareAccounts(ctx, nil, false); err != nil {
+	if err := s.prepareAccounts(ctx, nil, false, false); err != nil {
 		return nil, err
 	}
 	return accountList(s.registry(), s.activeAccount().ID, s.localRecords()), nil
