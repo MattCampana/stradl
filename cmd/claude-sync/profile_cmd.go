@@ -110,6 +110,10 @@ func listProfiles(asJSON bool) error {
 			where = "no profile yet"
 		case r.Profile.Main:
 			where = "Claude's own profile"
+		case r.Account != nil:
+			where = "its own profile"
+		default:
+			where = "profile " + r.Profile.ID
 		}
 		dot, state := "  ", ""
 		if r.Open {
