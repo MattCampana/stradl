@@ -237,3 +237,10 @@ func TestAgentOptionsCarryAConfigLoader(t *testing.T) {
 		t.Fatal("the agent's options have no LoadConfig; the menu bar would crash")
 	}
 }
+
+func TestParsePidsSkipsThisProcess(t *testing.T) {
+	got := parsePids(fmt.Sprintf("123\n%d\n456\nnope\n", os.Getpid()))
+	if len(got) != 2 || got[0] != 123 || got[1] != 456 {
+		t.Fatalf("parsePids = %v", got)
+	}
+}

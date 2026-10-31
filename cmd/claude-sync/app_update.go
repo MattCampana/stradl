@@ -6,9 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // appAsset is the release asset holding Stradl.app, the Mac app.
@@ -39,6 +42,54 @@ func installedAppVersion(path string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// appPids lists the running Stradl.app processes started from app.
+func appPids(ctx context.Context, app string) []int {
+	exe := filepath.Join(app, "Contents", "MacOS", "Stradl")
+	out, err := exec.CommandContext(ctx, "/usr/bin/pgrep", "-a", "-f", "^"+regexp.QuoteMeta(exe)+"( |$)").Output()
+	if err != nil {
+		return nil // pgrep exits 1 when nothing matches
+	}
+	return parsePids(string(out))
+}
+
+func parsePids(out string) []int {
+	var pids []int
+	for _, f := range strings.Fields(out) {
+		if pid, err := strconv.Atoi(f); err == nil && pid > 0 && pid != os.Getpid() {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// quitApp asks a running Stradl.app to quit, as if the user chose Quit, and
+// waits for it; one still running after 10 s is stopped with SIGTERM. It
+// reports whether the app was running.
+func quitApp(ctx context.Context, app string) bool {
+	pids := appPids(ctx, app)
+	for _, pid := range pids {
+		script := "ObjC.import('AppKit'); $.NSRunningApplication.runningApplicationWithProcessIdentifier(" + strconv.Itoa(pid) + ").terminate"
+		_ = exec.CommandContext(ctx, "/usr/bin/osascript", "-l", "JavaScript", "-e", script).Run()
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(pids) > 0 && time.Now().Before(deadline) && len(appPids(ctx, app)) > 0 {
+		time.Sleep(250 * time.Millisecond)
+	}
+	for _, pid := range appPids(ctx, app) {
+		_ = syscall.Kill(pid, syscall.SIGTERM)
+	}
+	return len(pids) > 0
+}
+
+// reopenApp opens Stradl.app again when it was open before the update.
+func reopenApp(app string, wasOpen bool) {
+	if wasOpen {
+		if err := exec.Command("/usr/bin/open", app).Run(); err == nil {
+			fmt.Printf("%s✓%s Reopened Stradl\n", colorGreen, colorReset)
+		}
+	}
 }
 
 // updateApp installs or replaces Stradl.app from release, verified against
@@ -102,9 +153,16 @@ func installApp(ctx context.Context, release *GitHubRelease, zipURL string) erro
 	}
 	_ = exec.CommandContext(ctx, "/usr/bin/xattr", "-dr", "com.apple.quarantine", fresh).Run()
 
+	// An open Stradl.app is asked to quit first, as if the user chose Quit,
+	// and opens again on the new version once it's in place.
+	wasOpen := false
+	if installed {
+		wasOpen = quitApp(ctx, dest)
+	}
 	old := filepath.Join(stage, "Stradl.app.old")
 	if installed {
 		if err := os.Rename(dest, old); err != nil {
+			reopenApp(dest, wasOpen)
 			return err
 		}
 	}
@@ -112,8 +170,10 @@ func installApp(ctx context.Context, release *GitHubRelease, zipURL string) erro
 		if installed {
 			_ = os.Rename(old, dest)
 		}
+		reopenApp(dest, wasOpen)
 		return err
 	}
+	defer reopenApp(dest, wasOpen)
 	verb := "Updated"
 	if !installed {
 		verb = "Installed"
