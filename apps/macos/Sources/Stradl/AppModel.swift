@@ -10,6 +10,7 @@ final class AppModel: ObservableObject {
     @Published var config: AppConfig?
     @Published var configError: String?
     @Published var folders: [FolderStat] = []
+    @Published var accounts: [ClaudeAccount] = []
     @Published var busy: Set<String> = []     // actions in flight, by name
     @Published var message: Banner?           // last action's outcome
     @Published var lastRefresh: Date?
@@ -52,7 +53,8 @@ final class AppModel: ObservableObject {
         async let o: Void = refreshOverview()
         async let c: Void = refreshConfig()
         async let f: Void = refreshFolders()
-        _ = await (o, c, f)
+        async let a: Void = refreshAccounts()
+        _ = await (o, c, f, a)
     }
 
     func refreshOverview() async {
@@ -84,6 +86,13 @@ final class AppModel: ObservableObject {
 
     func refreshFolders() async {
         folders = (try? await StradlCLI.json([FolderStat].self, ["folders", "--json"])) ?? folders
+    }
+
+    /// This Mac's copy of the Circle's accounts (no network); with fromStorage,
+    /// read the Circle's list from storage first.
+    func refreshAccounts(fromStorage: Bool = false) async {
+        let args = fromStorage ? ["accounts", "--json", "--refresh"] : ["accounts", "--json"]
+        accounts = (try? await StradlCLI.json([ClaudeAccount].self, args, timeout: fromStorage ? 90 : 30)) ?? accounts
     }
 
     // MARK: derived
@@ -186,6 +195,22 @@ final class AppModel: ObservableObject {
     func editList(_ key: String, add: Bool, _ value: String) {
         perform("config:\(key)") {
             try await StradlCLI.run(["config", add ? "add" : "remove", key, value])
+        }
+    }
+
+    /// Chooses whether an account's sessions sync, for every Mac in the Circle.
+    func setAccountSync(_ account: ClaudeAccount, _ on: Bool) {
+        let done = on ? "\(account.name) syncs to all your Macs"
+                      : "\(account.name) stays on each Mac now. Nothing already synced was deleted."
+        perform("account:\(account.id)", success: done) {
+            try await StradlCLI.run(["accounts", "sync", account.id, on ? "on" : "off"], timeout: 90)
+            try? await AgentAPI.syncNow()
+        }
+    }
+
+    func setAccountLabel(_ account: ClaudeAccount, _ label: String) {
+        perform("account:\(account.id)") {
+            try await StradlCLI.run(["accounts", "label", account.id, label], timeout: 90)
         }
     }
 

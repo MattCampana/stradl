@@ -71,6 +71,12 @@ type Syncer struct {
 	// known is the sync state as the pass found it, before any job ran.
 	known map[string]FileState
 
+	// accounts is the Claude account registry this pass goes by (see
+	// registry), and folderAccounts which accounts' sessions discovery saw
+	// in each folder.
+	accounts       *AccountRegistry
+	folderAccounts map[string]map[string]bool
+
 	// reindex collects the .git folders whose HEAD or refs this pass changed
 	// (see reindexRepos).
 	reindexMu sync.Mutex

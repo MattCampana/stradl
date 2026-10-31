@@ -182,7 +182,8 @@ func newDevice(t *testing.T, root, name string, store storage.Storage) *device {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{Scope: config.ScopeSessions, ClaudeDirOverride: claudeDir, StateDirOverride: stateDir, DesktopDirOverride: desktopDir}
+	cfg := &config.Config{Scope: config.ScopeSessions, ClaudeDirOverride: claudeDir, StateDirOverride: stateDir, DesktopDirOverride: desktopDir,
+		ClaudeJSONOverride: filepath.Join(home, ".claude.json")}
 	s := &Syncer{storage: store, encryptor: testEncryptor(t, stateDir), state: state, claudeDir: claudeDir, quiet: true, cfg: cfg, paths: mapper, home: home}
 	return &device{t: t, name: name, home: home, claude: claudeDir, desktop: desktopDir, s: s}
 }

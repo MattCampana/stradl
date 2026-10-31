@@ -69,6 +69,7 @@ Open **Stradl** from Applications (or **Open Stradl…** in the menu bar):
 | **Overview** | Whether you're in sync, this week's sessions, and your Circle at a glance; Sync Now and Restart Claude |
 | **Circle** | Every Mac syncing into your storage: its name, version, last sync and what it worked on this week. Each Mac checks in after every sync; remove one you retired with a right-click |
 | **Sessions** | Every session on this Mac, searchable, with its sync state, prompts, files touched and a copyable `claude --resume` command |
+| **Accounts** | The Claude accounts your Macs have used (work and personal, say) and which of them sync; name them so every Mac shows the same name |
 | **Folders** | The project folders that sync, git repositories marked, with size and last change; add any other folder |
 | **Next Sync** | What the next sync will upload, download, merge, hold or move to the trash |
 | **Settings** | What syncs (scope, project folders, sidebar, MCP servers, build output), extra folders, patterns to leave out, this Mac's name in the Circle, how often to check, start at login, pause |
@@ -85,6 +86,7 @@ Look for the Stradl mark in the menu bar:
 | **Open Dashboard…** | Your Circle, this week's sessions and the sync state of each one, in your browser |
 | **Sync Now** | Sync immediately |
 | **Pause Syncing** | Stop syncing until you resume (handy on a metered connection) |
+| **Claude Accounts** | Check the accounts whose sessions sync; uncheck one to keep its sessions on each Mac |
 | **Restart Claude to show N new sessions** | Appears when sessions arrive from another Mac; see below |
 | **Open Log** | `~/.stradl/agent.log` |
 
@@ -98,6 +100,8 @@ Look for the Stradl mark in the menu bar:
 
 **Deleting a file in a project folder deletes it on every Mac,** the way it would in one folder. Nothing is lost: on the other Macs it moves to `~/.stradl/trash` for 30 days, and storage keeps old versions for 30 days too. If one sync would delete more than half of a folder at once, Stradl stops and asks you to confirm with `stradl sync --allow-mass-delete`.
 
+**You choose which Claude accounts sync.** If your Macs sign in to more than one Claude account (a work one and your own, say), Stradl lists each in **Accounts** and asks which ones to sync, for your whole Circle. An account you keep on each Mac stops sending its sessions, and the project folders only its sessions use, to your storage; nothing already there is deleted. Until you choose, an account syncs as before. Each Mac's own sign-ins, and your organization's managed settings and policy files, never sync.
+
 **Sessions you use from your phone show once.** A session you control from the Claude app on your phone (Remote Control) already appears on every Mac through your Claude account, so Stradl doesn't add a second copy. It syncs normally once Remote Control is off.
 
 ### Commands
@@ -108,6 +112,7 @@ Look for the Stradl mark in the menu bar:
 | `stradl status` | Agent status, last sync, and what's waiting to sync |
 | `stradl circle` | The Macs in your Circle (`forget <name>` removes a retired one) |
 | `stradl folders` | The project folders that sync |
+| `stradl accounts` | Your Claude accounts and which sync (`sync <account> on\|off`, `label <account> <name>`) |
 | `stradl config show` / `set` / `add` / `remove` | See or change settings without editing YAML |
 | `stradl claude restart` | Restart Claude so its sidebar shows what arrived |
 | `stradl diagnostics` | A troubleshooting report with secrets removed |

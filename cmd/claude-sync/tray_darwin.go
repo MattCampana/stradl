@@ -16,7 +16,11 @@ import (
 
 	"github.com/tawanorg/claude-sync/internal/agent"
 	"github.com/tawanorg/claude-sync/internal/agent/icon"
+	"github.com/tawanorg/claude-sync/internal/sync"
 )
+
+// maxMenuAccounts is how many Claude accounts the menu lists.
+const maxMenuAccounts = 8
 
 const trayAvailable = true
 
@@ -102,6 +106,32 @@ func runTray(opts agent.Options) error {
 		}
 		mSync := systray.AddMenuItem("Sync Now", "Sync with your other Macs now")
 		mPause := systray.AddMenuItem("Pause Syncing", "Stop syncing until you resume")
+		// Claude accounts, checked when their sessions sync (hidden until
+		// the agent has seen one).
+		mAccounts := systray.AddMenuItem("Claude Accounts", "Choose which accounts' sessions sync to your other Macs")
+		mAccounts.Hide()
+		var accountItems []*systray.MenuItem
+		var shownAccounts [maxMenuAccounts]sync.Account
+		var accountsMu gosync.Mutex
+		accountClicked := make(chan int, 1)
+		for i := 0; i < maxMenuAccounts; i++ {
+			item := mAccounts.AddSubMenuItemCheckbox("", "", false)
+			item.Hide()
+			accountItems = append(accountItems, item)
+			go func(i int, ch <-chan struct{}) {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ch:
+						select {
+						case accountClicked <- i:
+						default:
+						}
+					}
+				}
+			}(i, item.ClickedCh)
+		}
 		systray.AddSeparator()
 		mRestart := systray.AddMenuItem("Restart Claude", "Quit and reopen Claude so its sidebar shows sessions from your other Macs")
 		mRestart.Hide()
@@ -143,6 +173,37 @@ func runTray(opts agent.Options) error {
 				mRestart.Show()
 			} else {
 				mRestart.Hide()
+			}
+			if cfg, err := opts.LoadConfig(); err == nil {
+				list := sync.ListAccounts(cfg)
+				accountsMu.Lock()
+				for i, item := range accountItems {
+					if i >= len(list) {
+						item.Hide()
+						continue
+					}
+					a := list[i]
+					shownAccounts[i] = a
+					title := a.Name
+					if a.Active {
+						title += " (signed in)"
+					}
+					item.SetTitle(title)
+					if a.Sync == "off" {
+						item.Uncheck()
+						item.SetTooltip("Its sessions stay on the Mac they were made on. Click to sync them.")
+					} else {
+						item.Check()
+						item.SetTooltip("Its sessions sync to your other Macs. Click to keep them on each Mac.")
+					}
+					item.Show()
+				}
+				accountsMu.Unlock()
+				if len(list) > 0 {
+					mAccounts.Show()
+				} else {
+					mAccounts.Hide()
+				}
 			}
 		}
 		render()
@@ -204,6 +265,40 @@ func runTray(opts agent.Options) error {
 						case <-time.After(3 * time.Second):
 						}
 						r.RefreshDesktop(rctx)
+					}()
+				case i := <-accountClicked:
+					accountsMu.Lock()
+					a := shownAccounts[i]
+					accountsMu.Unlock()
+					if a.ID == "" {
+						continue
+					}
+					go func() {
+						cfg, err := opts.LoadConfig()
+						if err != nil {
+							logger.Printf("account choice: %v", err)
+							return
+						}
+						s, err := sync.NewSyncer(cfg, true)
+						if err != nil {
+							logger.Printf("account choice: %v", err)
+							return
+						}
+						actx, acancel := context.WithTimeout(ctx, time.Minute)
+						defer acancel()
+						on := a.Sync == "off"
+						if err := s.SetAccountSync(actx, a.ID, on, time.Now()); err != nil {
+							logger.Printf("account choice for %s: %v", a.Name, err)
+							notify("Stradl", "Couldn't change "+a.Name+": "+err.Error())
+							return
+						}
+						if on {
+							logger.Printf("account %s syncs now", a.Name)
+						} else {
+							logger.Printf("account %s stays on each Mac now", a.Name)
+						}
+						poke()
+						r.SyncNow()
 					}()
 				case <-appClicked:
 					if p, ok := appPath(); ok {

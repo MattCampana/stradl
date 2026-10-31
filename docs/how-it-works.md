@@ -127,6 +127,20 @@ path_map:
 # and on the other Mac:  ~/Projects: WORK
 ```
 
+## Claude accounts
+
+A Mac can be signed in to several Claude accounts over time. The desktop app keeps each account's sidebar under its own folder (`claude-code-sessions/<account>/<organization>/`), while `~/.claude`, transcripts included, is shared by all of them.
+
+Stradl keeps an account registry in your storage (`_metadata/accounts`, encrypted like everything else) for the whole Circle. It names each account (its email once a Mac has been signed in to it, or a name you give it), records whether it syncs, and which account each session and project folder belongs to:
+
+- A sidebar record says for certain: the folder it lives in names the account.
+- A session started in the terminal belongs to the account Claude Code was signed in to when this Mac wrote it. Sessions that came from another Mac, or synced before Stradl knew accounts, are never guessed at; they sync as before.
+- A project folder belongs to the accounts whose sessions work in it.
+
+An account you choose not to sync keeps its sidebar records, transcripts (with their subagents, file history and to-do lists) and the project folders only its sessions use on the Mac they were made on. Nothing is downloaded for it and nothing already in storage is deleted. A folder sessions of another account also use keeps syncing. The choice is the Circle's: the latest made on any Mac wins. An account nobody has chosen for yet syncs, as before.
+
+Never synced, whatever you choose: each Mac's sign-ins (credentials stay on each Mac) and the managed settings and policy limits of the organization a Mac is signed in to (`remote-settings.json`, `policy-limits.json`), which belong to that sign-in.
+
 ## The desktop sidebar
 
 The Claude desktop app keeps one small JSON record per Code-tab session, which points at a transcript (`cliSessionId`) and a working folder (`cwd`). It reads these records when it launches. Stradl syncs them like any other file, with paths and folders remapped for each Mac, so the same sessions appear in every Mac's sidebar.

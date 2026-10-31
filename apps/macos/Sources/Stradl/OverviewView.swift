@@ -9,6 +9,17 @@ struct OverviewView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     hero(o)
+                    let undecided = model.accounts.filter(\.undecided)
+                    if !undecided.isEmpty {
+                        Card(title: "Choose which Claude accounts sync", systemImage: "person.crop.circle.badge.questionmark") {
+                            Text(undecided.count == 1
+                                 ? "\(undecided[0].name) is new to your Circle. Its sessions sync to all your Macs until you choose."
+                                 : "\(undecided.count) Claude accounts are new to your Circle. Their sessions sync to all your Macs until you choose.")
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button("Choose…") { section = .accounts }
+                        }
+                    }
                     if let warnings = o.warnings, !warnings.isEmpty {
                         Card(title: "Needs your attention", systemImage: "exclamationmark.triangle") {
                             ForEach(warnings, id: \.self) { w in

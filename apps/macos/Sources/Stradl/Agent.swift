@@ -18,9 +18,14 @@ enum StradlCLI {
         var errorDescription: String? { message }
     }
 
-    /// The stradl executable: the installed one, else one bundled in the app.
+    /// The stradl executable: STRADL_CLI when set (for testing a build),
+    /// the installed one, else one bundled in the app.
     static var executable: URL? {
-        var candidates = [
+        var candidates: [URL] = []
+        if let override = ProcessInfo.processInfo.environment["STRADL_CLI"] {
+            candidates.append(URL(fileURLWithPath: override))
+        }
+        candidates += [
             StradlPaths.home.appendingPathComponent(".local/bin/stradl"),
             URL(fileURLWithPath: "/opt/homebrew/bin/stradl"),
             URL(fileURLWithPath: "/usr/local/bin/stradl"),
@@ -85,8 +90,8 @@ enum StradlCLI {
         }
     }
 
-    static func json<T: Decodable>(_ type: T.Type, _ args: [String]) async throws -> T {
-        try JSONDecoder.stradl.decode(T.self, from: try await run(args))
+    static func json<T: Decodable>(_ type: T.Type, _ args: [String], timeout: TimeInterval = 120) async throws -> T {
+        try JSONDecoder.stradl.decode(T.self, from: try await run(args, timeout: timeout))
     }
 }
 

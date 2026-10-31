@@ -70,9 +70,10 @@ func (s *Syncer) LocalFingerprint() (string, error) {
 // RemoteFingerprint summarizes the remote objects Sync would consider by key
 // and ETag, using a single List call. Objects outside this device's scope,
 // reserved metadata and keys with a path token this device can't map are
-// left out, as Sync ignores them too; the shared modes manifest and the
-// sidebar layout are included, so a chmod or a new sidebar group on another
-// Mac reaches this one promptly.
+// left out, as Sync ignores them too; the shared modes manifest, the
+// sidebar layout and the account registry are included, so a chmod, a new
+// sidebar group or an account choice on another Mac reaches this one
+// promptly.
 func (s *Syncer) RemoteFingerprint(ctx context.Context) (string, error) {
 	objects, err := s.storage.List(ctx, "")
 	if err != nil {
@@ -83,7 +84,9 @@ func (s *Syncer) RemoteFingerprint(ctx context.Context) (string, error) {
 	for _, obj := range objects {
 		np, ok, _ := s.npathForKey(obj.Key)
 		sidebar := obj.Key == SidebarRemoteKey && s.sidebarPath() != ""
-		if !ok && obj.Key != ModesManifestKey && !sidebar {
+		// The account registry: a choice made on another Mac changes what
+		// this one syncs.
+		if !ok && obj.Key != ModesManifestKey && !sidebar && obj.Key != AccountsKey {
 			continue
 		}
 		if ok {

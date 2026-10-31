@@ -168,6 +168,9 @@ func (s *Syncer) roots() []*syncRoot {
 			if strings.Contains(rel, ".conflict.") || isDeviceLocalFile(rel) || claudeDenied(rel) || s.isExcluded(rel) {
 				return false
 			}
+			if sid := claudeSession(rel); sid != "" && s.registry().sessionOff(sid) {
+				return false // a session of an account that doesn't sync
+			}
 			return !everything || !s.cfg.IsBuildArtifact(rel)
 		},
 		skipDir: func(rel string) bool {
@@ -178,7 +181,11 @@ func (s *Syncer) roots() []*syncRoot {
 		perm:  0600,
 	}}
 	if dir := s.cfg.EffectiveDesktopDir(); dir != "" && dirExists(dir) {
-		roots = append(roots, &syncRoot{dir: dir, prefix: DesktopPrefix, paths: []string{"."}, include: isDesktopRecord, kind: rootDesktop, label: "Claude sidebar", perm: 0600})
+		include := func(rel string) bool {
+			acct, _, _ := strings.Cut(rel, "/")
+			return isDesktopRecord(rel) && !s.registry().off(strings.ToLower(acct))
+		}
+		roots = append(roots, &syncRoot{dir: dir, prefix: DesktopPrefix, paths: []string{"."}, include: include, kind: rootDesktop, label: "Claude sidebar", perm: 0600})
 	}
 	return roots
 }
@@ -206,10 +213,13 @@ var claudeDeniedDirs = map[string]bool{
 }
 
 // claudeDenied reports ~/.claude paths that never sync whatever the scope:
-// the per-Mac folders above and login credentials, which stay on each Mac.
+// the per-Mac folders above, login credentials, which stay on each Mac, and
+// the managed settings and policy limits of the organization this Mac is
+// signed in to (another Mac may be signed in to another account).
 func claudeDenied(rel string) bool {
 	first, _, _ := strings.Cut(rel, "/")
-	return claudeDeniedDirs[first] || path.Base(rel) == ".credentials.json"
+	return claudeDeniedDirs[first] || path.Base(rel) == ".credentials.json" ||
+		strings.HasPrefix(rel, "policy-limits.json") || strings.HasPrefix(rel, "remote-settings.json")
 }
 
 // desktopReleasedSuffix marks a transcript the desktop app released after the
@@ -455,7 +465,13 @@ func (s *Syncer) reconcile(ctx context.Context, dryRun bool) (*SyncReport, error
 	if err := s.checkKey(ctx, objects, dryRun); err != nil {
 		return nil, err
 	}
+	if err := s.prepareAccounts(ctx, objects, dryRun); err != nil {
+		return nil, err
+	}
 	roots := s.syncRoots(objects, true)
+	if !dryRun {
+		s.noteFolderAccounts(ctx)
+	}
 
 	// Scan first: a project folder git is working in sits the pass out, and
 	// so does every repository inside it (folders before the ones they hold).

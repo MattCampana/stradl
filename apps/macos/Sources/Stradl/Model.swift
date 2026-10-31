@@ -160,6 +160,26 @@ struct AppConfig: Decodable, Equatable {
 }
 
 /// `stradl folders --json`
+/// A Claude account the Circle knows (`stradl accounts --json`).
+struct ClaudeAccount: Decodable, Identifiable, Hashable {
+    struct Org: Decodable, Hashable {
+        var id: String
+        var name: String?
+    }
+    var id: String
+    var email: String?
+    var label: String?
+    var name: String
+    var orgs: [Org]?
+    var sync: String          // "on", "off" or "ask" (not chosen yet; syncs)
+    var active: Bool          // Claude on this Mac is signed in to it
+    var here: Bool            // this Mac has sidebar sessions of it
+    var sessions: Int
+
+    var syncs: Bool { sync != "off" }
+    var undecided: Bool { sync == "ask" }
+}
+
 struct FolderStat: Decodable, Identifiable, Hashable {
     var path: String
     var abs: String

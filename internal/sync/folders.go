@@ -239,30 +239,57 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 		}
 	}
 	var candidates []string
-	seen := make(map[string]bool) // thousands of transcripts share a few folders
-	add := func(abs string) {
-		if abs == "" || seen[abs] {
-			return
+	seen := make(map[string]bool)    // thousands of transcripts share a few folders
+	canon := make(map[string]string) // ... so each is canonicalized once
+	add := func(abs string) string {
+		if abs == "" {
+			return ""
+		}
+		if rel, ok := canon[abs]; ok {
+			return rel
 		}
 		seen[abs] = true
-		if rel := s.canonicalFolderIn(abs, remoteRepos); rel != "" {
+		rel := s.canonicalFolderIn(abs, remoteRepos)
+		canon[abs] = rel
+		if rel != "" {
 			candidates = append(candidates, rel)
 		}
+		return rel
+	}
+	// Which accounts' sessions work in which folder (see
+	// AccountRegistry.Folders); sessions of an account that doesn't sync
+	// bring no folder.
+	reg := s.registry()
+	s.folderAccounts = make(map[string]map[string]bool)
+	note := func(rel, acct string) {
+		if rel == "" || acct == "" {
+			return
+		}
+		if s.folderAccounts[rel] == nil {
+			s.folderAccounts[rel] = make(map[string]bool)
+		}
+		s.folderAccounts[rel][acct] = true
 	}
 	fold := homeCaseInsensitive(s.home)
-	for _, cwd := range s.desktopCwds() {
-		add(cwd)
+	for _, rec := range s.localRecords() {
+		if reg.off(rec.Account) {
+			continue
+		}
+		note(add(rec.Cwd), rec.Account)
+		note(add(rec.OriginCwd), rec.Account)
 	}
 	first, later := s.transcriptCwds(useCache)
-	for _, cwd := range first {
-		add(cwd)
+	for _, c := range first {
+		if !reg.sessionOff(c.Session) {
+			note(add(c.Path), reg.Sessions[c.Session])
+		}
 	}
 	for _, p := range s.cfg.ExtraFolders {
 		add(p)
 	}
 	remote := make(map[string]bool)
 	for _, rel := range remoteFolderMarkers(objects) {
-		if c := s.canonicalFolderIn(filepath.Join(s.home, filepath.FromSlash(rel)), remoteRepos); c != "" {
+		if c := s.canonicalFolderIn(filepath.Join(s.home, filepath.FromSlash(rel)), remoteRepos); c != "" && !reg.folderOff(c) {
 			remote[c] = true
 			candidates = append(candidates, c)
 		}
@@ -271,8 +298,9 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	// counts inside a folder found above (a repository inside it, say); a
 	// cd anywhere else (into ~/.ssh) doesn't make a project folder.
 	primary := append([]string(nil), candidates...)
-	for _, p := range later {
-		if seen[p] || !filepath.IsAbs(p) {
+	for _, c := range later {
+		p := c.Path
+		if seen[p] || !filepath.IsAbs(p) || reg.sessionOff(c.Session) {
 			continue
 		}
 		p = filepath.Clean(p)
@@ -280,7 +308,7 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 		// and never through a link inside it (code/app/shared -> ../lib):
 		// that's the link's folder's business.
 		if top := enclosing(s.home, primary, p, fold); top != "" && !viaSymlink(top, p) {
-			add(p)
+			note(add(p), reg.Sessions[c.Session])
 		}
 	}
 	// The folders the last sync covered stay, so a folder whose sessions
@@ -291,6 +319,9 @@ func (s *Syncer) discoverFolders(objects []storage.ObjectInfo, useCache bool) []
 	sort.SliceStable(known, func(i, j int) bool { return strings.Count(known[i], "/") < strings.Count(known[j], "/") })
 	probe := objects == nil && !useCache // the agent's local probe: no markers to go by
 	for _, rel := range known {
+		if reg.folderOff(rel) {
+			continue // only sessions of accounts that don't sync work there
+		}
 		if probe || !insideAny(s.home, candidates, filepath.Join(s.home, filepath.FromSlash(rel)), fold) || containsFold(candidates, rel, fold) {
 			add(filepath.Join(s.home, filepath.FromSlash(rel)))
 		}
@@ -510,43 +541,18 @@ func remoteFolderMarkers(objects []storage.ObjectInfo) []string {
 	return out
 }
 
-// desktopCwds returns the working folders of this Mac's desktop sidebar
-// sessions (cwd and originCwd of every record).
-func (s *Syncer) desktopCwds() []string {
-	dir := s.cfg.EffectiveDesktopDir()
-	if dir == "" {
-		return nil
-	}
-	var out []string
-	matches, _ := filepath.Glob(filepath.Join(dir, "*", "*", "local_*.json"))
-	for _, m := range matches {
-		rel, err := filepath.Rel(dir, m)
-		if err != nil || !isDesktopRecord(filepath.ToSlash(rel)) {
-			continue
-		}
-		data, err := os.ReadFile(m)
-		if err != nil {
-			continue
-		}
-		var rec struct {
-			Cwd       string `json:"cwd"`
-			OriginCwd string `json:"originCwd"`
-		}
-		if json.Unmarshal(data, &rec) != nil {
-			continue
-		}
-		out = append(out, rec.Cwd, rec.OriginCwd)
-	}
-	return out
-}
-
 // transcriptCwds returns, for every transcript, the folder its session
 // started in (first) and every other folder it worked in: later working
 // folders and the folders of files its tools read or edited (later),
 // subagents' included. Results are cached in the sync state (useCache) and,
 // for the background agent's probes, in memory, so each transcript is read
 // once, and then only where it grew.
-func (s *Syncer) transcriptCwds(useCache bool) (first, later []string) {
+// sessionCwd is a folder a session worked in.
+type sessionCwd struct {
+	Path, Session string
+}
+
+func (s *Syncer) transcriptCwds(useCache bool) (first, later []sessionCwd) {
 	projects := filepath.Join(s.claudeDir, "projects")
 	dirs, err := os.ReadDir(projects)
 	if err != nil {
@@ -592,8 +598,9 @@ func (s *Syncer) transcriptCwds(useCache bool) (first, later []string) {
 					}
 					if info, err := a.Info(); err == nil {
 						e := read(filepath.Join(sub, a.Name()), "projects/"+d.Name()+"/"+name+"/subagents/"+a.Name(), info)
-						later = append(later, e.Cwds...)
-						later = append(later, e.touchedDirs()...)
+						for _, p := range append(append([]string(nil), e.Cwds...), e.touchedDirs()...) {
+							later = append(later, sessionCwd{p, name})
+						}
 					}
 				}
 				continue
@@ -606,11 +613,13 @@ func (s *Syncer) transcriptCwds(useCache bool) (first, later []string) {
 				continue
 			}
 			e := read(filepath.Join(projects, d.Name(), name), "projects/"+d.Name()+"/"+name, info)
+			sid := strings.TrimSuffix(name, ".jsonl")
 			if len(e.Cwds) > 0 {
-				first = append(first, e.Cwds[0])
-				later = append(later, e.Cwds[1:]...)
+				first = append(first, sessionCwd{e.Cwds[0], sid})
 			}
-			later = append(later, e.touchedDirs()...)
+			for _, p := range append(append([]string(nil), e.Cwds[min(1, len(e.Cwds)):]...), e.touchedDirs()...) {
+				later = append(later, sessionCwd{p, sid})
+			}
 		}
 	}
 	if useCache && s.state != nil {

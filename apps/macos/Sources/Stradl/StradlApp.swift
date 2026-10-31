@@ -50,6 +50,7 @@ enum Pane: String, CaseIterable, Identifiable {
     case overview = "Overview"
     case circle = "Circle"
     case sessions = "Sessions"
+    case accounts = "Accounts"
     case folders = "Folders"
     case activity = "Next Sync"
     case settings = "Settings"
@@ -62,6 +63,7 @@ enum Pane: String, CaseIterable, Identifiable {
         case .overview: return "gauge.with.dots.needle.33percent"
         case .circle: return "person.3.sequence"
         case .sessions: return "bubble.left.and.text.bubble.right"
+        case .accounts: return "person.crop.circle.badge.checkmark"
         case .folders: return "folder"
         case .activity: return "arrow.triangle.2.circlepath"
         case .settings: return "gearshape"
@@ -92,6 +94,7 @@ struct ContentView: View {
                     case .overview: OverviewView(section: $model.pane)
                     case .circle: CircleView()
                     case .sessions: SessionsView()
+                    case .accounts: AccountsView()
                     case .folders: FoldersView()
                     case .activity: ActivityView()
                     case .settings: ScrollView { SettingsForm().padding(24) }
@@ -126,6 +129,7 @@ struct ContentView: View {
         switch s {
         case .circle: return model.overview?.devices.count ?? 0
         case .activity: return model.overview?.pending.total ?? 0
+        case .accounts: return model.accounts.filter(\.undecided).count
         default: return 0
         }
     }
