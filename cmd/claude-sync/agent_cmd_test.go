@@ -227,3 +227,13 @@ func TestAgentPauseCommand(t *testing.T) {
 		t.Fatal("resume did not remove the flag")
 	}
 }
+
+// The menu bar reads the config through Options.LoadConfig (NewRunner only
+// fills its own copy), so the agent's options must carry one: without it
+// v2.5.0 and v2.5.1 crashed at launch.
+func TestAgentOptionsCarryAConfigLoader(t *testing.T) {
+	o := agentOptions(agent.Paths{}, nil)
+	if o.LoadConfig == nil {
+		t.Fatal("the agent's options have no LoadConfig; the menu bar would crash")
+	}
+}

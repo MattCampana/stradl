@@ -126,7 +126,10 @@ struct ContentView: View {
         // A Claude account new to the Circle (just signed in to): name it
         // and choose whether it syncs before anything else.
         .sheet(item: Binding(get: { model.newAccount }, set: { _ in })) { account in
-            NewAccountSheet(account: account).environmentObject(model)
+            // One sheet per account: when the next new account takes this
+            // one's place, its nickname field starts empty, not with the
+            // name typed for the last one.
+            NewAccountSheet(account: account).environmentObject(model).id(account.id)
         }
     }
 

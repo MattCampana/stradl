@@ -18,6 +18,7 @@ import (
 
 	"github.com/tawanorg/claude-sync/internal/agent"
 	"github.com/tawanorg/claude-sync/internal/agent/icon"
+	"github.com/tawanorg/claude-sync/internal/config"
 	"github.com/tawanorg/claude-sync/internal/sync"
 )
 
@@ -35,6 +36,9 @@ const statusRefresh = 15 * time.Second
 // KeepAlive (SuccessfulExit=false) treats as "stay stopped".
 func runTray(opts agent.Options) error {
 	logger := opts.Log
+	if opts.LoadConfig == nil {
+		opts.LoadConfig = agent.ConfigLoader(config.ConfigFilePath(), config.Load)
+	}
 	go ensureAppInstalled(logger)
 	app := agent.NewDesktopApp()
 	// Restart Claude applies sidebar changes from other Macs in the moment

@@ -96,12 +96,7 @@ waits for the first to stop and then takes over.`,
 				w = io.MultiWriter(logFile, os.Stdout)
 			}
 
-			opts := agent.Options{
-				Paths:   p,
-				Version: version,
-				Device:  deviceName(),
-				Log:     agent.NewLogger(w),
-			}
+			opts := agentOptions(p, agent.NewLogger(w))
 			if runtime.GOOS == "darwin" {
 				opts.AppStart = agent.NewDesktopApp().StartTime
 				logger := opts.Log
@@ -115,6 +110,18 @@ waits for the first to stop and then takes over.`,
 	}
 	cmd.Flags().BoolVar(&headless, "headless", false, "Run without the menu bar icon")
 	return cmd
+}
+
+// agentOptions returns the agent's options. LoadConfig is set here, not left
+// to NewRunner's default: the menu bar reads the config through it too.
+func agentOptions(p agent.Paths, log *agent.Logger) agent.Options {
+	return agent.Options{
+		Paths:      p,
+		Version:    version,
+		Device:     deviceName(),
+		Log:        log,
+		LoadConfig: agent.ConfigLoader(config.ConfigFilePath(), config.Load),
+	}
 }
 
 // agentLockPoll is how often a second agent checks whether the first one
