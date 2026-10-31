@@ -11,6 +11,8 @@ final class AppModel: ObservableObject {
     @Published var configError: String?
     @Published var folders: [FolderStat] = []
     @Published var accounts: [ClaudeAccount] = []
+    /// Whether the per-account Claude launchers are in ~/Applications.
+    @Published var launchersDeployed = LauncherApps.deployed()
     @Published var heldSessions: [HeldSession] = []
     @Published var busy: Set<String> = []     // actions in flight, by name
     @Published var message: Banner?           // last action's outcome
@@ -261,10 +263,33 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Adds a Claude app per account to ~/Applications.
-    func addClaudeLaunchers() {
-        perform("launchers", success: "Added a Claude app for each account to your Applications folder, for Launchpad, Spotlight and the Dock.", refresh: false) {
-            try await StradlCLI.run(["profile", "launchers"], timeout: 60)
+    /// Puts a Claude app per account in ~/Applications, each icon showing the
+    /// account's name on its color. Once there, they follow names, colors
+    /// and new accounts by themselves.
+    func deployLaunchers() {
+        let again = launchersDeployed
+        perform("launchers", success: again ? "Launchers updated." : "Added a Claude app for each account to your Applications folder, for Launchpad, Spotlight and the Dock. They update by themselves from now on.", refresh: false) {
+            try await StradlCLI.run(["profile", "launchers"], timeout: 120)
+            await MainActor.run { self.launchersDeployed = LauncherApps.deployed() }
+        }
+    }
+
+    func removeLaunchers() {
+        perform("launchers", success: "Removed the Claude launchers from your Applications folder.", refresh: false) {
+            try await StradlCLI.run(["profile", "launchers", "--remove"], timeout: 60)
+            await MainActor.run { self.launchersDeployed = LauncherApps.deployed() }
+        }
+    }
+
+    /// Chooses the color of an account's launcher band; deployed launchers
+    /// are redrawn.
+    func setAccountColor(_ account: ClaudeAccount, _ hex: String) {
+        if let i = accounts.firstIndex(where: { $0.id == account.id }) {
+            accounts[i].color = hex // show it at once
+        }
+        perform("color:\(account.id)", refresh: false) {
+            try await StradlCLI.run(["profile", "color", account.id, hex], timeout: 120)
+            await self.refreshAccounts()
         }
     }
 

@@ -233,6 +233,10 @@ func accountsLabelCmd() *cobra.Command {
 			if err := s.SetAccountLabel(ctx, a.ID, args[1], time.Now()); err != nil {
 				return err
 			}
+			// Its launcher shows the name: redraw it (when deployed).
+			if _, err := redeployLaunchers(cfg); err != nil {
+				printWarning("Named, but the launchers weren't updated: " + err.Error())
+			}
 			fmt.Printf("%s✓%s Named %s\n", colorGreen, colorReset, a.ID)
 			return nil
 		},

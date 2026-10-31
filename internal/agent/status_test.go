@@ -461,6 +461,9 @@ func TestDesktopAppRestartReopensEachProfile(t *testing.T) {
 }
 
 func TestLaunchersAreStradlsOwn(t *testing.T) {
+	old := refreshIcon
+	refreshIcon = func(string) {}
+	t.Cleanup(func() { refreshIcon = old })
 	dir := t.TempDir()
 	other := filepath.Join(dir, "Claude (Mine).app", "Contents")
 	if err := os.MkdirAll(other, 0755); err != nil {

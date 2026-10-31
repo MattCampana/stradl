@@ -21,13 +21,24 @@ struct AccountsView: View {
                     }
                     .disabled(model.busy.contains("open:new"))
                     .help("Open a new Claude profile and sign in to another account there")
-                    Button { model.addClaudeLaunchers() } label: {
-                        Label("Add to Applications", systemImage: "square.grid.2x2")
+                    Button { model.deployLaunchers() } label: {
+                        Label(model.launchersDeployed ? "Redeploy Launchers" : "Deploy Launchers", systemImage: "square.and.arrow.down.on.square")
                     }
                     .disabled(model.busy.contains("launchers") || model.accounts.isEmpty)
-                    .help("Add a Claude app for each account to ~/Applications, for Launchpad, Spotlight and the Dock")
+                    .help("Put a Claude app for each account in Applications, its icon showing the account's name on its color")
+                    if model.launchersDeployed {
+                        Button("Remove") { model.removeLaunchers() }
+                            .disabled(model.busy.contains("launchers"))
+                            .help("Take the Claude launchers out of Applications")
+                    }
                 }
                 .controlSize(.small)
+                Text(model.launchersDeployed
+                     ? "Launchers are in Applications, one per account, plus Claude (Choose Account). They follow names, colors and new accounts by themselves."
+                     : "Deploy Launchers puts a Claude app for each account in Applications (Launchpad, Spotlight, the Dock), its icon showing the account's name on its color.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if !model.heldSessions.isEmpty {
                     Card(title: "\(model.heldSessions.count.plural("session")) waiting for an account", systemImage: "hourglass") {
                         Text("Stradl can't tell which account these sessions on this Mac belong to (they were written before Stradl knew this Mac's sign-ins, or while switching accounts), so they don't sync while an account is kept on each Mac.")
@@ -72,7 +83,8 @@ struct AccountsView: View {
                                        opening: model.busy.contains("open:\(a.id)"),
                                        setSync: { on in model.setAccountSync(a, on) },
                                        setLabel: { label in model.setAccountLabel(a, label) },
-                                       open: { model.openClaude(as: a) })
+                                       open: { model.openClaude(as: a) },
+                                       setColor: { hex in model.setAccountColor(a, hex) })
                         }
                     }
                     .background(.background, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -84,7 +96,10 @@ struct AccountsView: View {
             }
             .padding(24)
         }
-        .task { await model.refreshAccounts(fromStorage: true) }
+        .task {
+            model.launchersDeployed = LauncherApps.deployed()
+            await model.refreshAccounts(fromStorage: true)
+        }
     }
 }
 
@@ -96,15 +111,24 @@ struct AccountRow: View {
     var setSync: (Bool) -> Void
     var setLabel: (String) -> Void
     var open: () -> Void
+    var setColor: (String) -> Void
     @State private var naming = false
+    @State private var coloring = false
     @State private var draft = ""
 
     var body: some View {
         HStack(spacing: 12) {
-            Image(systemName: account.active ? "person.crop.circle.fill" : "person.crop.circle")
-                .font(.system(size: 20))
-                .foregroundStyle(account.syncs ? Color.accentColor : .secondary)
-                .frame(width: 28)
+            Button { coloring = true } label: {
+                LauncherPreview(color: account.color.flatMap(Color.init(hex:)) ?? .accentColor)
+            }
+            .buttonStyle(.plain)
+            .help("Its launcher's color: click to choose")
+            .popover(isPresented: $coloring) {
+                LauncherColorPicker(current: account.color) { hex in
+                    coloring = false
+                    setColor(hex)
+                }
+            }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(account.name).lineLimit(1).truncationMode(.middle)

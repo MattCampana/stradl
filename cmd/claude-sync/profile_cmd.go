@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,7 +60,7 @@ at once.`,
 		RunE:  func(cmd *cobra.Command, args []string) error { return listProfiles(asJSON) },
 	}
 	list.Flags().BoolVar(&asJSON, "json", false, "print JSON")
-	cmd.AddCommand(list, openCmd(), profileNewCmd(), profileConvertCmd(), profileLaunchersCmd())
+	cmd.AddCommand(list, openCmd(), profileNewCmd(), profileConvertCmd(), profileLaunchersCmd(), profileColorCmd())
 	return cmd
 }
 
@@ -356,49 +357,40 @@ func accountName(cfg *config.Config, id string) string {
 }
 
 func profileLaunchersCmd() *cobra.Command {
-	var remove bool
+	var remove, asJSON bool
 	cmd := &cobra.Command{
 		Use:   "launchers",
 		Short: "Add a Claude app for each account to ~/Applications",
 		Long: `Add small apps to ~/Applications that open Claude signed in to an account:
-"Claude (<account>)" for each, and "Claude (Choose Account)", which asks.
-They show in Launchpad, Spotlight and the Dock like any app. Run it again
-after naming or adding accounts; --remove takes them away.`,
+"Claude (<account>)" for each, its icon showing the account's name on a band
+of its color, and "Claude (Choose Account)", which asks. They show in
+Launchpad, Spotlight and the Dock like any app. Once they are there, naming
+an account, changing its color ('stradl profile color') or a new account
+updates them by itself. --remove takes them away.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load()
 			if err != nil {
 				return err
 			}
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return err
-			}
-			dir := filepath.Join(home, "Applications")
 			if remove {
-				n, err := agent.RemoveLaunchers(dir)
+				n, err := agent.RemoveLaunchers(launchersDir())
 				if err != nil {
 					return err
 				}
+				_ = profiles.FromConfig(cfg).SetDeployed(nil)
 				printSuccess(fmt.Sprintf("Removed %d Claude launchers", n))
 				return nil
 			}
-			exe, err := os.Executable()
+			made, err := deployLaunchers(cfg)
 			if err != nil {
 				return err
 			}
-			if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-				exe = resolved
-			}
-			var ls []agent.Launcher
-			for _, a := range sync.ListAccounts(cfg) {
-				ls = append(ls, agent.Launcher{Name: "Claude (" + a.Name + ")", ID: a.ID, Args: []string{"open", a.ID}})
-			}
-			ls = append(ls, agent.Launcher{Name: "Claude (Choose Account)", ID: "choose", Args: []string{"open"}})
-			icon := claudeIcon()
-			made, err := agent.WriteLaunchers(dir, exe, icon, ls)
-			if err != nil {
-				return err
+			if asJSON {
+				if made == nil {
+					made = []string{}
+				}
+				return printJSON(made)
 			}
 			for _, m := range made {
 				printSuccess("Added " + filepath.Join("~/Applications", filepath.Base(m)))
@@ -407,7 +399,103 @@ after naming or adding accounts; --remove takes them away.`,
 		},
 	}
 	cmd.Flags().BoolVar(&remove, "remove", false, "remove the launchers Stradl added")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the launchers written as JSON")
 	return cmd
+}
+
+// launchersDir is ~/Applications, where the launchers go.
+func launchersDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Applications")
+}
+
+// launcherPlan returns the launchers every account gets and, per account,
+// what its launcher shows ("name|color"), to tell when they need redrawing.
+func launcherPlan(cfg *config.Config) ([]agent.Launcher, map[string]string) {
+	accounts := sync.ListAccounts(cfg)
+	ids := make([]string, len(accounts))
+	for i, a := range accounts {
+		ids[i] = a.ID
+	}
+	colors := profiles.FromConfig(cfg).Colors(ids)
+	var ls []agent.Launcher
+	shows := make(map[string]string, len(accounts))
+	for _, a := range accounts {
+		badge := profiles.BadgeName(a.Label, a.Email, a.ID)
+		ls = append(ls, agent.Launcher{Name: "Claude (" + a.Name + ")", ID: a.ID, Args: []string{"open", a.ID}, Badge: badge, Color: colors[a.ID]})
+		shows[a.ID] = a.Name + "|" + badge + "|" + colors[a.ID]
+	}
+	ls = append(ls, agent.Launcher{Name: "Claude (Choose Account)", ID: "choose", Args: []string{"open"}})
+	return ls, shows
+}
+
+// deployLaunchers writes every account's launcher to ~/Applications and
+// records what they show.
+func deployLaunchers(cfg *config.Config) ([]string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	ls, shows := launcherPlan(cfg)
+	made, err := agent.WriteLaunchers(launchersDir(), exe, claudeIcon(), ls)
+	if err != nil {
+		return made, err
+	}
+	return made, profiles.FromConfig(cfg).SetDeployed(shows)
+}
+
+// launchersStale reports whether launchers were deployed and what they
+// should show changed since (a name, a color, an account).
+func launchersStale(cfg *config.Config) bool {
+	deployed := profiles.FromConfig(cfg).Deployed()
+	if len(deployed) == 0 || !agent.LaunchersDeployed(launchersDir()) {
+		return false
+	}
+	_, shows := launcherPlan(cfg)
+	return !maps.Equal(shows, deployed)
+}
+
+// redeployLaunchers updates the launchers when they are stale (see
+// launchersStale). It reports whether it redeployed.
+func redeployLaunchers(cfg *config.Config) (bool, error) {
+	if !launchersStale(cfg) {
+		return false, nil
+	}
+	_, err := deployLaunchers(cfg)
+	return err == nil, err
+}
+
+func profileColorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "color <account> <color>",
+		Short: "Choose the color of an account's launcher (#RRGGBB or a name)",
+		Long: `Choose the color of the band on an account's launcher icon: #RRGGBB, or one
+of pink, violet, azure, teal, amber, coral, lime, magenta. Launchers already
+in ~/Applications are redrawn.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			a, err := sync.FindAccount(sync.ListAccounts(cfg), args[0])
+			if err != nil {
+				return err
+			}
+			hex, err := profiles.FromConfig(cfg).SetColor(a.ID, args[1])
+			if err != nil {
+				return err
+			}
+			if _, err := redeployLaunchers(cfg); err != nil {
+				return fmt.Errorf("color saved, but the launchers weren't updated: %w", err)
+			}
+			printSuccess(fmt.Sprintf("%s's launcher is %s", a.Name, hex))
+			return nil
+		},
+	}
 }
 
 // claudeIcon returns the Claude app's icon file, "" when not found.

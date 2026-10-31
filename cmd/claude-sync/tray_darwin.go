@@ -181,6 +181,7 @@ func runTray(opts agent.Options) error {
 		}()
 
 		var restarting atomic.Bool
+		var launchersBusy atomic.Bool
 		render := func() {
 			s := r.Snapshot()
 			s.Paused = agent.IsPaused(p) // the flag is the truth, even mid-sync
@@ -243,6 +244,20 @@ func runTray(opts agent.Options) error {
 						item.SetTooltip("Its sessions sync to your other Macs. Click to keep them on each Mac.")
 					}
 					item.Show()
+				}
+				// Launchers in ~/Applications follow names, colors and new
+				// accounts by themselves once deployed.
+				if launchersBusy.CompareAndSwap(false, true) {
+					go func() {
+						defer launchersBusy.Store(false)
+						if launchersStale(cfg) {
+							if err := trayRun(ctx, "profile", "launchers"); err != nil {
+								logger.Printf("Claude launchers: %v", err)
+							} else {
+								logger.Printf("Claude launchers updated")
+							}
+						}
+					}()
 				}
 				for i, item := range openItems {
 					if i >= len(list) {

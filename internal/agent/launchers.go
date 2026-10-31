@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -15,11 +16,14 @@ import (
 // marks its own (StradlLauncher in Info.plist) and never touches any other.
 
 // Launcher is one launcher app: its name, a stable ID for its bundle
-// identifier, and the stradl arguments it runs.
+// identifier, and the stradl arguments it runs. Its icon is the app icon
+// with Badge on a band of Color (#RRGGBB); without them, the plain app icon.
 type Launcher struct {
-	Name string
-	ID   string
-	Args []string
+	Name  string
+	ID    string
+	Args  []string
+	Badge string
+	Color string
 }
 
 const launcherMark = "StradlLauncher"
@@ -85,10 +89,18 @@ func writeLauncher(app, exe, icon string, l Launcher) error {
 		return err
 	}
 	iconKey := ""
+	if err := os.MkdirAll(filepath.Join(tmp, "Contents", "Resources"), 0755); err != nil {
+		return err
+	}
+	work, err := os.MkdirTemp("", "stradl-icon-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(work)
+	if drawn := launcherIcon(work, l); drawn != "" {
+		icon = drawn // the account's own icon; icon is the fallback
+	}
 	if icon != "" {
-		if err := os.MkdirAll(filepath.Join(tmp, "Contents", "Resources"), 0755); err != nil {
-			return err
-		}
 		if err := copyPlain(icon, filepath.Join(tmp, "Contents", "Resources", "AppIcon.icns")); err == nil {
 			iconKey = "\t<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>\n"
 		}
@@ -132,7 +144,26 @@ func writeLauncher(app, exe, icon string, l Launcher) error {
 	if err := os.Rename(tmp, app); err != nil {
 		return fmt.Errorf("failed to add %s: %w", filepath.Base(app), err)
 	}
+	// Finder and the Dock cache icons by bundle: re-register it so a new
+	// color or name shows at once. Best effort.
+	refreshIcon(app)
 	return nil
+}
+
+// refreshIcon re-registers a launcher with Launch Services. Tests replace it.
+var refreshIcon = func(app string) { _ = exec.Command(lsregister, "-f", app).Run() }
+
+const lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+
+// LaunchersDeployed reports whether dir holds any launcher Stradl wrote.
+func LaunchersDeployed(dir string) bool {
+	apps, _ := filepath.Glob(filepath.Join(dir, "*.app"))
+	for _, app := range apps {
+		if isLauncher(app) {
+			return true
+		}
+	}
+	return false
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

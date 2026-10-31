@@ -180,6 +180,9 @@ struct ClaudeAccount: Decodable, Identifiable, Hashable {
     var signIn: Bool?         // that profile still needs its first sign-in
     var open: Bool?           // a Claude window is open for it
 
+    var color: String?        // the band on its launcher's icon (#RRGGBB)
+    var badge: String?        // the name on that band
+
     var needsSignIn: Bool { signIn == true || profile == nil }
     var isOpen: Bool { open == true }
 

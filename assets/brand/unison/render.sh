@@ -9,6 +9,7 @@ tool="$(mktemp -d)/svgpng"
 swiftc -O -o "$tool" "$here/svgpng.swift"
 "$tool" "$here/appicon.svg" "$root/assets/brand/appicon-1024.png" 1024
 "$tool" "$here/appicon.svg" "$root/assets/brand/appicon-512.png" 512
+cp "$root/assets/brand/appicon-1024.png" "$root/internal/agent/launcher-base.png"
 "$tool" "$here/glyph.svg" "$root/internal/agent/icon/menubar.png" 22 2
 "$tool" "$here/glyph.svg" "$root/internal/agent/icon/menubar@2x.png" 44 4
 "$tool" "$here/glyph.svg" "$root/assets/brand/menubar-16.png" 16 1

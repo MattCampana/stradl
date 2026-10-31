@@ -283,3 +283,42 @@ func TestANewProfileStartsFromTheMainLayoutsBase(t *testing.T) {
 		t.Fatal("a base without the preferences it belongs to")
 	}
 }
+
+func TestLauncherColorsStayPutAndAccountsGetUnusedOnes(t *testing.T) {
+	e := testEnv(t)
+	got := e.Colors([]string{judge, bp})
+	if got[judge] != Palette[0].Hex || got[bp] != Palette[1].Hex { // in ID order: 53… before c0…
+		t.Fatalf("first colors = %v", got)
+	}
+	if _, err := e.SetColor(bp, "teal"); err != nil {
+		t.Fatal(err)
+	}
+	// A new account takes the first color nobody has; the others keep theirs.
+	got = e.Colors([]string{bp, judge, owd})
+	if got[bp] != "#19C39C" || got[judge] != Palette[0].Hex || got[owd] != Palette[1].Hex {
+		t.Fatalf("colors = %v", got)
+	}
+	for in, want := range map[string]string{"#abc": "#AABBCC", "ff3d9a": "#FF3D9A", "Amber": "#FFB020"} {
+		if c, err := ParseColor(in); err != nil || c != want {
+			t.Fatalf("ParseColor(%q) = %q %v, want %s", in, c, err, want)
+		}
+	}
+	if _, err := ParseColor("blurple"); err == nil {
+		t.Fatal("a made-up color was accepted")
+	}
+}
+
+func TestBadgeNames(t *testing.T) {
+	for _, c := range []struct{ label, email, want string }{
+		{"Work", "x@judge.com", "Work"},
+		{"", "mcampana@judge.com", "Judge"},
+		{"", "mattcampana@owd.com", "OWD"},
+		{"", "matt@breakpointdata.com", "Breakpointdata"},
+		{"", "someone@gmail.com", "Someone"},
+		{"", "", "53d94190"},
+	} {
+		if got := BadgeName(c.label, c.email, judge); got != c.want {
+			t.Fatalf("BadgeName(%q, %q) = %q, want %q", c.label, c.email, got, c.want)
+		}
+	}
+}

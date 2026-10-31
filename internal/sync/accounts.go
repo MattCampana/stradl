@@ -1188,6 +1188,10 @@ type Account struct {
 	Profile string `json:"profile,omitempty"`
 	SignIn  bool   `json:"signIn,omitempty"`
 	Open    bool   `json:"open,omitempty"`
+	// Color is the band on its launcher's icon (#RRGGBB; this Mac's
+	// choice, see profiles.Env.Colors), and Badge the name on it.
+	Color string `json:"color,omitempty"`
+	Badge string `json:"badge,omitempty"`
 }
 
 // AccountOrg is an organization an account has sessions in.
@@ -1245,6 +1249,15 @@ func (s *Syncer) accountList(reg *AccountRegistry) []Account {
 		}
 		sort.Slice(acc.Orgs, func(i, j int) bool { return acc.Orgs[i].ID < acc.Orgs[j].ID })
 		out = append(out, acc)
+	}
+	ids := make([]string, len(out))
+	for i, a := range out {
+		ids[i] = a.ID
+	}
+	colors := profiles.FromConfig(s.cfg).Colors(ids)
+	for i := range out {
+		out[i].Color = colors[out[i].ID]
+		out[i].Badge = profiles.BadgeName(out[i].Label, out[i].Email, out[i].ID)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Active != out[j].Active {
